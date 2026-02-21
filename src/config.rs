@@ -23,7 +23,18 @@ fn default_interactive() -> bool {
 }
 
 fn default_datadir() -> PathBuf {
-    PathBuf::from("/var/lib/sdme")
+    if crate::is_privileged() {
+        PathBuf::from("/var/lib/sdme")
+    } else {
+        let base = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+            PathBuf::from(xdg)
+        } else if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(home).join(".local").join("share")
+        } else {
+            PathBuf::from("/var/lib/sdme")
+        };
+        base.join("sdme")
+    }
 }
 
 impl Default for Config {
@@ -43,7 +54,18 @@ impl Config {
     }
 }
 
+fn sudo_user_config_path() -> Option<PathBuf> {
+    let su = crate::sudo_user()?;
+    Some(su.home.join(".config").join("sdme").join("sdmerc"))
+}
+
 pub fn config_path() -> Result<PathBuf> {
+    // When running under sudo, prefer the invoking user's config if it exists.
+    if let Some(path) = sudo_user_config_path() {
+        if path.exists() {
+            return Ok(path);
+        }
+    }
     let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         PathBuf::from(xdg)
     } else {
@@ -129,7 +151,12 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert!(config.interactive);
-        assert_eq!(config.datadir, PathBuf::from("/var/lib/sdme"));
+        if crate::is_privileged() {
+            assert_eq!(config.datadir, PathBuf::from("/var/lib/sdme"));
+        } else {
+            // Rootless default is under XDG_DATA_HOME or ~/.local/share.
+            assert!(config.datadir.ends_with("sdme"));
+        }
     }
 
     #[test]
@@ -202,5 +229,23 @@ mod tests {
         let _tmp = TempConfig::new();
         let path = config_path().unwrap();
         assert!(path.ends_with("sdme/sdmerc"));
+    }
+
+    #[test]
+    fn test_sudo_user_config_path_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("SUDO_USER");
+        assert!(sudo_user_config_path().is_none());
+    }
+
+    #[test]
+    fn test_sudo_user_config_path_valid() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let user = std::env::var("USER").unwrap();
+        std::env::set_var("SUDO_USER", &user);
+        let path = sudo_user_config_path();
+        std::env::remove_var("SUDO_USER");
+        let path = path.expect("should resolve for current user");
+        assert!(path.ends_with(".config/sdme/sdmerc"));
     }
 }
