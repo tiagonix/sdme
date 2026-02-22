@@ -14,10 +14,20 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::{State, validate_name};
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+fn check_interrupted() -> Result<()> {
+    if INTERRUPTED.load(Ordering::Relaxed) {
+        bail!("interrupted");
+    }
+    Ok(())
+}
 
 // --- Source detection ---
 
@@ -113,9 +123,17 @@ fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<()> {
     archive.set_preserve_permissions(true);
     archive.set_preserve_ownerships(true);
     archive.set_unpack_xattrs(true);
-    archive
-        .unpack(dest)
-        .with_context(|| format!("failed to extract tarball to {}", dest.display()))?;
+    for entry in archive.entries().with_context(|| {
+        format!("failed to extract tarball to {}", dest.display())
+    })? {
+        check_interrupted()?;
+        let mut entry = entry.with_context(|| {
+            format!("failed to extract tarball to {}", dest.display())
+        })?;
+        entry.unpack_in(dest).with_context(|| {
+            format!("failed to extract tarball to {}", dest.display())
+        })?;
+    }
     Ok(())
 }
 
@@ -269,6 +287,7 @@ fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: bool) -> Resul
 
     // Extract layers in order.
     for (i, layer) in manifest.layers.iter().enumerate() {
+        check_interrupted()?;
         let blob_path = resolve_blob(oci_dir, &layer.digest)?;
         if verbose {
             eprintln!(
@@ -321,6 +340,7 @@ fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
     archive.set_unpack_xattrs(true);
 
     for entry in archive.entries().context("failed to read tar entries")? {
+        check_interrupted()?;
         let mut entry = entry.context("failed to read tar entry")?;
         let path = entry.path().context("failed to read entry path")?.into_owned();
 
@@ -400,6 +420,7 @@ fn copy_tree(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result<()> {
         .with_context(|| format!("failed to read directory {}", src_dir.display()))?;
 
     for entry in entries {
+        check_interrupted()?;
         let entry =
             entry.with_context(|| format!("failed to read entry in {}", src_dir.display()))?;
         let src_path = entry.path();
@@ -690,11 +711,23 @@ fn download_file(url: &str, dest: &Path, verbose: bool) -> Result<()> {
     let mut file =
         fs::File::create(dest).with_context(|| format!("failed to create {}", dest.display()))?;
 
-    let bytes = std::io::copy(&mut reader, &mut file)
-        .with_context(|| format!("failed to write download to {}", dest.display()))?;
+    let mut buf = [0u8; 65536];
+    let mut total: u64 = 0;
+    loop {
+        check_interrupted()?;
+        let n = reader
+            .read(&mut buf)
+            .with_context(|| format!("failed to read from {url}"))?;
+        if n == 0 {
+            break;
+        }
+        std::io::Write::write_all(&mut file, &buf[..n])
+            .with_context(|| format!("failed to write download to {}", dest.display()))?;
+        total += n as u64;
+    }
 
     if verbose {
-        eprintln!("downloaded {} bytes to {}", bytes, dest.display());
+        eprintln!("downloaded {} bytes to {}", total, dest.display());
     }
 
     Ok(())
@@ -722,6 +755,76 @@ fn import_url(
 }
 
 // --- QCOW2 import ---
+
+/// RAII guard for an NBD device connection. Disconnects on drop.
+struct NbdGuard {
+    device: PathBuf,
+    active: bool,
+}
+
+impl NbdGuard {
+    fn new() -> Self {
+        Self {
+            device: PathBuf::new(),
+            active: false,
+        }
+    }
+
+    fn set_active(&mut self, device: PathBuf) {
+        self.device = device;
+        self.active = true;
+    }
+
+    fn disconnect(&mut self) {
+        if self.active {
+            let _ = Command::new("qemu-nbd")
+                .args(["--disconnect"])
+                .arg(&self.device)
+                .status();
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for NbdGuard {
+    fn drop(&mut self) {
+        self.disconnect();
+    }
+}
+
+/// RAII guard for a mount point. Unmounts and removes the directory on drop.
+struct MountGuard {
+    path: PathBuf,
+    mounted: bool,
+}
+
+impl MountGuard {
+    fn new() -> Self {
+        Self {
+            path: PathBuf::new(),
+            mounted: false,
+        }
+    }
+
+    fn set_mounted(&mut self, path: PathBuf) {
+        self.path = path;
+        self.mounted = true;
+    }
+
+    fn unmount(&mut self) {
+        if self.mounted {
+            let _ = Command::new("umount").arg(&self.path).status();
+            let _ = fs::remove_dir(&self.path);
+            self.mounted = false;
+        }
+    }
+}
+
+impl Drop for MountGuard {
+    fn drop(&mut self) {
+        self.unmount();
+    }
+}
 
 /// Import a QCOW2 disk image by mounting it via qemu-nbd and copying the filesystem tree.
 ///
@@ -757,7 +860,10 @@ fn import_qcow2(image: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
         eprintln!("using nbd device: {}", nbd_dev.display());
     }
 
-    // Connect the image. Everything after this point must disconnect on cleanup.
+    let mut nbd_guard = NbdGuard::new();
+    let mut mount_guard = MountGuard::new();
+
+    // Connect the image. The guard ensures disconnect on any exit path.
     let status = Command::new("qemu-nbd")
         .args(["--read-only", "--connect"])
         .arg(&nbd_dev)
@@ -767,78 +873,61 @@ fn import_qcow2(image: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
     if !status.success() {
         bail!("qemu-nbd --connect failed for {}", image.display());
     }
+    nbd_guard.set_active(nbd_dev.clone());
 
-    // Use a closure so we can clean up the nbd connection on any error.
-    let result = (|| -> Result<()> {
-        // Wait for the kernel to scan partitions.
-        let status = Command::new("partprobe")
-            .arg(&nbd_dev)
-            .status();
-        // partprobe is optional; if missing, the kernel usually scans automatically.
-        if let Ok(s) = status {
-            if !s.success() && verbose {
-                eprintln!("partprobe failed (non-fatal)");
-            }
-        }
+    check_interrupted()?;
 
-        // Small delay for partition devices to appear.
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        // Find the root partition device.
-        let part_dev = find_root_partition(&nbd_dev, verbose)?;
-        if verbose {
-            eprintln!("mounting partition: {}", part_dev.display());
-        }
-
-        // Create a temporary mount point.
-        let mount_dir = staging_dir.with_file_name(
-            format!(
-                ".{}.qcow2-mount",
-                staging_dir.file_name().unwrap().to_string_lossy()
-            ),
-        );
-        fs::create_dir_all(&mount_dir)
-            .with_context(|| format!("failed to create mount point {}", mount_dir.display()))?;
-
-        // Mount the partition read-only.
-        let status = Command::new("mount")
-            .args(["-o", "ro"])
-            .arg(&part_dev)
-            .arg(&mount_dir)
-            .status()
-            .context("failed to run mount")?;
-        if !status.success() {
-            let _ = fs::remove_dir(&mount_dir);
-            bail!("mount failed for {}", part_dev.display());
-        }
-
-        // Copy the tree; unmount on any error.
-        let copy_result = do_import(&mount_dir, staging_dir, verbose);
-
-        // Always unmount.
-        let umount_status = Command::new("umount")
-            .arg(&mount_dir)
-            .status();
-        let _ = fs::remove_dir(&mount_dir);
-        if let Ok(s) = umount_status {
-            if !s.success() && verbose {
-                eprintln!("warning: umount {} failed", mount_dir.display());
-            }
-        }
-
-        copy_result
-    })();
-
-    // Always disconnect the nbd device.
-    let disconnect_status = Command::new("qemu-nbd")
-        .args(["--disconnect"])
+    // Wait for the kernel to scan partitions.
+    let status = Command::new("partprobe")
         .arg(&nbd_dev)
         .status();
-    if let Ok(s) = disconnect_status {
+    // partprobe is optional; if missing, the kernel usually scans automatically.
+    if let Ok(s) = status {
         if !s.success() && verbose {
-            eprintln!("warning: qemu-nbd --disconnect {} failed", nbd_dev.display());
+            eprintln!("partprobe failed (non-fatal)");
         }
     }
+
+    // Small delay for partition devices to appear.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    check_interrupted()?;
+
+    // Find the root partition device.
+    let part_dev = find_root_partition(&nbd_dev, verbose)?;
+    if verbose {
+        eprintln!("mounting partition: {}", part_dev.display());
+    }
+
+    // Create a temporary mount point.
+    let mount_dir = staging_dir.with_file_name(
+        format!(
+            ".{}.qcow2-mount",
+            staging_dir.file_name().unwrap().to_string_lossy()
+        ),
+    );
+    fs::create_dir_all(&mount_dir)
+        .with_context(|| format!("failed to create mount point {}", mount_dir.display()))?;
+
+    // Mount the partition read-only.
+    let status = Command::new("mount")
+        .args(["-o", "ro"])
+        .arg(&part_dev)
+        .arg(&mount_dir)
+        .status()
+        .context("failed to run mount")?;
+    if !status.success() {
+        let _ = fs::remove_dir(&mount_dir);
+        bail!("mount failed for {}", part_dev.display());
+    }
+    mount_guard.set_mounted(mount_dir);
+
+    // Copy the tree. Guards handle cleanup on error or interruption.
+    let result = do_import(&mount_guard.path, staging_dir, verbose);
+
+    // Explicit cleanup in order (mount before nbd disconnect).
+    mount_guard.unmount();
+    nbd_guard.disconnect();
 
     result
 }
@@ -1010,6 +1099,10 @@ fn lchown(path: &Path, uid: u32, gid: u32) -> Result<()> {
 /// The import is transactional: files are copied/extracted into a staging
 /// directory and atomically renamed into place on success.
 pub fn run(datadir: &Path, source: &str, name: &str, verbose: bool, force: bool) -> Result<()> {
+    let _ = ctrlc::set_handler(|| {
+        INTERRUPTED.store(true, Ordering::Relaxed);
+    });
+
     validate_name(name)?;
 
     let kind = detect_source_kind(source)?;
@@ -2217,5 +2310,96 @@ mod tests {
         );
 
         let _ = fs::remove_file(&tarball);
+    }
+
+    // --- Interrupt tests ---
+
+    /// RAII guard that sets INTERRUPTED to true on creation and resets it on drop.
+    struct InterruptGuard;
+
+    impl InterruptGuard {
+        fn new() -> Self {
+            INTERRUPTED.store(true, Ordering::Relaxed);
+            Self
+        }
+    }
+
+    impl Drop for InterruptGuard {
+        fn drop(&mut self) {
+            INTERRUPTED.store(false, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn test_check_interrupted() {
+        // Not interrupted — should be Ok.
+        assert!(check_interrupted().is_ok());
+
+        // Set interrupted — should bail.
+        let _guard = InterruptGuard::new();
+        let err = check_interrupted().unwrap_err();
+        assert!(
+            err.to_string().contains("interrupted"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_copy_tree_interrupted() {
+        let _guard = InterruptGuard::new();
+        let src = TempSourceDir::new("int-copy-src");
+        fs::write(src.path().join("file.txt"), "data").unwrap();
+
+        let dst = std::env::temp_dir().join(format!(
+            "sdme-test-int-copy-dst-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dst);
+        fs::create_dir_all(&dst).unwrap();
+
+        let err = copy_tree(src.path(), &dst, false).unwrap_err();
+        assert!(
+            err.to_string().contains("interrupted"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&dst);
+    }
+
+    #[test]
+    fn test_unpack_tar_interrupted() {
+        let _guard = InterruptGuard::new();
+        let src = TempSourceDir::new("int-tar-src");
+        fs::write(src.path().join("file.txt"), "data").unwrap();
+
+        // Build a small tarball.
+        let tarball_path = std::env::temp_dir().join(format!(
+            "sdme-test-int-tar-{}-{:?}.tar",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let file = File::create(&tarball_path).unwrap();
+        let mut builder = tar::Builder::new(file);
+        builder.append_dir_all(".", src.path()).unwrap();
+        builder.finish().unwrap();
+
+        let dest = std::env::temp_dir().join(format!(
+            "sdme-test-int-tar-dst-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dest);
+        fs::create_dir_all(&dest).unwrap();
+
+        let file = File::open(&tarball_path).unwrap();
+        let err = unpack_tar(file, &dest).unwrap_err();
+        assert!(
+            err.to_string().contains("interrupted"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&dest);
+        let _ = fs::remove_file(&tarball_path);
     }
 }
