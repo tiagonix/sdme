@@ -1,0 +1,242 @@
+.TH SDME 1 "2026-02-22" "sdme" "User Commands"
+.SH NAME
+sdme \- lightweight systemd\-nspawn containers with overlayfs
+.SH SYNOPSIS
+.B sdme
+[\fB\-v\fR] [\fB\-c\fR \fIpath\fR]
+.I command
+[\fIargs\fR...]
+.SH DESCRIPTION
+.B sdme
+manages lightweight containers using
+.BR systemd\-nspawn (1)
+with overlayfs copy\-on\-write storage.
+Each container uses an imported root filesystem as its read\-only lower layer,
+keeping the base rootfs untouched while all modifications are stored in a
+per\-container upper layer.
+.PP
+Containers are managed as systemd template units
+.RB ( sdme@.service )
+and controlled via D\-Bus.
+Interactive access uses
+.BR machinectl (1).
+.PP
+.B sdme
+requires root privileges.
+When invoked via
+.BR sudo (8),
+the invoking user's configuration file is preferred.
+.SH OPTIONS
+.TP
+.BR \-v ", " \-\-verbose
+Enable verbose output.
+Implies non\-interactive mode at runtime.
+.TP
+.BR \-c ", " \-\-config " " \fIpath\fR
+Path to config file.
+Default:
+.IR ~/.config/sdme/sdmerc .
+.SH COMMANDS
+.SS sdme new [\-n \fIname\fR] [\-r \fIrootfs\fR] [\-\-] [\fIcommand\fR...]
+Create, start, and enter a new container.
+If
+.B \-n
+is omitted, a name is generated automatically.
+If
+.B \-r
+is omitted, the host filesystem is used.
+An optional command overrides the default login shell.
+.SS sdme create [\-n \fIname\fR] [\-r \fIrootfs\fR]
+Create a new container without starting it.
+Sets up the overlayfs directories and state file.
+.SS sdme start \fIname\fR
+Start a stopped container.
+Installs or updates the
+.B sdme@.service
+template unit if needed, then starts the unit via D\-Bus.
+.SS sdme join \fIname\fR [\-\-] [\fIcommand\fR...]
+Enter a running container using
+.BR machinectl (1)
+shell.
+An optional command overrides the default login shell.
+.SS sdme exec \fIname\fR \fIcommand\fR [\fIargs\fR...]
+Run a one\-off command in a running container using
+.BR machinectl (1)
+shell.
+.SS sdme stop \fIname\fR
+Stop a running container using
+.B machinectl poweroff
+for a clean shutdown.
+.SS sdme rm \fIname\fR...
+Remove one or more containers.
+Running containers are stopped first.
+Deletes the state file and all overlayfs directories.
+.SS sdme ps
+List all containers with their status, health, and shared directory path.
+Health checks detect broken containers (missing directories, missing rootfs).
+.SS sdme logs \fIname\fR [\fIargs\fR...]
+View container logs by executing
+.BR journalctl (1)
+for the container's service unit.
+Extra arguments are passed through to journalctl
+(e.g.\&
+.BR \-f ,
+.BR "\-n 100" ).
+.SS sdme rootfs import \fIsource\fR \-n \fIname\fR [\-f]
+Import a root filesystem.
+The source type is auto\-detected:
+.RS
+.IP \(bu 2
+.B URL
+.RI ( http:// " or " https:// )
+\(em download and extract tarball
+.IP \(bu 2
+.B Directory
+\(em copy the directory tree
+.IP \(bu 2
+.B QCOW2 image
+(detected by magic bytes) \(em mount via
+.BR qemu\-nbd (8)
+and copy the filesystem tree
+.IP \(bu 2
+.B Tarball
+.RI ( .tar ", " .tar.gz ", " .tar.bz2 ", " .tar.xz ", " .tar.zst )
+\(em extract using native Rust crates with magic\-byte compression detection.
+OCI container images are auto\-detected after extraction and their filesystem
+layers are applied in order with whiteout handling.
+.RE
+.PP
+Use
+.B \-f
+to remove a leftover staging directory from a previous failed import.
+.SS sdme rootfs ls
+List imported root filesystems with distro detection and paths.
+.SS sdme rootfs rm \fIname\fR...
+Remove one or more imported root filesystems.
+.SS sdme config get
+Show current configuration values.
+.SS sdme config set \fIkey\fR \fIvalue\fR
+Set a configuration value.
+Valid keys:
+.RS
+.TP
+.B interactive
+Enable or disable interactive mode.
+Values:
+.BR yes " or " no .
+Default:
+.BR yes .
+.TP
+.B datadir
+Absolute path to the data directory.
+Default:
+.BR /var/lib/sdme .
+.RE
+.SH CONFIGURATION
+The configuration file is in TOML format, located at
+.IR ~/.config/sdme/sdmerc .
+When running under
+.BR sudo (8),
+the invoking user's config is preferred if it exists.
+The path can also be set via the
+.B \-c
+option or the
+.B XDG_CONFIG_HOME
+environment variable.
+.PP
+Available keys:
+.TP
+.B interactive
+Boolean.
+Whether to run in interactive mode.
+Default:
+.BR true .
+.TP
+.B datadir
+String.
+Absolute path to the data directory.
+Default:
+.BR /var/lib/sdme .
+.SH FILES
+.TP
+.I /var/lib/sdme/
+Default data directory (configurable via
+.BR datadir ).
+.TP
+.I /var/lib/sdme/rootfs/\fIname\fR/
+Imported root filesystems (lower layers).
+.TP
+.I /var/lib/sdme/state/\fIname\fR
+Container state files (KEY=VALUE format).
+.TP
+.I /var/lib/sdme/\fIname\fR/upper/
+Per\-container overlayfs upper layer (copy\-on\-write modifications).
+.TP
+.I /var/lib/sdme/\fIname\fR/work/
+Per\-container overlayfs work directory.
+.TP
+.I /var/lib/sdme/\fIname\fR/merged/
+Per\-container overlayfs merged mount point.
+.TP
+.I /var/lib/sdme/\fIname\fR/shared/
+Per\-container shared directory (accessible from host and container).
+.TP
+.I /etc/systemd/system/sdme@.service
+Systemd template unit (auto\-installed and auto\-updated).
+.TP
+.I ~/.config/sdme/sdmerc
+User configuration file (TOML format).
+.SH ENVIRONMENT
+.TP
+.B SUDO_USER
+When set, sdme reads the invoking user's configuration file and resolves
+their home directory for config file lookup.
+.TP
+.B XDG_CONFIG_HOME
+Overrides the base directory for the configuration file.
+Default:
+.IR ~/.config .
+.TP
+.B HOME
+Used to locate the configuration file when
+.B XDG_CONFIG_HOME
+is not set.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B non\-zero
+An error occurred.
+Error messages are printed to standard error.
+.SH EXAMPLES
+Import an Ubuntu rootfs from a URL and create a container:
+.PP
+.RS
+.nf
+sdme rootfs import https://example.com/ubuntu.tar.xz \-n ubuntu
+sdme new \-n mybox \-r ubuntu
+.fi
+.RE
+.PP
+Run a command in a running container:
+.PP
+.RS
+.nf
+sdme exec mybox cat /etc/os\-release
+.fi
+.RE
+.PP
+Follow logs for a container:
+.PP
+.RS
+.nf
+sdme logs mybox \-f
+.fi
+.RE
+.SH SEE ALSO
+.BR systemd\-nspawn (1),
+.BR machinectl (1),
+.BR journalctl (1),
+.BR overlayfs (5),
+.BR sudo (8)
