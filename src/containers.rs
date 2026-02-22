@@ -9,7 +9,6 @@
 
 use std::fs;
 use std::io::Read;
-use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,7 +20,6 @@ use crate::{State, systemd, validate_name};
 pub struct CreateOptions {
     pub name: Option<String>,
     pub rootfs: Option<String>,
-    pub privileged: bool,
 }
 
 pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<String> {
@@ -33,7 +31,7 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
     if verbose {
         eprintln!("container name: {name}");
     }
-    check_conflicts(datadir, &name, opts.privileged)?;
+    check_conflicts(datadir, &name)?;
     if verbose {
         eprintln!("no conflicts found");
     }
@@ -42,7 +40,7 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
         eprintln!("rootfs: {}", rootfs.display());
     }
 
-    match do_create(datadir, &name, &rootfs, verbose, opts.privileged) {
+    match do_create(datadir, &name, &rootfs, verbose) {
         Ok(()) => Ok(name),
         Err(e) => {
             let container_dir = datadir.join("containers").join(&name);
@@ -54,63 +52,33 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
     }
 }
 
-fn do_create(datadir: &Path, name: &str, rootfs: &Path, verbose: bool, privileged: bool) -> Result<()> {
+fn do_create(datadir: &Path, name: &str, rootfs: &Path, verbose: bool) -> Result<()> {
     let container_dir = datadir.join("containers").join(name);
 
-    if privileged {
-        for sub in &["upper", "work", "merged", "shared"] {
-            let dir = container_dir.join(sub);
-            fs::create_dir_all(&dir)
-                .with_context(|| format!("failed to create {}", dir.display()))?;
-        }
-    } else {
-        // Rootless: use fuse-overlayfs with rootfs as lower layer.
-        if rootfs == Path::new("/") {
-            bail!("host-as-rootfs (devctl mode) requires root; use --rootfs to specify a rootfs");
-        }
-        for sub in &["upper", "work", "merged", "shared"] {
-            let dir = container_dir.join(sub);
-            fs::create_dir_all(&dir)
-                .with_context(|| format!("failed to create {}", dir.display()))?;
-        }
+    for sub in &["upper", "work", "merged", "shared"] {
+        let dir = container_dir.join(sub);
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create {}", dir.display()))?;
     }
 
     if verbose {
         eprintln!("created container directory: {}", container_dir.display());
     }
 
-    if privileged {
-        let etc_dir = container_dir.join("upper").join("etc");
-        fs::create_dir_all(&etc_dir)
-            .with_context(|| format!("failed to create {}", etc_dir.display()))?;
+    let etc_dir = container_dir.join("upper").join("etc");
+    fs::create_dir_all(&etc_dir)
+        .with_context(|| format!("failed to create {}", etc_dir.display()))?;
 
-        let hostname_path = etc_dir.join("hostname");
-        fs::write(&hostname_path, format!("{name}\n"))
-            .with_context(|| format!("failed to write {}", hostname_path.display()))?;
+    let hostname_path = etc_dir.join("hostname");
+    fs::write(&hostname_path, format!("{name}\n"))
+        .with_context(|| format!("failed to write {}", hostname_path.display()))?;
 
-        let hosts_path = etc_dir.join("hosts");
-        fs::write(&hosts_path, format!("127.0.0.1 {name}\n"))
-            .with_context(|| format!("failed to write {}", hosts_path.display()))?;
+    let hosts_path = etc_dir.join("hosts");
+    fs::write(&hosts_path, format!("127.0.0.1 {name}\n"))
+        .with_context(|| format!("failed to write {}", hosts_path.display()))?;
 
-        if verbose {
-            eprintln!("wrote hostname and hosts files");
-        }
-    } else {
-        let etc_dir = container_dir.join("upper").join("etc");
-        fs::create_dir_all(&etc_dir)
-            .with_context(|| format!("failed to create {}", etc_dir.display()))?;
-
-        let hostname_path = etc_dir.join("hostname");
-        fs::write(&hostname_path, format!("{name}\n"))
-            .with_context(|| format!("failed to write {}", hostname_path.display()))?;
-
-        let hosts_path = etc_dir.join("hosts");
-        fs::write(&hosts_path, format!("127.0.0.1 {name}\n"))
-            .with_context(|| format!("failed to write {}", hosts_path.display()))?;
-
-        if verbose {
-            eprintln!("wrote hostname and hosts files");
-        }
+    if verbose {
+        eprintln!("wrote hostname and hosts files");
     }
 
     let state_dir = datadir.join("state");
@@ -126,11 +94,8 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, verbose: bool, privilege
             .unwrap_or_default()
     };
 
-    let mode = if privileged { "privileged" } else { "rootless" };
-
     let mut state = State::new();
     state.set("CREATED", unix_timestamp().to_string());
-    state.set("MODE", mode);
     state.set("NAME", name);
     state.set("ROOTFS", rootfs_value);
 
@@ -151,7 +116,7 @@ fn generate_name() -> String {
     buf.iter().map(|b| (b'a' + (b % 26)) as char).collect()
 }
 
-fn check_conflicts(datadir: &Path, name: &str, privileged: bool) -> Result<()> {
+fn check_conflicts(datadir: &Path, name: &str) -> Result<()> {
     let container_dir = datadir.join("containers").join(name);
     if container_dir.exists() {
         bail!("container already exists: {name}");
@@ -160,11 +125,9 @@ fn check_conflicts(datadir: &Path, name: &str, privileged: bool) -> Result<()> {
     if state_file.exists() {
         bail!("state file already exists for: {name}");
     }
-    if privileged {
-        let machines_dir = Path::new("/var/lib/machines").join(name);
-        if machines_dir.exists() {
-            bail!("conflicting machine found in /var/lib/machines: {name}");
-        }
+    let machines_dir = Path::new("/var/lib/machines").join(name);
+    if machines_dir.exists() {
+        bail!("conflicting machine found in /var/lib/machines: {name}");
     }
     Ok(())
 }
@@ -201,14 +164,14 @@ fn unix_timestamp() -> u64 {
         .as_secs()
 }
 
-pub fn remove(datadir: &Path, name: &str, verbose: bool, privileged: bool) -> Result<()> {
+pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     ensure_exists(datadir, name)?;
 
-    if systemd::is_active(name, privileged)? {
+    if systemd::is_active(name)? {
         if verbose {
             eprintln!("stopping container '{name}'");
         }
-        systemd::stop(name, privileged)?;
+        stop(name, verbose)?;
     }
 
     let container_dir = datadir.join("containers").join(name);
@@ -239,7 +202,7 @@ pub struct ContainerInfo {
     pub shared: PathBuf,
 }
 
-pub fn list(datadir: &Path, privileged: bool) -> Result<Vec<ContainerInfo>> {
+pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
     let state_dir = datadir.join("state");
     if !state_dir.is_dir() {
         return Ok(Vec::new());
@@ -289,7 +252,7 @@ pub fn list(datadir: &Path, privileged: bool) -> Result<Vec<ContainerInfo>> {
 
         // Status (running/stopped).
         let status = if container_dir.exists() {
-            match systemd::is_active(name, privileged) {
+            match systemd::is_active(name) {
                 Ok(true) => "running",
                 _ => "stopped",
             }
@@ -307,130 +270,93 @@ pub fn list(datadir: &Path, privileged: bool) -> Result<Vec<ContainerInfo>> {
     Ok(result)
 }
 
-fn get_leader_pid(nspawn_pid: u32) -> Result<u32> {
-    let children_path = format!("/proc/{nspawn_pid}/task/{nspawn_pid}/children");
-    let content = fs::read_to_string(&children_path)
-        .with_context(|| format!("failed to read {children_path}"))?;
-    let first = content
-        .split_whitespace()
-        .next()
-        .context("nspawn process has no children")?;
-    first
-        .parse::<u32>()
-        .with_context(|| format!("invalid child pid: {first}"))
-}
-
 pub fn join(
     datadir: &Path,
     name: &str,
     command: &[String],
     verbose: bool,
-    privileged: bool,
 ) -> Result<()> {
     ensure_exists(datadir, name)?;
 
-    if !systemd::is_active(name, privileged)? {
+    if !systemd::is_active(name)? {
         bail!("container '{name}' is not running");
     }
 
-    let nspawn_pid = systemd::get_main_pid(name, privileged)?;
+    machinectl_shell(name, command, verbose)
+}
+
+pub fn exec(name: &str, command: &[String], verbose: bool) -> Result<()> {
+    if !systemd::is_active(name)? {
+        bail!("container '{name}' is not running");
+    }
+
+    machinectl_shell(name, command, verbose)
+}
+
+fn machinectl_shell(name: &str, command: &[String], verbose: bool) -> Result<()> {
+    let mut cmd = std::process::Command::new("machinectl");
+    cmd.arg("shell").arg(name);
+    if !command.is_empty() {
+        cmd.args(command);
+    }
     if verbose {
-        eprintln!("nspawn pid: {nspawn_pid}");
+        eprintln!("exec: machinectl {}",
+            cmd.get_args()
+                .map(|a| a.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
+    let err = cmd.exec();
+    bail!("failed to exec machinectl: {err}");
+}
 
-    let leader_pid = get_leader_pid(nspawn_pid)?;
+pub fn stop(name: &str, verbose: bool) -> Result<()> {
+    let mut cmd = std::process::Command::new("machinectl");
+    cmd.args(["poweroff", name]);
     if verbose {
-        eprintln!("leader pid: {leader_pid}");
+        eprintln!("exec: machinectl poweroff {name}");
     }
-
-    let cmd = if command.is_empty() {
-        vec!["/bin/sh".to_string()]
-    } else {
-        command.to_vec()
-    };
-
-    // Namespace types to enter. User namespace must be first so we have
-    // capabilities for the remaining namespaces.
-    let mut ns_types: Vec<(&str, i32)> = Vec::new();
-    if !privileged {
-        ns_types.push(("user", libc::CLONE_NEWUSER));
-    }
-    ns_types.extend_from_slice(&[
-        ("mnt", libc::CLONE_NEWNS),
-        ("uts", libc::CLONE_NEWUTS),
-        ("ipc", libc::CLONE_NEWIPC),
-        ("net", libc::CLONE_NEWNET),
-        ("pid", libc::CLONE_NEWPID),
-    ]);
-
-    // Pre-open all namespace FDs and the root directory before fork.
-    let mut ns_files: Vec<fs::File> = Vec::new();
-    let mut ns_fds: Vec<(i32, i32)> = Vec::new(); // (flag, raw_fd)
-    for (ns_name, ns_flag) in &ns_types {
-        let path = format!("/proc/{leader_pid}/ns/{ns_name}");
-        let f = fs::File::open(&path)
-            .with_context(|| format!("failed to open {path}"))?;
-        if verbose {
-            eprintln!("opened {path} (fd {})", f.as_raw_fd());
-        }
-        ns_fds.push((*ns_flag, f.as_raw_fd()));
-        ns_files.push(f);
-    }
-
-    let root_path = format!("/proc/{leader_pid}/root");
-    let root_file = fs::File::open(&root_path)
-        .with_context(|| format!("failed to open {root_path}"))?;
-    let root_fd = root_file.as_raw_fd();
-    if verbose {
-        eprintln!("opened {root_path} (fd {root_fd})");
-    }
-
-    if verbose {
-        eprintln!("exec: {} {}", cmd[0], cmd[1..].join(" "));
-    }
-
-    let mut process = std::process::Command::new(&cmd[0]);
-    process.args(&cmd[1..]);
-
-    // pre_exec runs after fork, before exec — setns(CLONE_NEWPID) takes
-    // effect for the exec'd process, and the other namespaces take effect
-    // immediately. All calls here are async-signal-safe.
-    unsafe {
-        process.pre_exec(move || {
-            for &(flag, fd) in &ns_fds {
-                if libc::setns(fd, flag) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            if libc::fchdir(root_fd) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::chroot(b".\0".as_ptr() as *const libc::c_char) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::chdir(b"/\0".as_ptr() as *const libc::c_char) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-
-    let status = process
+    let status = cmd
         .status()
-        .context("failed to exec command in container")?;
-
-    // Keep files alive until after the child has forked.
-    drop(ns_files);
-    drop(root_file);
-
+        .context("failed to exec machinectl poweroff")?;
     if !status.success() {
-        if let Some(code) = status.code() {
-            std::process::exit(code);
-        }
-        bail!("command terminated by signal");
+        bail!("machinectl poweroff failed for '{name}'");
+    }
+    Ok(())
+}
+
+pub fn wait_for_boot(name: &str, verbose: bool) -> Result<()> {
+    let timeout = std::time::Duration::from_secs(30);
+    let poll_interval = std::time::Duration::from_millis(500);
+    let start = std::time::Instant::now();
+
+    if verbose {
+        eprintln!("waiting for container '{name}' to boot...");
     }
 
-    Ok(())
+    loop {
+        let output = std::process::Command::new("machinectl")
+            .args(["show", name, "--property=State", "--value"])
+            .output()
+            .context("failed to exec machinectl show")?;
+
+        if output.status.success() {
+            let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if verbose {
+                eprintln!("container state: {state}");
+            }
+            if state == "running" {
+                return Ok(());
+            }
+        }
+
+        if start.elapsed() > timeout {
+            bail!("timed out waiting for container '{name}' to boot (30s)");
+        }
+
+        std::thread::sleep(poll_interval);
+    }
 }
 
 #[cfg(test)]
@@ -520,7 +446,6 @@ mod tests {
         let opts = CreateOptions {
             name: None,
             rootfs: None,
-            privileged: true,
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name.len(), 10);
@@ -554,7 +479,6 @@ mod tests {
         let opts = CreateOptions {
             name: Some("hello".to_string()),
             rootfs: None,
-            privileged: true,
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "hello");
@@ -583,7 +507,6 @@ mod tests {
         let opts = CreateOptions {
             name: Some("dup".to_string()),
             rootfs: None,
-            privileged: true,
         };
         create(tmp.path(), &opts, false).unwrap();
         let err = create(tmp.path(), &opts, false).unwrap_err();
@@ -599,7 +522,6 @@ mod tests {
         let opts = CreateOptions {
             name: Some("test".to_string()),
             rootfs: Some("nonexistent".to_string()),
-            privileged: true,
         };
         let err = create(tmp.path(), &opts, false).unwrap_err();
         assert!(
@@ -617,7 +539,6 @@ mod tests {
         let opts = CreateOptions {
             name: Some("test".to_string()),
             rootfs: Some("myroot".to_string()),
-            privileged: true,
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "test");
@@ -630,14 +551,12 @@ mod tests {
     fn test_create_cleanup_on_failure() {
         let tmp = TempDataDir::new();
         // Block state dir by placing a file where the directory should be created.
-        // Create "state" as a regular file so create_dir_all("state") inside do_create fails.
         let state_path = tmp.path().join("state");
         fs::write(&state_path, "blocker").unwrap();
 
         let opts = CreateOptions {
             name: Some("fail".to_string()),
             rootfs: None,
-            privileged: true,
         };
         let err = create(tmp.path(), &opts, false);
         assert!(err.is_err());
@@ -652,7 +571,6 @@ mod tests {
         let opts = CreateOptions {
             name: Some("mybox".to_string()),
             rootfs: None,
-            privileged: true,
         };
         create(tmp.path(), &opts, false).unwrap();
         assert!(ensure_exists(tmp.path(), "mybox").is_ok());

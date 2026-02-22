@@ -100,10 +100,6 @@ impl State {
     }
 }
 
-pub fn is_privileged() -> bool {
-    unsafe { libc::geteuid() == 0 }
-}
-
 pub fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("container name cannot be empty");

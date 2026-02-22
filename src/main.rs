@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use sdme::{config, containers, is_privileged, rootfs, system_check, systemd, validate_name};
+use sdme::{config, containers, rootfs, system_check, systemd, validate_name};
 
 #[derive(Parser)]
 #[command(name = "sdme", about = "Lightweight systemd-nspawn containers with overlayfs")]
@@ -37,17 +37,20 @@ enum Command {
         rootfs: Option<String>,
     },
 
-    /// Start a container
-    Start {
+    /// Run a command in a running container
+    Exec {
         /// Container name
         name: String,
+        /// Command to run inside the container
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
     },
 
     /// Enter a running container
     Join {
         /// Container name
         name: String,
-        /// Command to run inside the container (default: /bin/sh)
+        /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -59,6 +62,21 @@ enum Command {
         /// Extra arguments passed to journalctl (e.g. -f, -n 100)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+
+    /// Create, start, and enter a new container
+    New {
+        /// Container name (generated if not provided)
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Root filesystem to use (host filesystem if not provided)
+        #[arg(short, long)]
+        rootfs: Option<String>,
+
+        /// Command to run inside the container (default: login shell)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
     },
 
     /// List containers
@@ -76,6 +94,12 @@ enum Command {
         name: String,
     },
 
+    /// Start a container
+    Start {
+        /// Container name
+        name: String,
+    },
+
     /// Manage root filesystems
     #[command(subcommand)]
     Rootfs(RootfsCommand),
@@ -83,9 +107,9 @@ enum Command {
 
 #[derive(Subcommand)]
 enum RootfsCommand {
-    /// Import a root filesystem from a directory, tar file, or tar stream on stdin
+    /// Import a root filesystem from a directory
     Import {
-        /// Path to rootfs directory or tar file, or "-" for tar on stdin
+        /// Path to rootfs directory
         source: String,
         /// Name for the imported rootfs
         #[arg(short, long)]
@@ -117,6 +141,10 @@ enum ConfigCommand {
 }
 
 fn main() -> Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        bail!("sdme requires root privileges; run with sudo");
+    }
+
     let cli = Cli::parse();
 
     let config_path = cli.config.as_deref();
@@ -127,7 +155,6 @@ fn main() -> Result<()> {
     }
 
     let cfg = config::load(config_path)?;
-    let privileged = is_privileged();
 
     match cli.command {
         Command::Config(cmd) => match cmd {
@@ -151,27 +178,25 @@ fn main() -> Result<()> {
             }
         },
         Command::Create { name, rootfs } => {
-            system_check::check_systemd_version(privileged, 257)?;
-            if !privileged {
-                system_check::check_kernel_version(5, 11)?;
-            }
-            let opts = containers::CreateOptions { name, rootfs, privileged };
+            system_check::check_systemd_version(257)?;
+            let opts = containers::CreateOptions { name, rootfs };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             println!("{name}");
         }
+        Command::Exec { name, command } => {
+            validate_name(&name)?;
+            containers::exec(&name, &command, cli.verbose)?;
+        }
         Command::Start { name } => {
-            system_check::check_systemd_version(privileged, 257)?;
-            if !privileged {
-                system_check::check_kernel_version(5, 11)?;
-            }
+            system_check::check_systemd_version(257)?;
             validate_name(&name)?;
             containers::ensure_exists(&cfg.datadir, &name)?;
-            systemd::start(&cfg.datadir, &name, cli.verbose, privileged)?;
+            systemd::start(&cfg.datadir, &name, cli.verbose)?;
             println!("started container '{name}'");
         }
         Command::Join { name, command } => {
             validate_name(&name)?;
-            containers::join(&cfg.datadir, &name, &command, cli.verbose, privileged)?;
+            containers::join(&cfg.datadir, &name, &command, cli.verbose)?;
         }
         Command::Logs { name, args } => {
             system_check::check_dependencies(&[
@@ -180,9 +205,6 @@ fn main() -> Result<()> {
             validate_name(&name)?;
             let unit = systemd::service_name(&name);
             let mut cmd = std::process::Command::new("journalctl");
-            if !privileged {
-                cmd.arg("--user");
-            }
             cmd.args(["-u", &unit]);
             cmd.args(&args);
             if cli.verbose {
@@ -196,8 +218,24 @@ fn main() -> Result<()> {
             let err = cmd.exec();
             bail!("failed to exec journalctl: {err}");
         }
+        Command::New { name, rootfs, command } => {
+            system_check::check_systemd_version(257)?;
+            let opts = containers::CreateOptions { name, rootfs };
+            let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
+            if cli.verbose {
+                eprintln!("created container '{name}'");
+            }
+
+            systemd::start(&cfg.datadir, &name, cli.verbose)?;
+            if cli.verbose {
+                eprintln!("started container '{name}'");
+            }
+
+            containers::wait_for_boot(&name, cli.verbose)?;
+            containers::join(&cfg.datadir, &name, &command, cli.verbose)?;
+        }
         Command::Ps => {
-            let entries = containers::list(&cfg.datadir, privileged)?;
+            let entries = containers::list(&cfg.datadir)?;
             if entries.is_empty() {
                 println!("no containers found");
             } else {
@@ -224,7 +262,7 @@ fn main() -> Result<()> {
                     failed = true;
                     continue;
                 }
-                if let Err(e) = containers::remove(&cfg.datadir, name, cli.verbose, privileged) {
+                if let Err(e) = containers::remove(&cfg.datadir, name, cli.verbose) {
                     eprintln!("error: {name}: {e}");
                     failed = true;
                 } else {
@@ -238,49 +276,14 @@ fn main() -> Result<()> {
         Command::Stop { name } => {
             validate_name(&name)?;
             containers::ensure_exists(&cfg.datadir, &name)?;
-            systemd::stop(&name, privileged)?;
+            containers::stop(&name, cli.verbose)?;
             println!("stopped container '{name}'");
         }
         Command::Rootfs(cmd) => match cmd {
             RootfsCommand::Import { source, name, force } => {
-                system_check::check_systemd_version(privileged, 257)?;
-                if source == "-" {
-                    // Tar stream from stdin (rootless only).
-                    if privileged {
-                        bail!("stdin tar import is for rootless mode; use a directory path as root");
-                    }
-                    system_check::check_kernel_version(5, 11)?;
-                    system_check::check_dependencies(&[
-                        ("tar", "apt install tar"),
-                        ("newuidmap", "apt install uidmap"),
-                        ("newgidmap", "apt install uidmap"),
-                    ], cli.verbose)?;
-                    rootfs::import_tar(&cfg.datadir, &name, None, cli.verbose, force)?;
-                } else {
-                    let source = PathBuf::from(&source);
-                    if source.is_file() {
-                        // Tar file path (rootless only).
-                        if privileged {
-                            bail!("tar file import is for rootless mode; use a directory path as root");
-                        }
-                        system_check::check_kernel_version(5, 11)?;
-                        system_check::check_dependencies(&[
-                            ("tar", "apt install tar"),
-                            ("newuidmap", "apt install uidmap"),
-                            ("newgidmap", "apt install uidmap"),
-                        ], cli.verbose)?;
-                        rootfs::import_tar(&cfg.datadir, &name, Some(&source), cli.verbose, force)?;
-                    } else {
-                        // Directory import (privileged only).
-                        if !privileged {
-                            bail!(
-                                "directory import requires root; use a tar file or pipe via stdin instead:\n  \
-                                 sudo tar cf - -C /path/to/rootfs . | sdme rootfs import --name {name} - -f"
-                            );
-                        }
-                        rootfs::import(&cfg.datadir, &source, &name, cli.verbose, privileged, force)?;
-                    }
-                }
+                system_check::check_systemd_version(257)?;
+                let source = PathBuf::from(&source);
+                rootfs::import(&cfg.datadir, &source, &name, cli.verbose, force)?;
                 println!("{name}");
             }
             RootfsCommand::Ls => {

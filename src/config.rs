@@ -23,18 +23,7 @@ fn default_interactive() -> bool {
 }
 
 fn default_datadir() -> PathBuf {
-    if crate::is_privileged() {
-        PathBuf::from("/var/lib/sdme")
-    } else {
-        let base = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-            PathBuf::from(xdg)
-        } else if let Ok(home) = std::env::var("HOME") {
-            PathBuf::from(home).join(".local").join("share")
-        } else {
-            PathBuf::from("/var/lib/sdme")
-        };
-        base.join("sdme")
-    }
+    PathBuf::from("/var/lib/sdme")
 }
 
 impl Default for Config {
@@ -151,12 +140,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert!(config.interactive);
-        if crate::is_privileged() {
-            assert_eq!(config.datadir, PathBuf::from("/var/lib/sdme"));
-        } else {
-            // Rootless default is under XDG_DATA_HOME or ~/.local/share.
-            assert!(config.datadir.ends_with("sdme"));
-        }
+        assert_eq!(config.datadir, PathBuf::from("/var/lib/sdme"));
     }
 
     #[test]
