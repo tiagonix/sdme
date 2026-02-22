@@ -14,11 +14,12 @@ use anyhow::{Context, Result};
 use crate::State;
 
 mod dbus {
-    use anyhow::{Context, Result};
+    use anyhow::{bail, Context, Result};
     use zbus::blocking::proxy::Proxy;
-    use zbus::blocking::Connection;
+    use zbus::blocking::{Connection, MessageIterator};
+    use zbus::MatchRule;
 
-    fn connect() -> Result<Connection> {
+    pub fn connect() -> Result<Connection> {
         Connection::system().context("failed to connect to system dbus")
     }
 
@@ -79,6 +80,443 @@ mod dbus {
             .get_property::<String>("Version")
             .context("failed to read systemd version")
     }
+
+    /// Query the machine State property via org.freedesktop.machine1.
+    ///
+    /// Returns `None` if the machine is not registered (not found).
+    /// Returns `Some(state)` where state is e.g. "opening", "running",
+    /// "closing", or "abandoned".
+    pub fn get_machine_state(conn: &Connection, name: &str) -> Result<Option<String>> {
+        let manager = Proxy::new(
+            conn,
+            "org.freedesktop.machine1",
+            "/org/freedesktop/machine1",
+            "org.freedesktop.machine1.Manager",
+        )
+        .context("failed to create machine1 manager proxy")?;
+
+        let reply = match manager.call_method("GetMachine", &(name,)) {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if msg.contains("NoSuchMachine") || msg.contains("No machine") {
+                    return Ok(None);
+                }
+                return Err(e).context("failed to call GetMachine");
+            }
+        };
+
+        let machine_path: zbus::zvariant::OwnedObjectPath = reply
+            .body()
+            .deserialize()
+            .context("failed to deserialize machine path")?;
+
+        let machine_proxy = Proxy::new(
+            conn,
+            "org.freedesktop.machine1",
+            machine_path,
+            "org.freedesktop.machine1.Machine",
+        )
+        .context("failed to create machine proxy")?;
+
+        let state: String = machine_proxy
+            .get_property("State")
+            .context("failed to read machine State property")?;
+
+        Ok(Some(state))
+    }
+
+    /// Subscribe to all signals from org.freedesktop.machine1.Manager.
+    ///
+    /// Returns an owned `MessageIterator` that yields `MachineNew` and
+    /// `MachineRemoved` signals (among others). The iterator is `Send`
+    /// and can be moved to another thread.
+    pub fn subscribe_machine_signals(conn: &Connection) -> Result<MessageIterator> {
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender("org.freedesktop.machine1")?
+            .interface("org.freedesktop.machine1.Manager")?
+            .path("/org/freedesktop/machine1")?
+            .build();
+        MessageIterator::for_match_rule(rule, conn, Some(64))
+            .context("failed to subscribe to machine1 signals")
+    }
+
+    /// Wait for a machine to reach the "running" state.
+    ///
+    /// Subscribes to `MachineNew`/`MachineRemoved` signals from
+    /// `org.freedesktop.machine1.Manager`, then checks the current state.
+    /// If not yet running, processes signals on a background thread:
+    ///
+    /// - `MachineNew` → re-check the `State` property (may still be "opening")
+    /// - `MachineRemoved` → container failed, bail immediately
+    ///
+    /// After `MachineNew`, the state may be "opening" (boot in progress).
+    /// Since `PropertiesChanged` on the machine object requires a second
+    /// subscription on a different path, we fall back to periodic D-Bus
+    /// property reads (sub-millisecond IPC, no process spawning) until the
+    /// state transitions to "running" or a terminal state.
+    pub fn wait_for_boot(
+        name: &str,
+        timeout: std::time::Duration,
+        verbose: bool,
+    ) -> Result<()> {
+        let conn = connect()?;
+
+        // Subscribe to manager signals BEFORE checking current state to
+        // avoid missing a MachineNew/MachineRemoved that fires in between.
+        let signals = subscribe_machine_signals(&conn)?;
+
+        // Fast path: machine may already be running.
+        if let Some(state) = get_machine_state(&conn, name)? {
+            if verbose {
+                eprintln!("container state: {state}");
+            }
+            if state == "running" {
+                return Ok(());
+            }
+            if state == "closing" || state == "abandoned" {
+                bail!("container '{name}' failed during boot (state: {state})");
+            }
+        }
+
+        // Process signals on a background thread so we can apply a timeout
+        // from the main thread via recv_timeout.
+        let name_owned = name.to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<BootEvent>();
+
+        std::thread::spawn(move || {
+            for msg_result in signals {
+                let msg = match msg_result {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let member = match msg.header().member() {
+                    Some(m) => m.to_string(),
+                    None => continue,
+                };
+                let body = msg.body();
+                let sig_name: String = match body
+                    .deserialize::<(String, zbus::zvariant::OwnedObjectPath)>()
+                {
+                    Ok((n, _)) => n,
+                    Err(_) => continue,
+                };
+                if sig_name != name_owned {
+                    continue;
+                }
+                let event = match member.as_str() {
+                    "MachineNew" => BootEvent::MachineNew,
+                    "MachineRemoved" => BootEvent::MachineRemoved,
+                    _ => continue,
+                };
+                if tx.send(event).is_err() {
+                    break; // receiver dropped (timeout)
+                }
+            }
+        });
+
+        // Main loop: wait for signals or poll state on channel timeout.
+        let deadline = std::time::Instant::now() + timeout;
+        let poll_interval = std::time::Duration::from_millis(500);
+
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                bail!(
+                    "timed out waiting for container '{name}' to boot ({}s)",
+                    timeout.as_secs()
+                );
+            }
+
+            let wait = poll_interval.min(remaining);
+            match rx.recv_timeout(wait) {
+                Ok(BootEvent::MachineNew) => {
+                    if verbose {
+                        eprintln!("machine '{name}' registered");
+                    }
+                    // Machine appeared — check its state.
+                    if let Some(state) = get_machine_state(&conn, name)? {
+                        if verbose {
+                            eprintln!("container state: {state}");
+                        }
+                        if state == "running" {
+                            return Ok(());
+                        }
+                        if state == "closing" || state == "abandoned" {
+                            bail!(
+                                "container '{name}' failed during boot (state: {state})"
+                            );
+                        }
+                    }
+                }
+                Ok(BootEvent::MachineRemoved) => {
+                    bail!("container '{name}' exited during boot");
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // No signal received — poll the state via D-Bus.
+                    // This handles the "opening" → "running" transition
+                    // that is signaled via PropertiesChanged (which we
+                    // don't subscribe to separately).
+                    if let Some(state) = get_machine_state(&conn, name)? {
+                        if verbose {
+                            eprintln!("container state: {state}");
+                        }
+                        if state == "running" {
+                            return Ok(());
+                        }
+                        if state == "closing" || state == "abandoned" {
+                            bail!(
+                                "container '{name}' failed during boot (state: {state})"
+                            );
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    bail!(
+                        "signal watcher exited unexpectedly for container '{name}'"
+                    );
+                }
+            }
+        }
+    }
+
+    enum BootEvent {
+        MachineNew,
+        MachineRemoved,
+    }
+
+    /// Terminate a machine via org.freedesktop.machine1.
+    ///
+    /// Calls `TerminateMachine(name)` on the machined Manager, which
+    /// sends SIGTERM to the container leader process (nspawn).
+    /// nspawn handles SIGTERM by initiating a clean container shutdown.
+    ///
+    /// This is a non-blocking call — the machine shuts down asynchronously.
+    /// Use [`wait_for_shutdown`] to wait for full shutdown.
+    pub fn terminate_machine(name: &str) -> Result<()> {
+        let conn = connect()?;
+        let manager = Proxy::new(
+            &conn,
+            "org.freedesktop.machine1",
+            "/org/freedesktop/machine1",
+            "org.freedesktop.machine1.Manager",
+        )
+        .context("failed to create machine1 manager proxy")?;
+
+        manager
+            .call_method("TerminateMachine", &(name,))
+            .with_context(|| format!("failed to terminate machine '{name}'"))?;
+
+        Ok(())
+    }
+
+    /// List all registered machines via org.freedesktop.machine1.
+    ///
+    /// Returns a vector of machine names. Returns an empty vector if the
+    /// call fails (e.g. machined is not running).
+    pub fn list_machines() -> Vec<String> {
+        let conn = match connect() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let manager = match Proxy::new(
+            &conn,
+            "org.freedesktop.machine1",
+            "/org/freedesktop/machine1",
+            "org.freedesktop.machine1.Manager",
+        ) {
+            Ok(p) => p,
+            Err(_) => return Vec::new(),
+        };
+        let reply = match manager.call_method("ListMachines", &()) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        // ListMachines returns a(ssso): name, class, service, object_path
+        let machines: Vec<(String, String, String, zbus::zvariant::OwnedObjectPath)> =
+            match reply.body().deserialize() {
+                Ok(m) => m,
+                Err(_) => return Vec::new(),
+            };
+        machines.into_iter().map(|(name, _, _, _)| name).collect()
+    }
+
+    /// Read the ActiveState property of a systemd unit.
+    ///
+    /// Returns the state string (e.g. "active", "inactive", "failed",
+    /// "activating", "deactivating"). Returns `None` if the unit is
+    /// not loaded or not found.
+    fn get_unit_active_state(conn: &Connection, unit: &str) -> Option<String> {
+        let manager = systemd_manager(conn).ok()?;
+        let reply = manager.call_method("GetUnit", &(unit,)).ok()?;
+        let unit_path: zbus::zvariant::OwnedObjectPath =
+            reply.body().deserialize().ok()?;
+        let unit_proxy = Proxy::new(
+            conn,
+            "org.freedesktop.systemd1",
+            unit_path,
+            "org.freedesktop.systemd1.Unit",
+        )
+        .ok()?;
+        unit_proxy.get_property::<String>("ActiveState").ok()
+    }
+
+    /// Wait for a machine to fully shut down.
+    ///
+    /// Two-phase wait:
+    ///
+    /// 1. **Machine removal**: subscribes to `MachineRemoved` signal from
+    ///    `org.freedesktop.machine1.Manager` and waits for the container's
+    ///    machine registration to disappear. This means nspawn has exited.
+    ///
+    /// 2. **Unit inactive**: after the machine is gone, polls the systemd
+    ///    unit's `ActiveState` until it reaches `inactive` or `failed`.
+    ///    This ensures `ExecStopPost` has run (overlayfs unmounted), making
+    ///    it safe to delete container files on disk.
+    pub fn wait_for_shutdown(
+        name: &str,
+        timeout: std::time::Duration,
+        verbose: bool,
+    ) -> Result<()> {
+        let conn = connect()?;
+
+        // Subscribe to manager signals BEFORE checking current state.
+        let signals = subscribe_machine_signals(&conn)?;
+
+        // Fast path: machine may already be gone.
+        if get_machine_state(&conn, name)?.is_none() {
+            if verbose {
+                eprintln!("machine '{name}' already removed");
+            }
+            return wait_for_unit_inactive(
+                &conn,
+                &super::service_name(name),
+                timeout,
+                verbose,
+            );
+        }
+
+        if verbose {
+            eprintln!("waiting for container '{name}' to shut down...");
+        }
+
+        // Phase 1: wait for MachineRemoved.
+        let name_owned = name.to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+
+        std::thread::spawn(move || {
+            for msg_result in signals {
+                let msg = match msg_result {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let member = match msg.header().member() {
+                    Some(m) => m.to_string(),
+                    None => continue,
+                };
+                if member != "MachineRemoved" {
+                    continue;
+                }
+                let body = msg.body();
+                if let Ok((sig_name, _)) =
+                    body.deserialize::<(String, zbus::zvariant::OwnedObjectPath)>()
+                {
+                    if sig_name == name_owned {
+                        let _ = tx.send(());
+                        break;
+                    }
+                }
+            }
+        });
+
+        let deadline = std::time::Instant::now() + timeout;
+        let poll_interval = std::time::Duration::from_millis(500);
+
+        loop {
+            let remaining =
+                deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                bail!(
+                    "timed out waiting for container '{name}' to shut down ({}s)",
+                    timeout.as_secs()
+                );
+            }
+
+            let wait = poll_interval.min(remaining);
+            match rx.recv_timeout(wait) {
+                Ok(()) => {
+                    if verbose {
+                        eprintln!("machine '{name}' removed");
+                    }
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Fallback: check if machine is already gone via D-Bus.
+                    if get_machine_state(&conn, name)?.is_none() {
+                        if verbose {
+                            eprintln!("machine '{name}' removed");
+                        }
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    bail!(
+                        "signal watcher exited unexpectedly for '{name}'"
+                    );
+                }
+            }
+        }
+
+        // Phase 2: wait for the systemd unit to become inactive.
+        // ExecStopPost (overlayfs unmount) runs after nspawn exits.
+        let remaining =
+            deadline.saturating_duration_since(std::time::Instant::now());
+        wait_for_unit_inactive(
+            &conn,
+            &super::service_name(name),
+            remaining,
+            verbose,
+        )
+    }
+
+    /// Poll a systemd unit's ActiveState until it reaches "inactive" or "failed".
+    fn wait_for_unit_inactive(
+        conn: &Connection,
+        unit: &str,
+        timeout: std::time::Duration,
+        verbose: bool,
+    ) -> Result<()> {
+        let deadline = std::time::Instant::now() + timeout;
+        let poll_interval = std::time::Duration::from_millis(200);
+
+        loop {
+            match get_unit_active_state(conn, unit) {
+                Some(state) => {
+                    if verbose {
+                        eprintln!("unit state: {state}");
+                    }
+                    if state == "inactive" || state == "failed" {
+                        return Ok(());
+                    }
+                }
+                None => {
+                    // Unit not found — treat as inactive.
+                    return Ok(());
+                }
+            }
+
+            let remaining =
+                deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                bail!(
+                    "timed out waiting for unit '{unit}' to become inactive"
+                );
+            }
+
+            std::thread::sleep(poll_interval.min(remaining));
+        }
+    }
 }
 
 pub fn systemd_version() -> Result<String> {
@@ -97,6 +535,26 @@ pub fn is_active(name: &str) -> Result<bool> {
             }
         }
     }
+}
+
+pub fn wait_for_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
+    dbus::wait_for_boot(name, timeout, verbose)
+}
+
+pub fn terminate_machine(name: &str) -> Result<()> {
+    dbus::terminate_machine(name)
+}
+
+pub fn wait_for_shutdown(
+    name: &str,
+    timeout: std::time::Duration,
+    verbose: bool,
+) -> Result<()> {
+    dbus::wait_for_shutdown(name, timeout, verbose)
+}
+
+pub fn list_machines() -> Vec<String> {
+    dbus::list_machines()
 }
 
 pub fn service_name(name: &str) -> String {
@@ -197,6 +655,10 @@ pub fn write_env_file(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     let lowerdir = if rootfs.is_empty() {
         "/".to_string()
     } else {
+        // Validate the ROOTFS value to prevent path traversal via corrupted state files.
+        crate::validate_name(rootfs).with_context(|| {
+            format!("invalid ROOTFS value in state file: {rootfs:?}")
+        })?;
         let path = datadir.join("rootfs").join(rootfs);
         path.to_str()
             .context("rootfs path is not valid UTF-8")?
@@ -208,6 +670,12 @@ pub fn write_env_file(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     let env_path = datadir.join("containers").join(name).join("env");
     fs::write(&env_path, format!("LOWERDIR={lowerdir}\n"))
         .with_context(|| format!("failed to write {}", env_path.display()))?;
+    // Ensure env file is not world-readable regardless of umask.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to set permissions on {}", env_path.display()))?;
+    }
     if verbose {
         eprintln!("wrote env file: {}", env_path.display());
     }

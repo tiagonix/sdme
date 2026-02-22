@@ -7,15 +7,15 @@
 //! are cleaned up before the error is returned. New implementations and changes
 //! should conform to this pattern.
 
-use std::fs;
-use std::io::Read;
+use std::fs::{self, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 
-use crate::{State, systemd, validate_name};
+use crate::{State, names, systemd, validate_name};
 
 pub struct CreateOptions {
     pub name: Option<String>,
@@ -25,7 +25,7 @@ pub struct CreateOptions {
 pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<String> {
     let name = match &opts.name {
         Some(n) => n.clone(),
-        None => generate_name(),
+        None => names::generate_name(datadir)?,
     };
     validate_name(&name)?;
     if verbose {
@@ -40,13 +40,38 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
         eprintln!("rootfs: {}", rootfs.display());
     }
 
+    // Atomically claim the name by creating the state file with O_CREAT|O_EXCL.
+    // This prevents a TOCTOU race where two concurrent creates pass check_conflicts().
+    let state_dir = datadir.join("state");
+    fs::create_dir_all(&state_dir)
+        .with_context(|| format!("failed to create {}", state_dir.display()))?;
+
+    let state_path = state_dir.join(&name);
+    let _lock_file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&state_path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!("state file already exists for: {name} (concurrent create?)");
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("failed to create {}", state_path.display()));
+        }
+    };
+
+    if verbose {
+        eprintln!("claimed state file: {}", state_path.display());
+    }
+
     match do_create(datadir, &name, &rootfs, verbose) {
         Ok(()) => Ok(name),
         Err(e) => {
             let container_dir = datadir.join("containers").join(&name);
-            let state_file = datadir.join("state").join(&name);
             let _ = fs::remove_dir_all(&container_dir);
-            let _ = fs::remove_file(&state_file);
+            let _ = fs::remove_file(&state_path);
             Err(e)
         }
     }
@@ -59,6 +84,7 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, verbose: bool) -> Result
         let dir = container_dir.join(sub);
         fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create {}", dir.display()))?;
+        set_dir_permissions(&dir, 0o700)?;
     }
 
     if verbose {
@@ -74,16 +100,15 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, verbose: bool) -> Result
         .with_context(|| format!("failed to write {}", hostname_path.display()))?;
 
     let hosts_path = etc_dir.join("hosts");
-    fs::write(&hosts_path, format!("127.0.0.1 {name}\n"))
-        .with_context(|| format!("failed to write {}", hosts_path.display()))?;
+    fs::write(
+        &hosts_path,
+        format!("127.0.0.1 localhost {name}\n::1 localhost\n"),
+    )
+    .with_context(|| format!("failed to write {}", hosts_path.display()))?;
 
     if verbose {
         eprintln!("wrote hostname and hosts files");
     }
-
-    let state_dir = datadir.join("state");
-    fs::create_dir_all(&state_dir)
-        .with_context(|| format!("failed to create {}", state_dir.display()))?;
 
     let rootfs_value = if rootfs == Path::new("/") {
         String::new()
@@ -99,6 +124,7 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, verbose: bool) -> Result
     state.set("NAME", name);
     state.set("ROOTFS", rootfs_value);
 
+    // State file was already created atomically by create(); write content to it.
     let state_path = datadir.join("state").join(name);
     state.write_to(&state_path)?;
 
@@ -107,13 +133,6 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, verbose: bool) -> Result
     }
 
     Ok(())
-}
-
-fn generate_name() -> String {
-    let mut buf = [0u8; 10];
-    let mut f = fs::File::open("/dev/urandom").expect("failed to open /dev/urandom");
-    f.read_exact(&mut buf).expect("failed to read /dev/urandom");
-    buf.iter().map(|b| (b'a' + (b % 26)) as char).collect()
 }
 
 fn check_conflicts(datadir: &Path, name: &str) -> Result<()> {
@@ -162,6 +181,12 @@ fn unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before unix epoch")
         .as_secs()
+}
+
+fn set_dir_permissions(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .with_context(|| format!("failed to set permissions on {}", path.display()))
 }
 
 pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
@@ -312,52 +337,14 @@ fn machinectl_shell(name: &str, command: &[String], verbose: bool) -> Result<()>
 }
 
 pub fn stop(name: &str, verbose: bool) -> Result<()> {
-    let mut cmd = std::process::Command::new("machinectl");
-    cmd.args(["poweroff", name]);
     if verbose {
-        eprintln!("exec: machinectl poweroff {name}");
+        eprintln!("terminating machine '{name}'");
     }
-    let status = cmd
-        .status()
-        .context("failed to exec machinectl poweroff")?;
-    if !status.success() {
-        bail!("machinectl poweroff failed for '{name}'");
-    }
-    Ok(())
+    systemd::terminate_machine(name)?;
+    systemd::wait_for_shutdown(name, std::time::Duration::from_secs(30), verbose)
 }
 
-pub fn wait_for_boot(name: &str, verbose: bool) -> Result<()> {
-    let timeout = std::time::Duration::from_secs(30);
-    let poll_interval = std::time::Duration::from_millis(500);
-    let start = std::time::Instant::now();
 
-    if verbose {
-        eprintln!("waiting for container '{name}' to boot...");
-    }
-
-    loop {
-        let output = std::process::Command::new("machinectl")
-            .args(["show", name, "--property=State", "--value"])
-            .output()
-            .context("failed to exec machinectl show")?;
-
-        if output.status.success() {
-            let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if verbose {
-                eprintln!("container state: {state}");
-            }
-            if state == "running" {
-                return Ok(());
-            }
-        }
-
-        if start.elapsed() > timeout {
-            bail!("timed out waiting for container '{name}' to boot (30s)");
-        }
-
-        std::thread::sleep(poll_interval);
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -388,17 +375,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.dir);
         }
-    }
-
-    #[test]
-    fn test_generate_name() {
-        let name1 = generate_name();
-        let name2 = generate_name();
-        assert_eq!(name1.len(), 10);
-        assert_eq!(name2.len(), 10);
-        assert!(name1.chars().all(|c| c.is_ascii_lowercase()));
-        assert!(name2.chars().all(|c| c.is_ascii_lowercase()));
-        assert_ne!(name1, name2);
     }
 
     #[test]
@@ -448,8 +424,7 @@ mod tests {
             rootfs: None,
         };
         let name = create(tmp.path(), &opts, false).unwrap();
-        assert_eq!(name.len(), 10);
-        assert!(name.chars().all(|c| c.is_ascii_lowercase()));
+        assert!(validate_name(&name).is_ok());
 
         // Verify directories.
         let container_dir = tmp.path().join("containers").join(&name);
@@ -464,7 +439,7 @@ mod tests {
 
         // Verify hosts.
         let hosts = fs::read_to_string(container_dir.join("upper/etc/hosts")).unwrap();
-        assert_eq!(hosts, format!("127.0.0.1 {name}\n"));
+        assert_eq!(hosts, format!("127.0.0.1 localhost {name}\n::1 localhost\n"));
 
         // Verify state file.
         let state = State::read_from(&tmp.path().join("state").join(&name)).unwrap();
@@ -495,7 +470,7 @@ mod tests {
                 .join("containers/hello/upper/etc/hosts"),
         )
         .unwrap();
-        assert_eq!(hosts, "127.0.0.1 hello\n");
+        assert_eq!(hosts, "127.0.0.1 localhost hello\n::1 localhost\n");
 
         let state = State::read_from(&tmp.path().join("state/hello")).unwrap();
         assert_eq!(state.get("NAME"), Some("hello"));

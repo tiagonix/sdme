@@ -28,12 +28,18 @@ pub fn check_systemd_version(min_version: u32) -> Result<()> {
 }
 
 /// Find a program in PATH, returning its full path.
+///
+/// Checks that the candidate is a regular file and has at least one
+/// execute bit set (user, group, or other).
 pub fn find_program(name: &str) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
     let path_var = std::env::var("PATH").unwrap_or_default();
     for dir in path_var.split(':') {
         let candidate = PathBuf::from(dir).join(name);
-        if candidate.is_file() {
-            return Ok(candidate);
+        if let Ok(meta) = std::fs::metadata(&candidate) {
+            if meta.is_file() && (meta.permissions().mode() & 0o111 != 0) {
+                return Ok(candidate);
+            }
         }
     }
     bail!("{name} not found in PATH")
