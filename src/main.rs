@@ -34,8 +34,8 @@ enum Command {
         name: Option<String>,
 
         /// Root filesystem to use (host filesystem if not provided)
-        #[arg(short, long)]
-        rootfs: Option<String>,
+        #[arg(short = 'r', long = "fs")]
+        fs: Option<String>,
     },
 
     /// Run a command in a running container
@@ -72,8 +72,8 @@ enum Command {
         name: Option<String>,
 
         /// Root filesystem to use (host filesystem if not provided)
-        #[arg(short, long)]
-        rootfs: Option<String>,
+        #[arg(short = 'r', long = "fs")]
+        fs: Option<String>,
 
         /// Boot timeout in seconds (overrides config, default: 60)
         #[arg(short, long)]
@@ -201,10 +201,11 @@ fn main() -> Result<()> {
                 config::save(&cfg, config_path)?;
             }
         },
-        Command::Create { name, rootfs } => {
+        Command::Create { name, fs } => {
             system_check::check_systemd_version(257)?;
-            let opts = containers::CreateOptions { name, rootfs };
+            let opts = containers::CreateOptions { name, rootfs: fs };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
+            eprintln!("creating '{name}'");
             println!("{name}");
         }
         Command::Exec { name, command } => {
@@ -215,6 +216,7 @@ fn main() -> Result<()> {
             system_check::check_systemd_version(257)?;
             validate_name(&name)?;
             containers::ensure_exists(&cfg.datadir, &name)?;
+            eprintln!("starting '{name}'");
             systemd::start(&cfg.datadir, &name, cli.verbose)?;
             let boot_timeout = timeout.unwrap_or(cfg.boot_timeout);
             systemd::wait_for_boot(
@@ -222,10 +224,10 @@ fn main() -> Result<()> {
                 std::time::Duration::from_secs(boot_timeout),
                 cli.verbose,
             )?;
-            println!("started container '{name}'");
         }
         Command::Join { name, command } => {
             validate_name(&name)?;
+            eprintln!("joining '{name}'");
             containers::join(&cfg.datadir, &name, &command, cli.verbose)?;
         }
         Command::Logs { name, args } => {
@@ -248,18 +250,14 @@ fn main() -> Result<()> {
             let err = cmd.exec();
             bail!("failed to exec journalctl: {err}");
         }
-        Command::New { name, rootfs, timeout, command } => {
+        Command::New { name, fs, timeout, command } => {
             system_check::check_systemd_version(257)?;
-            let opts = containers::CreateOptions { name, rootfs };
+            let opts = containers::CreateOptions { name, rootfs: fs };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
-            if cli.verbose {
-                eprintln!("created container '{name}'");
-            }
+            eprintln!("creating '{name}'");
 
+            eprintln!("starting '{name}'");
             systemd::start(&cfg.datadir, &name, cli.verbose)?;
-            if cli.verbose {
-                eprintln!("started container '{name}'");
-            }
 
             let boot_timeout = timeout.unwrap_or(cfg.boot_timeout);
             systemd::wait_for_boot(
@@ -267,6 +265,7 @@ fn main() -> Result<()> {
                 std::time::Duration::from_secs(boot_timeout),
                 cli.verbose,
             )?;
+            eprintln!("joining '{name}'");
             containers::join(&cfg.datadir, &name, &command, cli.verbose)?;
         }
         Command::Ps => {
@@ -297,6 +296,7 @@ fn main() -> Result<()> {
                     failed = true;
                     continue;
                 }
+                eprintln!("removing '{name}'");
                 if let Err(e) = containers::remove(&cfg.datadir, name, cli.verbose) {
                     eprintln!("error: {name}: {e}");
                     failed = true;
@@ -311,8 +311,8 @@ fn main() -> Result<()> {
         Command::Stop { name } => {
             validate_name(&name)?;
             containers::ensure_exists(&cfg.datadir, &name)?;
+            eprintln!("stopping '{name}'");
             containers::stop(&name, cli.verbose)?;
-            println!("stopped container '{name}'");
         }
         Command::Fs(cmd) => match cmd {
             RootfsCommand::Import { source, name, force, install_packages } => {

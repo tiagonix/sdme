@@ -856,7 +856,9 @@ fn import_qcow2(image: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
         verbose,
     )?;
 
-    if verbose {
+    if !verbose {
+        eprintln!("warning: qcow2 imports can be slow; use -v to see progress");
+    } else {
         eprintln!("importing qcow2 image: {}", image.display());
     }
 
