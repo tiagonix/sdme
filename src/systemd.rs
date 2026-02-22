@@ -119,9 +119,23 @@ mod dbus {
         )
         .context("failed to create machine proxy")?;
 
-        let state: String = machine_proxy
-            .get_property("State")
-            .context("failed to read machine State property")?;
+        // The machine may be removed between GetMachine and get_property
+        // (TOCTOU race). Treat this as "not found" rather than a hard error
+        // so the caller can retry.
+        let state: String = match machine_proxy.get_property("State") {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if msg.contains("UnknownObject")
+                    || msg.contains("NoSuchMachine")
+                    || msg.contains("No machine")
+                    || msg.contains("no such object")
+                {
+                    return Ok(None);
+                }
+                return Err(e).context("failed to read machine State property");
+            }
+        };
 
         Ok(Some(state))
     }

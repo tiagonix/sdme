@@ -16,6 +16,9 @@ pub struct Config {
 
     #[serde(default = "default_datadir")]
     pub datadir: PathBuf,
+
+    #[serde(default = "default_boot_timeout")]
+    pub boot_timeout: u64,
 }
 
 fn default_interactive() -> bool {
@@ -26,11 +29,16 @@ fn default_datadir() -> PathBuf {
     PathBuf::from("/var/lib/sdme")
 }
 
+fn default_boot_timeout() -> u64 {
+    60
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             interactive: true,
             datadir: default_datadir(),
+            boot_timeout: default_boot_timeout(),
         }
     }
 }
@@ -40,6 +48,7 @@ impl Config {
         let interactive = if self.interactive { "yes" } else { "no" };
         println!("interactive = {interactive}");
         println!("datadir = {}", self.datadir.display());
+        println!("boot_timeout = {}", self.boot_timeout);
     }
 }
 
@@ -202,6 +211,7 @@ mod tests {
         let config = Config {
             interactive: true,
             datadir: PathBuf::from("/tmp/custom-data"),
+            ..Config::default()
         };
         save(&config, None).unwrap();
         let loaded = load(None).unwrap();

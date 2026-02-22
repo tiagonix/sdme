@@ -75,6 +75,10 @@ enum Command {
         #[arg(short, long)]
         rootfs: Option<String>,
 
+        /// Boot timeout in seconds (overrides config, default: 60)
+        #[arg(short, long)]
+        timeout: Option<u64>,
+
         /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -99,6 +103,10 @@ enum Command {
     Start {
         /// Container name
         name: String,
+
+        /// Boot timeout in seconds (overrides config, default: 60)
+        #[arg(short, long)]
+        timeout: Option<u64>,
     },
 
     /// Manage root filesystems
@@ -180,6 +188,14 @@ fn main() -> Result<()> {
                         }
                         cfg.datadir = path;
                     }
+                    "boot_timeout" => {
+                        let secs: u64 = value.parse()
+                            .map_err(|_| anyhow::anyhow!("boot_timeout must be a positive integer (seconds)"))?;
+                        if secs == 0 {
+                            bail!("boot_timeout must be greater than 0");
+                        }
+                        cfg.boot_timeout = secs;
+                    }
                     _ => bail!("unknown config key: {key}"),
                 }
                 config::save(&cfg, config_path)?;
@@ -195,14 +211,15 @@ fn main() -> Result<()> {
             validate_name(&name)?;
             containers::exec(&name, &command, cli.verbose)?;
         }
-        Command::Start { name } => {
+        Command::Start { name, timeout } => {
             system_check::check_systemd_version(257)?;
             validate_name(&name)?;
             containers::ensure_exists(&cfg.datadir, &name)?;
             systemd::start(&cfg.datadir, &name, cli.verbose)?;
+            let boot_timeout = timeout.unwrap_or(cfg.boot_timeout);
             systemd::wait_for_boot(
                 &name,
-                std::time::Duration::from_secs(30),
+                std::time::Duration::from_secs(boot_timeout),
                 cli.verbose,
             )?;
             println!("started container '{name}'");
@@ -231,7 +248,7 @@ fn main() -> Result<()> {
             let err = cmd.exec();
             bail!("failed to exec journalctl: {err}");
         }
-        Command::New { name, rootfs, command } => {
+        Command::New { name, rootfs, timeout, command } => {
             system_check::check_systemd_version(257)?;
             let opts = containers::CreateOptions { name, rootfs };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
@@ -244,9 +261,10 @@ fn main() -> Result<()> {
                 eprintln!("started container '{name}'");
             }
 
+            let boot_timeout = timeout.unwrap_or(cfg.boot_timeout);
             systemd::wait_for_boot(
                 &name,
-                std::time::Duration::from_secs(30),
+                std::time::Duration::from_secs(boot_timeout),
                 cli.verbose,
             )?;
             containers::join(&cfg.datadir, &name, &command, cli.verbose)?;
