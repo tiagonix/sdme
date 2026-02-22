@@ -8,7 +8,7 @@
 //! should conform to this pattern.
 
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, symlink};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -122,8 +122,34 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, verbose: bool) -> Result
     )
     .with_context(|| format!("failed to write {}", hosts_path.display()))?;
 
+    // Mask systemd-resolved in the container. When a container shares the
+    // host's network namespace (the default, no --private-network), the
+    // container's own systemd-resolved cannot bind 127.0.0.53 (already owned
+    // by the host) and ends up with no upstream DNS servers. The NSS "resolve"
+    // module then intercepts all lookups, gets SERVFAIL from the broken
+    // resolved, and the [!UNAVAIL=return] action in nsswitch.conf prevents
+    // fallback to the "dns" module. Masking the service makes NSS skip the
+    // resolve module (UNAVAIL) and fall through to "dns", which reads
+    // /etc/resolv.conf and queries the host's resolver.
+    let systemd_unit_dir = etc_dir.join("systemd").join("system");
+    fs::create_dir_all(&systemd_unit_dir)
+        .with_context(|| format!("failed to create {}", systemd_unit_dir.display()))?;
+    let resolved_mask = systemd_unit_dir.join("systemd-resolved.service");
+    symlink("/dev/null", &resolved_mask)
+        .with_context(|| format!("failed to mask systemd-resolved at {}", resolved_mask.display()))?;
+
+    // Write a placeholder /etc/resolv.conf as a regular file so that
+    // systemd-nspawn's --resolv-conf=auto can overwrite it with the host's
+    // DNS configuration. Many rootfs images (e.g. Debian) ship resolv.conf as
+    // a symlink to ../run/systemd/resolve/stub-resolv.conf; the auto mode's
+    // copy variant won't overwrite a symlink, leaving DNS broken. A regular
+    // file in the overlayfs upper layer shadows the lower layer's symlink.
+    let resolv_path = etc_dir.join("resolv.conf");
+    fs::write(&resolv_path, "# placeholder — replaced by systemd-nspawn at boot\n")
+        .with_context(|| format!("failed to write {}", resolv_path.display()))?;
+
     if verbose {
-        eprintln!("wrote hostname and hosts files");
+        eprintln!("wrote hostname, hosts, and resolv.conf files; masked systemd-resolved");
     }
 
     let rootfs_value = if rootfs == Path::new("/") {

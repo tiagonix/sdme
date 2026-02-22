@@ -1226,10 +1226,10 @@ fn install_commands(family: &DistroFamily) -> Vec<&'static str> {
         DistroFamily::Debian => vec![
             "apt-get update",
             "DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get -y install tzdata",
-            "apt-get install -y dbus systemd && apt-get purge -y systemd-resolved; apt-get autoremove -y -f && apt-get clean",
+            "apt-get install -y dbus systemd; apt-get autoremove -y -f && apt-get clean",
         ],
         DistroFamily::Fedora => vec![
-            "dnf install -y systemd util-linux pam && dnf remove -y systemd-resolved; dnf clean all",
+            "dnf install -y systemd util-linux pam; dnf clean all",
         ],
         _ => vec![],
     }
