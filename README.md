@@ -12,7 +12,7 @@ Runs on Linux with systemd. Requires root for all operations. Uses kernel overla
 |---------|---------|--------------|
 | `systemd` (>= 257) | `systemd` | All commands (D-Bus communication) |
 | `systemd-nspawn` | `systemd-container` | Running containers (`sdme start`) |
-| `machinectl` | `systemd-container` | `sdme join`, `sdme exec`, `sdme stop`, `sdme new` |
+| `machinectl` | `systemd-container` | `sdme join`, `sdme exec`, `sdme new` |
 | `journalctl` | `systemd` | `sdme logs` |
 
 ### Install all dependencies (Debian/Ubuntu)
@@ -34,10 +34,10 @@ sudo make install           # install to /usr/local (does NOT rebuild)
 ## Usage
 
 ```bash
-sudo sdme rootfs import --name ubuntu /path/to/rootfs  # import a rootfs
-sudo sdme rootfs ls                                     # list imported rootfs
-sudo sdme new --name mybox --rootfs ubuntu              # create + start + join
-sudo sdme create --name mybox --rootfs ubuntu           # create a container
+sudo sdme fs import --name ubuntu /path/to/rootfs       # import a rootfs
+sudo sdme fs ls                                         # list imported rootfs
+sudo sdme new --name mybox --fs ubuntu                  # create + start + join
+sudo sdme create --name mybox --fs ubuntu               # create a container
 sudo sdme start mybox                                   # start it
 sudo sdme join mybox                                    # enter it (login shell)
 sudo sdme join mybox /bin/bash -l                       # enter with a specific command

@@ -37,7 +37,7 @@ Path to config file.
 Default:
 .IR ~/.config/sdme/sdmerc .
 .SH COMMANDS
-.SS sdme new [\-n \fIname\fR] [\-r \fIrootfs\fR] [\-\-] [\fIcommand\fR...]
+.SS sdme new [\-n \fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
 .B \-n
@@ -46,7 +46,7 @@ If
 .B \-r
 is omitted, the host filesystem is used.
 An optional command overrides the default login shell.
-.SS sdme create [\-n \fIname\fR] [\-r \fIrootfs\fR]
+.SS sdme create [\-n \fIname\fR] [\-r \fIfs\fR]
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
 .SS sdme start \fIname\fR
@@ -64,8 +64,7 @@ Run a one\-off command in a running container using
 .BR machinectl (1)
 shell.
 .SS sdme stop \fIname\fR
-Stop a running container using
-.B machinectl poweroff
+Stop a running container via D\-Bus (TerminateMachine)
 for a clean shutdown.
 .SS sdme rm \fIname\fR...
 Remove one or more containers.
@@ -82,7 +81,7 @@ Extra arguments are passed through to journalctl
 (e.g.\&
 .BR \-f ,
 .BR "\-n 100" ).
-.SS sdme rootfs import \fIsource\fR \-n \fIname\fR [\-f]
+.SS sdme fs import \fIsource\fR \-n \fIname\fR [\-f]
 Import a root filesystem.
 The source type is auto\-detected:
 .RS
@@ -109,9 +108,9 @@ layers are applied in order with whiteout handling.
 Use
 .B \-f
 to remove a leftover staging directory from a previous failed import.
-.SS sdme rootfs ls
+.SS sdme fs ls
 List imported root filesystems with distro detection and paths.
-.SS sdme rootfs rm \fIname\fR...
+.SS sdme fs rm \fIname\fR...
 Remove one or more imported root filesystems.
 .SS sdme config get
 Show current configuration values.
@@ -187,22 +186,22 @@ Default:
 Default data directory (configurable via
 .BR datadir ).
 .TP
-.I /var/lib/sdme/rootfs/\fIname\fR/
+.I /var/lib/sdme/fs/\fIname\fR/
 Imported root filesystems (lower layers).
 .TP
 .I /var/lib/sdme/state/\fIname\fR
 Container state files (KEY=VALUE format).
 .TP
-.I /var/lib/sdme/\fIname\fR/upper/
+.I /var/lib/sdme/containers/\fIname\fR/upper/
 Per\-container overlayfs upper layer (copy\-on\-write modifications).
 .TP
-.I /var/lib/sdme/\fIname\fR/work/
+.I /var/lib/sdme/containers/\fIname\fR/work/
 Per\-container overlayfs work directory.
 .TP
-.I /var/lib/sdme/\fIname\fR/merged/
+.I /var/lib/sdme/containers/\fIname\fR/merged/
 Per\-container overlayfs merged mount point.
 .TP
-.I /var/lib/sdme/\fIname\fR/shared/
+.I /var/lib/sdme/containers/\fIname\fR/shared/
 Per\-container shared directory (accessible from host and container).
 .TP
 .I /etc/systemd/system/sdme@.service
@@ -238,7 +237,7 @@ Import an Ubuntu rootfs from a URL and create a container:
 .PP
 .RS
 .nf
-sdme rootfs import https://example.com/ubuntu.tar.xz \-n ubuntu
+sdme fs import https://example.com/ubuntu.tar.xz \-n ubuntu
 sdme new \-n mybox \-r ubuntu
 .fi
 .RE
