@@ -18,5 +18,9 @@ clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+tar = { version = "0.4", features = ["xattr"] }
+flate2 = "1"
+bzip2 = "0.5"
+xz2 = "0.1"
 ureq = "3"
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }

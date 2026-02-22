@@ -6,16 +6,15 @@
 
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
 use crate::{State, validate_name};
-use crate::system_check;
 
 /// An entry returned by [`list`].
 pub struct RootfsEntry {
@@ -145,10 +144,47 @@ fn detect_source_kind(source: &str) -> Result<SourceKind> {
     bail!("source path is not a file or directory: {source}");
 }
 
-/// Extract a tarball into the staging directory using the `tar` CLI.
+enum Compression {
+    None,
+    Gzip,
+    Bzip2,
+    Xz,
+}
+
+/// Detect the compression format of a file by reading its magic bytes.
+fn detect_compression(path: &Path) -> Result<Compression> {
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let mut magic = [0u8; 6];
+    let n = file.read(&mut magic)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let magic = &magic[..n];
+
+    if magic.starts_with(&[0x1f, 0x8b]) {
+        Ok(Compression::Gzip)
+    } else if magic.starts_with(b"BZh") {
+        Ok(Compression::Bzip2)
+    } else if magic.starts_with(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]) {
+        Ok(Compression::Xz)
+    } else {
+        Ok(Compression::None)
+    }
+}
+
+/// Unpack a tar archive from a reader into a destination directory.
+fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<()> {
+    let mut archive = tar::Archive::new(reader);
+    archive.set_preserve_permissions(true);
+    archive.set_preserve_ownerships(true);
+    archive.set_unpack_xattrs(true);
+    archive.unpack(dest)
+        .with_context(|| format!("failed to extract tarball to {}", dest.display()))?;
+    Ok(())
+}
+
+/// Extract a tarball into the staging directory using native Rust crates.
 fn import_tarball(tarball: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
-    let tar_bin = system_check::find_program("tar")
-        .context("tar is required for tarball import; install it with: apt install tar")?;
+    let compression = detect_compression(tarball)?;
 
     fs::create_dir_all(staging_dir)
         .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
@@ -157,17 +193,15 @@ fn import_tarball(tarball: &Path, staging_dir: &Path, verbose: bool) -> Result<(
         eprintln!("extracting {} -> {}", tarball.display(), staging_dir.display());
     }
 
-    let output = Command::new(&tar_bin)
-        .args(["xf", &tarball.to_string_lossy(), "-C", &staging_dir.to_string_lossy()])
-        .output()
-        .with_context(|| format!("failed to run {}", tar_bin.display()))?;
+    let file = File::open(tarball)
+        .with_context(|| format!("failed to open {}", tarball.display()))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("tar extraction failed: {}", stderr.trim());
+    match compression {
+        Compression::Gzip => unpack_tar(flate2::read::GzDecoder::new(file), staging_dir),
+        Compression::Bzip2 => unpack_tar(bzip2::read::BzDecoder::new(file), staging_dir),
+        Compression::Xz => unpack_tar(xz2::read::XzDecoder::new(file), staging_dir),
+        Compression::None => unpack_tar(file, staging_dir),
     }
-
-    Ok(())
 }
 
 /// Download a URL to a local file, streaming to constant memory.
@@ -899,10 +933,10 @@ mod tests {
         ));
         fs::write(&file_path, "not a dir").unwrap();
 
-        // A regular file is now treated as a tarball, so expect a tar error.
+        // A regular file is now treated as a tarball, so expect an extraction error.
         let err = import(tmp.path(), file_path.to_str().unwrap(), "test", false, false).unwrap_err();
         assert!(
-            err.to_string().contains("tar"),
+            err.to_string().contains("extract"),
             "unexpected error: {err}"
         );
 
@@ -1287,17 +1321,18 @@ mod tests {
         fs::create_dir(src.path().join("subdir")).unwrap();
         fs::write(src.path().join("subdir/nested.txt"), "nested\n").unwrap();
 
-        // Create a tarball from the source directory.
+        // Create a gzipped tarball using tar::Builder.
         let tarball = std::env::temp_dir().join(format!(
             "sdme-test-tarball-{}-{:?}.tar.gz",
             std::process::id(),
             std::thread::current().id()
         ));
-        let output = Command::new("tar")
-            .args(["czf", tarball.to_str().unwrap(), "-C", src.path().to_str().unwrap(), "."])
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "tar create failed");
+        let file = File::create(&tarball).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        builder.append_dir_all(".", src.path()).unwrap();
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap();
 
         import(tmp.path(), tarball.to_str().unwrap(), "tgz", false, false).unwrap();
 
@@ -1323,16 +1358,16 @@ mod tests {
 
         fs::write(src.path().join("file.txt"), "content\n").unwrap();
 
+        // Create an uncompressed tarball using tar::Builder.
         let tarball = std::env::temp_dir().join(format!(
             "sdme-test-tarball-plain-{}-{:?}.tar",
             std::process::id(),
             std::thread::current().id()
         ));
-        let output = Command::new("tar")
-            .args(["cf", tarball.to_str().unwrap(), "-C", src.path().to_str().unwrap(), "."])
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "tar create failed");
+        let file = File::create(&tarball).unwrap();
+        let mut builder = tar::Builder::new(file);
+        builder.append_dir_all(".", src.path()).unwrap();
+        builder.finish().unwrap();
 
         import(tmp.path(), tarball.to_str().unwrap(), "plain", false, false).unwrap();
 
@@ -1357,7 +1392,7 @@ mod tests {
 
         let err = import(tmp.path(), file_path.to_str().unwrap(), "bad", false, false).unwrap_err();
         assert!(
-            err.to_string().contains("tar"),
+            err.to_string().contains("extract"),
             "unexpected error: {err}"
         );
 
