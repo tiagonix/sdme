@@ -2,7 +2,7 @@
 
 **Alexandre Fiori — February 2026**
 
-Two weeks ago I had barely used Claude. Today I'm looking at ~5,300 lines of Rust I wrote in about a week — a fully functional container manager that talks to systemd over D-Bus, sets up overlayfs copy-on-write storage, imports rootfs from tarballs, URLs, OCI images, and QCOW2 disk images. It works on my machine. That trajectory is the point.
+Two weeks ago I had barely used Claude. Today I'm looking at ~6,200 lines of Rust I wrote in about two weeks — a fully functional container manager that talks to systemd over D-Bus, sets up overlayfs copy-on-write storage, imports rootfs from tarballs, URLs, OCI images, and QCOW2 disk images. It works on my machine. That trajectory is the point.
 
 ## Learning the tool
 
@@ -26,4 +26,4 @@ Many things came to mind, but I've been working on the Linux Userspace team at M
 - **Overlayfs containers**: Something like [virtme-ng](https://github.com/arighi/virtme-ng) — the idea of setting up an overlayfs on your current rootfs for quick, dirty experiments: install packages, break things, throw it away. Also a handy tool to spin up containers that run a full systemd init inside.
 - **Rootfs import**: Once the basic container management worked, the natural next step was making it easy to import existing root filesystems from other distros and OCI container images to use them locally.
 
-The result is [sdme](https://github.com/fiorix/sdme) — a rewrite of my earlier [devctl](https://github.com/fiorix/devctl) — that went from initial commit to OCI image import in 7 commits over roughly a week. It's a single Rust binary, about 5,200 lines, that manages the full lifecycle: create, start, join, exec, stop, remove, with rootfs import from directories, tarballs, URLs, OCI images, and QCOW2 disk images.
+The result is [sdme](https://github.com/fiorix/sdme) — based on a previously half-baked tool I was working on — that went from initial commit to a usable container manager in about two weeks. It's a single Rust binary, about 6,200 lines, that manages the full lifecycle: create, start, join, exec, stop, remove, with rootfs import from directories, tarballs, URLs, OCI images, and QCOW2 disk images.

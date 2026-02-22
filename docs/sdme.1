@@ -45,15 +45,25 @@ is omitted, a name is generated automatically.
 If
 .B \-r
 is omitted, the host filesystem is used.
+Use
+.B \-t
+to override the boot timeout (default: 60 seconds or the
+.B boot_timeout
+config value).
 An optional command overrides the default login shell.
 .SS sdme create [\-n \fIname\fR] [\-r \fIfs\fR]
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
-.SS sdme start \fIname\fR
+.SS sdme start \fIname\fR [\-t \fIseconds\fR]
 Start a stopped container.
 Installs or updates the
 .B sdme@.service
 template unit if needed, then starts the unit via D\-Bus.
+Use
+.B \-t
+to override the boot timeout (default: 60 seconds or the
+.B boot_timeout
+config value).
 .SS sdme join \fIname\fR [\-\-] [\fIcommand\fR...]
 Enter a running container using
 .BR machinectl (1)
@@ -63,16 +73,17 @@ An optional command overrides the default login shell.
 Run a one\-off command in a running container using
 .BR machinectl (1)
 shell.
-.SS sdme stop \fIname\fR
-Stop a running container via D\-Bus (TerminateMachine)
+.SS sdme stop \fIname\fR...
+Stop one or more running containers via D\-Bus (TerminateMachine)
 for a clean shutdown.
 .SS sdme rm \fIname\fR...
 Remove one or more containers.
 Running containers are stopped first.
 Deletes the state file and all overlayfs directories.
 .SS sdme ps
-List all containers with their status, health, and shared directory path.
+List all containers with their status, health, detected OS, and shared directory path.
 Health checks detect broken containers (missing directories, missing rootfs).
+The OS column shows the distro name from the rootfs os\-release file.
 .SS sdme logs \fIname\fR [\fIargs\fR...]
 View container logs by executing
 .BR journalctl (1)
@@ -81,8 +92,20 @@ Extra arguments are passed through to journalctl
 (e.g.\&
 .BR \-f ,
 .BR "\-n 100" ).
-.SS sdme fs import \fIsource\fR \-n \fIname\fR [\-f]
+.SS sdme fs import \fIsource\fR \-n \fIname\fR [\-f] [\-\-install\-packages \fImode\fR]
 Import a root filesystem.
+After import, systemd is detected in the rootfs; if missing, distro\-specific
+packages can be installed via chroot.
+The
+.B \-\-install\-packages
+flag controls this:
+.B auto
+(default) prompts interactively,
+.B yes
+always installs,
+.B no
+refuses if systemd is absent.
+.PP
 The source type is auto\-detected:
 .RS
 .IP \(bu 2
@@ -131,6 +154,12 @@ Absolute path to the data directory.
 Default:
 .BR /var/lib/sdme .
 .TP
+.B boot_timeout
+Boot timeout in seconds.
+Values: positive integer.
+Default:
+.BR 60 .
+.TP
 .B join_as_sudo_user
 Automatically join host\-rootfs containers as the
 .B SUDO_USER
@@ -165,6 +194,14 @@ String.
 Absolute path to the data directory.
 Default:
 .BR /var/lib/sdme .
+.TP
+.B boot_timeout
+Integer.
+Number of seconds to wait for a container to finish booting before giving up.
+Can be overridden per\-command with
+.BR \-t / \-\-timeout .
+Default:
+.BR 60 .
 .TP
 .B join_as_sudo_user
 Boolean.
@@ -261,5 +298,6 @@ sdme logs mybox \-f
 .BR systemd\-nspawn (1),
 .BR machinectl (1),
 .BR journalctl (1),
+.BR qemu\-nbd (8),
 .BR overlayfs (5),
 .BR sudo (8)

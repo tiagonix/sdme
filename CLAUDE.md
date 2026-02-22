@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-sdme is a rewrite of [devctl](https://github.com/fiorix/devctl) — lightweight systemd-nspawn containers with overlayfs. It produces a single binary `sdme` that manages containers from explicit root filesystems, keeping the base rootfs untouched via overlayfs copy-on-write.
+sdme is a lightweight systemd-nspawn container manager with overlayfs. It produces a single binary `sdme` that manages containers from explicit root filesystems, keeping the base rootfs untouched via overlayfs copy-on-write.
 
 Runs on Linux with systemd. Requires root for all operations. Uses kernel overlayfs and `machinectl` for container management.
 
@@ -27,8 +27,9 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 - **Overlayfs CoW storage**: each container gets `upper/work/merged/shared` directories under the datadir. The lower layer is the imported rootfs. Uses kernel overlayfs.
 - **Systemd integration**: containers are managed as a systemd template unit (`sdme@.service`). Start goes through D-Bus to systemd. The template unit is auto-installed and auto-updated when content changes.
 - **machinectl integration**: `join` and `exec` use `machinectl shell` for container interaction. `stop` uses D-Bus (`TerminateMachine`).
+- **DNS resolution**: containers share the host's network namespace. `systemd-resolved` is masked in the overlayfs upper layer at creation time so the host's resolver handles DNS. A placeholder `/etc/resolv.conf` regular file is written so `systemd-nspawn --resolv-conf=auto` can populate it at boot.
 - **State files**: container metadata persisted as KEY=VALUE files under `{datadir}/state/{name}`.
-- **Health checks**: `sdme ps` detects broken containers (missing dirs, missing rootfs) and reports health status.
+- **Health checks**: `sdme ps` detects broken containers (missing dirs, missing rootfs) and reports health status with OS detection via os-release.
 - **Conflict detection**: prevents name collisions with existing containers and `/var/lib/machines/`.
 
 ### CLI Commands
@@ -40,9 +41,9 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme start` | Start a container (installs/updates template unit, starts via D-Bus) |
 | `sdme join` | Enter a running container (`machinectl shell`) |
 | `sdme exec` | Run a one-off command in a running container (`machinectl shell`) |
-| `sdme stop` | Stop a running container (D-Bus `TerminateMachine`) |
+| `sdme stop` | Stop one or more running containers (D-Bus `TerminateMachine`) |
 | `sdme rm` | Remove containers (stops if running, deletes state + files) |
-| `sdme ps` | List containers with status, health, and shared directory |
+| `sdme ps` | List containers with status, health, OS, and shared directory |
 | `sdme logs` | View container logs (exec's `journalctl`) |
 | `sdme fs import` | Import a rootfs from a directory, tarball, URL, OCI image, or QCOW2 disk image |
 | `sdme fs ls` | List imported root filesystems |
@@ -55,11 +56,12 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 |------|---------|
 | `src/main.rs` | CLI entry point (clap derive), command dispatch |
 | `src/lib.rs` | Shared types: `State` (KEY=VALUE), `validate_name`, `sudo_user` |
-| `src/containers.rs` | Container create/remove/join/exec/stop/list, overlayfs directory management |
-| `src/systemd.rs` | D-Bus helpers (start/status), template unit generation, env files |
+| `src/containers.rs` | Container create/remove/join/exec/stop/list, overlayfs directory management, DNS setup |
+| `src/systemd.rs` | D-Bus helpers (start/status/stop), template unit generation, env files, boot/shutdown waiting |
 | `src/system_check.rs` | Version checks (systemd), dependency checks (`find_program`) |
 | `src/rootfs.rs` | Rootfs listing, removal, os-release parsing, distro detection |
 | `src/import.rs` | Rootfs import: directory copy, tarball extraction, URL download, OCI image extraction, QCOW2 disk image import |
+| `src/names.rs` | Container name generation from a Tupi-Guarani wordlist with collision avoidance |
 | `src/config.rs` | Config file loading/saving (`~/.config/sdme/sdmerc`) |
 
 ### Rust Dependencies
@@ -76,6 +78,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 - `zstd` — zstd decompression
 - `serde_json` — JSON parsing (OCI image manifests)
 - `ureq` — HTTP client for URL downloads (blocking, rustls TLS)
+- `ctrlc` — SIGINT handling for graceful import cancellation
 - `sha2` — SHA-256 hashing (dev-dependency, used in OCI tests)
 
 ### External Dependencies
@@ -96,4 +99,5 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
 - **Datadir**: always `/var/lib/sdme`.
 - **Container management**: `join` and `exec` use `machinectl shell`; `stop` uses D-Bus (`TerminateMachine`) for clean shutdown.
 - **D-Bus**: used for `start_unit`, `daemon_reload`, `is_unit_active`, `get_systemd_version`, `terminate_machine`. Always system bus.
-- **Rootfs import sources**: `sdme fs import` auto-detects the source type: URL prefix (`http://`/`https://`) → download + tarball extraction; existing directory → directory copy; QCOW2 disk image (magic bytes `QFI\xfb`) → mount via `qemu-nbd` + copy filesystem tree; existing file → tarball extraction via native Rust crates (`tar`, `flate2`, `bzip2`, `xz2`, `zstd`) with magic-byte compression detection. OCI container images (`.oci.tar.xz`, etc.) are auto-detected after tarball extraction by checking for an `oci-layout` file; the manifest chain is walked and filesystem layers are extracted in order with whiteout marker handling. QCOW2 import loads the `nbd` kernel module, connects the image read-only via `qemu-nbd`, discovers partitions via `/sys/block/`, mounts the largest partition, and copies the tree using the same `copy_tree()` used for directory imports.
+- **Rootfs import sources**: `sdme fs import` auto-detects the source type: URL prefix (`http://`/`https://`) → download + tarball extraction; existing directory → directory copy; QCOW2 disk image (magic bytes `QFI\xfb`) → mount via `qemu-nbd` + copy filesystem tree; existing file → tarball extraction via native Rust crates (`tar`, `flate2`, `bzip2`, `xz2`, `zstd`) with magic-byte compression detection. OCI container images (`.oci.tar.xz`, etc.) are auto-detected after tarball extraction by checking for an `oci-layout` file; the manifest chain is walked and filesystem layers are extracted in order with whiteout marker handling. QCOW2 import loads the `nbd` kernel module, connects the image read-only via `qemu-nbd`, discovers partitions via `/sys/block/`, mounts the largest partition, and copies the tree using the same `copy_tree()` used for directory imports. After import, systemd is detected in the rootfs; if missing, distro-specific packages are installed via chroot (`--install-packages` flag controls this: `auto` prompts interactively, `yes` always installs, `no` refuses if systemd is absent).
+- **DNS in containers**: containers share the host's network namespace (no `--private-network`). `systemd-resolved` is masked in the overlayfs upper layer during `create` so the container's NSS `resolve` module returns UNAVAIL, falling through to the `dns` module which queries the host's resolver via `/etc/resolv.conf`. A regular-file placeholder is written to shadow any rootfs symlink so `systemd-nspawn --resolv-conf=auto` can populate it at boot.

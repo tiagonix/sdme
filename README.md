@@ -1,6 +1,6 @@
 # sdme
 
-Lightweight systemd-nspawn containers with overlayfs. Rewrite of [devctl](https://github.com/fiorix/devctl).
+Lightweight systemd-nspawn containers with overlayfs.
 
 Runs on Linux with systemd. Requires root for all operations. Uses kernel overlayfs for copy-on-write storage and `machinectl` for container management.
 
@@ -14,12 +14,15 @@ Runs on Linux with systemd. Requires root for all operations. Uses kernel overla
 | `systemd-nspawn` | `systemd-container` | Running containers (`sdme start`) |
 | `machinectl` | `systemd-container` | `sdme join`, `sdme exec`, `sdme new` |
 | `journalctl` | `systemd` | `sdme logs` |
+| `qemu-nbd` | `qemu-utils` | `sdme fs import` (QCOW2 images only) |
 
 ### Install all dependencies (Debian/Ubuntu)
 
 ```bash
 sudo apt install systemd-container
 ```
+
+For QCOW2 image imports, also install `qemu-utils`.
 
 ## Build
 
@@ -45,6 +48,6 @@ sudo sdme exec mybox cat /etc/os-release                # run a one-off command
 sudo sdme logs mybox                                    # view logs
 sudo sdme logs mybox -f                                 # follow logs
 sudo sdme ps                                            # list containers
-sudo sdme stop mybox                                    # stop it
+sudo sdme stop mybox                                    # stop one or more containers
 sudo sdme rm mybox                                      # remove it (stops if running)
 ```
