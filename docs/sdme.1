@@ -267,6 +267,23 @@ Default:
 Used to locate the configuration file when
 .B XDG_CONFIG_HOME
 is not set.
+.TP
+.BR https_proxy ", " HTTPS_PROXY ", " http_proxy ", " HTTP_PROXY ", " all_proxy ", " ALL_PROXY
+Proxy URI for HTTP/HTTPS downloads during
+.BR "sdme fs import" .
+The first non\-empty variable found (in the order listed) is used.
+Example:
+.IR http://proxy:3128 .
+Since
+.B sdme
+requires root, pass proxy variables through
+.BR sudo (8)
+with
+.B \-E
+or by setting them inline.
+.TP
+.BR no_proxy ", " NO_PROXY
+Comma\-separated list of hosts or domains that should bypass the proxy.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -298,6 +315,22 @@ Follow logs for a container:
 .RS
 .nf
 sdme logs mybox \-f
+.fi
+.RE
+.PP
+Import a rootfs through an HTTP proxy:
+.PP
+.RS
+.nf
+sudo \-E sdme fs import https://example.com/ubuntu.tar.xz \-n ubuntu
+.fi
+.RE
+.PP
+Or pass the proxy variable inline:
+.PP
+.RS
+.nf
+sudo https_proxy=http://proxy:3128 sdme fs import https://example.com/ubuntu.tar.xz \-n ubuntu
 .fi
 .RE
 .SH SEE ALSO

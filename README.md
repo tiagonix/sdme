@@ -66,6 +66,30 @@ sudo sdme fs import --name ubuntu /tmp/noble
 sudo sdme new -r ubuntu
 ```
 
+Importing Fedora 43 container image (OCI):
+
+```bash
+sudo sdme fs import --name fedora43 https://download.fedoraproject.org/pub/fedora/linux/releases/43/Container/x86_64/images/Fedora-Container-Base-Generic-Minimal-43-1.6.x86_64.oci.tar.xz
+sudo sdme new -r fedora43
+```
+
+Importing Debian Sid:
+
+```bash
+sudo sdme fs import --name debian-sid https://cdimage.debian.org/images/cloud/sid/daily/latest/debian-sid-generic-amd64-daily.qcow2
+sudo sdme new -r debian-sid
+```
+
+Importing a rootfs through an HTTP proxy:
+
+```bash
+sudo -E sdme fs import --name ubuntu https://example.com/ubuntu.tar.xz
+# or
+sudo https_proxy=http://proxy:3128 sdme fs import --name ubuntu https://example.com/ubuntu.tar.xz
+```
+
+The standard proxy environment variables are supported: `https_proxy`, `HTTPS_PROXY`, `http_proxy`, `HTTP_PROXY`, `all_proxy`, `ALL_PROXY`, `no_proxy`, `NO_PROXY`.
+
 All other commands:
 
 ```bash

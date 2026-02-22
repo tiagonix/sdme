@@ -712,13 +712,53 @@ fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
 
 // --- URL download ---
 
+/// Resolve the proxy URI from environment variables.
+///
+/// Checks (in order): `https_proxy`, `HTTPS_PROXY`, `http_proxy`, `HTTP_PROXY`,
+/// `all_proxy`, `ALL_PROXY`. Returns the first non-empty value found.
+fn proxy_from_env() -> Option<String> {
+    for var in [
+        "https_proxy",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "HTTP_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+    ] {
+        if let Ok(val) = std::env::var(var) {
+            if !val.is_empty() {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
+/// Build a ureq agent, configuring proxy from environment if available.
+fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
+    let mut config = ureq::Agent::config_builder();
+    if let Some(proxy_uri) = proxy_from_env() {
+        if verbose {
+            eprintln!("using proxy: {proxy_uri}");
+        }
+        let proxy = ureq::Proxy::new(&proxy_uri)
+            .with_context(|| format!("invalid proxy URI: {proxy_uri}"))?;
+        config = config.proxy(Some(proxy));
+    } else if verbose {
+        eprintln!("no proxy configured");
+    }
+    Ok(config.build().into())
+}
+
 /// Download a URL to a local file, streaming to constant memory.
 fn download_file(url: &str, dest: &Path, verbose: bool) -> Result<()> {
     if verbose {
         eprintln!("downloading {url}");
     }
 
-    let response = ureq::get(url)
+    let agent = build_http_agent(verbose)?;
+    let response = agent
+        .get(url)
         .call()
         .with_context(|| format!("failed to download {url}"))?;
 
