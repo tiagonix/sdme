@@ -151,13 +151,15 @@ fn check_conflicts(datadir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+// NOTE: "rootfs" is the internal name; the CLI command is "fs" and the
+// on-disk path is {datadir}/fs/.
 fn resolve_rootfs(datadir: &Path, rootfs: Option<&str>) -> Result<PathBuf> {
     match rootfs {
         None => Ok(PathBuf::from("/")),
         Some(name) => {
-            let path = datadir.join("rootfs").join(name);
+            let path = datadir.join("fs").join(name);
             if !path.exists() {
-                bail!("rootfs not found: {}", path.display());
+                bail!("fs not found: {}", path.display());
             }
             Ok(path)
         }
@@ -260,8 +262,8 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         match &state {
             Ok(s) => {
                 let rootfs_name = s.get("ROOTFS").unwrap_or("");
-                if !rootfs_name.is_empty() && !datadir.join("rootfs").join(rootfs_name).exists() {
-                    problems.push("missing rootfs");
+                if !rootfs_name.is_empty() && !datadir.join("fs").join(rootfs_name).exists() {
+                    problems.push("missing fs");
                 }
             }
             Err(_) => {
@@ -500,7 +502,7 @@ mod tests {
         };
         let err = create(tmp.path(), &opts, false).unwrap_err();
         assert!(
-            err.to_string().contains("rootfs not found"),
+            err.to_string().contains("fs not found"),
             "unexpected error: {err}"
         );
     }
@@ -508,7 +510,7 @@ mod tests {
     #[test]
     fn test_create_with_rootfs_exists() {
         let tmp = TempDataDir::new();
-        let rootfs_dir = tmp.path().join("rootfs/myroot");
+        let rootfs_dir = tmp.path().join("fs/myroot");
         fs::create_dir_all(&rootfs_dir).unwrap();
 
         let opts = CreateOptions {

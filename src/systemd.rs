@@ -659,7 +659,7 @@ pub fn write_env_file(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         crate::validate_name(rootfs).with_context(|| {
             format!("invalid ROOTFS value in state file: {rootfs:?}")
         })?;
-        let path = datadir.join("rootfs").join(rootfs);
+        let path = datadir.join("fs").join(rootfs);
         path.to_str()
             .context("rootfs path is not valid UTF-8")?
             .to_string()
@@ -795,7 +795,7 @@ mod tests {
     #[test]
     fn test_write_env_file_explicit_rootfs() {
         let tmp = TempDataDir::new();
-        let rootfs_dir = tmp.path().join("rootfs/ubuntu");
+        let rootfs_dir = tmp.path().join("fs/ubuntu");
         fs::create_dir_all(&rootfs_dir).unwrap();
 
         let opts = CreateOptions {
@@ -808,7 +808,7 @@ mod tests {
 
         let env_path = tmp.path().join("containers/ubox/env");
         let content = fs::read_to_string(&env_path).unwrap();
-        let expected = format!("LOWERDIR={}/rootfs/ubuntu\n", tmp.path().display());
+        let expected = format!("LOWERDIR={}/fs/ubuntu\n", tmp.path().display());
         assert_eq!(content, expected);
     }
 }

@@ -1,6 +1,9 @@
 //! Rootfs import logic: directory copy, tarball extraction, URL download, OCI image, and QCOW2 support.
 //!
-//! This module handles all import sources for `sdme rootfs import`:
+//! NOTE: Internally the code uses "rootfs" (variables, structs, module name),
+//! but the CLI command is "fs" and the on-disk path is {datadir}/fs/.
+//!
+//! This module handles all import sources for `sdme fs import`:
 //! - Local directories (recursive copy preserving permissions, ownership, xattrs)
 //! - Tarball files (.tar, .tar.gz, .tar.bz2, .tar.xz, .tar.zst)
 //! - HTTP/HTTPS URLs pointing to tarballs
@@ -1107,18 +1110,18 @@ pub fn run(datadir: &Path, source: &str, name: &str, verbose: bool, force: bool)
 
     let kind = detect_source_kind(source)?;
 
-    let rootfs_dir = datadir.join("rootfs");
+    let rootfs_dir = datadir.join("fs");
     let final_dir = rootfs_dir.join(name);
     if final_dir.exists() {
         if !force {
-            bail!("rootfs already exists: {name}; re-run with -f to replace it");
+            bail!("fs already exists: {name}; re-run with -f to replace it");
         }
         if verbose {
-            eprintln!("removing existing rootfs '{name}' (forced)");
+            eprintln!("removing existing fs '{name}' (forced)");
         }
         let _ = make_removable(&final_dir);
         fs::remove_dir_all(&final_dir)
-            .with_context(|| format!("failed to remove existing rootfs {}", final_dir.display()))?;
+            .with_context(|| format!("failed to remove existing fs {}", final_dir.display()))?;
         let meta_path = rootfs_dir.join(format!(".{name}.meta"));
         let _ = fs::remove_file(meta_path);
     }
@@ -1157,7 +1160,7 @@ pub fn run(datadir: &Path, source: &str, name: &str, verbose: bool, force: bool)
             meta.write_to(&meta_path)?;
 
             if verbose {
-                eprintln!("imported rootfs '{name}' from {source}");
+                eprintln!("imported fs '{name}' from {source}");
             }
             Ok(())
         }
@@ -1249,7 +1252,7 @@ mod tests {
         )
         .unwrap();
 
-        let rootfs = tmp.path().join("rootfs/test");
+        let rootfs = tmp.path().join("fs/test");
         assert!(rootfs.is_dir());
         assert_eq!(
             fs::read_to_string(rootfs.join("hello.txt")).unwrap(),
@@ -1288,7 +1291,7 @@ mod tests {
         )
         .unwrap();
 
-        let rootfs = tmp.path().join("rootfs/perms");
+        let rootfs = tmp.path().join("fs/perms");
         let meta = fs::metadata(rootfs.join("script.sh")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o7777, 0o755);
 
@@ -1320,7 +1323,7 @@ mod tests {
         )
         .unwrap();
 
-        let rootfs = tmp.path().join("rootfs/sym");
+        let rootfs = tmp.path().join("fs/sym");
         let link_target = fs::read_link(rootfs.join("link.txt")).unwrap();
         assert_eq!(link_target.to_str().unwrap(), "target.txt");
 
@@ -1441,11 +1444,11 @@ mod tests {
         assert!(result.is_err());
 
         // Staging dir should be cleaned up.
-        let staging = tmp.path().join("rootfs/.fail.importing");
+        let staging = tmp.path().join("fs/.fail.importing");
         assert!(!staging.exists(), "staging dir was not cleaned up");
 
         // Final dir should not exist.
-        let final_dir = tmp.path().join("rootfs/fail");
+        let final_dir = tmp.path().join("fs/fail");
         assert!(!final_dir.exists(), "final dir should not exist");
 
         // Restore permissions so TempSourceDir can clean up.
@@ -1469,7 +1472,7 @@ mod tests {
         )
         .unwrap();
 
-        let rootfs = tmp.path().join("rootfs/empty");
+        let rootfs = tmp.path().join("fs/empty");
         assert!(rootfs.join("empty").is_dir());
         assert!(rootfs.join("also-empty").is_dir());
         assert_eq!(fs::read_dir(rootfs.join("empty")).unwrap().count(), 0);
@@ -1514,7 +1517,7 @@ mod tests {
         )
         .unwrap();
 
-        let dst_stat = lstat_entry(&tmp.path().join("rootfs/ts/file.txt")).unwrap();
+        let dst_stat = lstat_entry(&tmp.path().join("fs/ts/file.txt")).unwrap();
         assert_eq!(dst_stat.st_mtime, 1000000000);
     }
 
@@ -1540,7 +1543,7 @@ mod tests {
         )
         .unwrap();
 
-        let dst_stat = lstat_entry(&tmp.path().join("rootfs/dev/null")).unwrap();
+        let dst_stat = lstat_entry(&tmp.path().join("fs/dev/null")).unwrap();
         assert_eq!(dst_stat.st_mode & libc::S_IFMT, libc::S_IFCHR);
         assert_eq!(dst_stat.st_rdev, dev);
     }
@@ -1566,7 +1569,7 @@ mod tests {
         )
         .unwrap();
 
-        let meta_path = tmp.path().join("rootfs/.distro.meta");
+        let meta_path = tmp.path().join("fs/.distro.meta");
         assert!(meta_path.exists(), ".meta sidecar should exist");
         let state = State::read_from(&meta_path).unwrap();
         assert_eq!(state.get("DISTRO").unwrap(), "Ubuntu 24.04.4 LTS");
@@ -1588,7 +1591,7 @@ mod tests {
         )
         .unwrap();
 
-        let meta_path = tmp.path().join("rootfs/.noos.meta");
+        let meta_path = tmp.path().join("fs/.noos.meta");
         assert!(meta_path.exists(), ".meta sidecar should exist");
         let state = State::read_from(&meta_path).unwrap();
         assert_eq!(state.get("DISTRO").unwrap(), "");
@@ -1715,7 +1718,7 @@ mod tests {
         )
         .unwrap();
 
-        let rootfs = tmp.path().join("rootfs/tgz");
+        let rootfs = tmp.path().join("fs/tgz");
         assert!(rootfs.is_dir());
         assert_eq!(
             fs::read_to_string(rootfs.join("hello.txt")).unwrap(),
@@ -1757,7 +1760,7 @@ mod tests {
         )
         .unwrap();
 
-        let rootfs = tmp.path().join("rootfs/plain");
+        let rootfs = tmp.path().join("fs/plain");
         assert_eq!(
             fs::read_to_string(rootfs.join("file.txt")).unwrap(),
             "content\n"
@@ -1790,7 +1793,7 @@ mod tests {
         );
 
         // Staging dir should be cleaned up.
-        assert!(!tmp.path().join("rootfs/.bad.importing").exists());
+        assert!(!tmp.path().join("fs/.bad.importing").exists());
 
         let _ = fs::remove_file(&file_path);
     }
@@ -1817,7 +1820,7 @@ mod tests {
         )
         .unwrap();
 
-        let dst_stat = lstat_entry(&tmp.path().join("rootfs/own/owned.txt")).unwrap();
+        let dst_stat = lstat_entry(&tmp.path().join("fs/own/owned.txt")).unwrap();
         assert_eq!(dst_stat.st_uid, 1000);
         assert_eq!(dst_stat.st_gid, 1000);
     }
@@ -2182,7 +2185,7 @@ mod tests {
         )
         .unwrap();
 
-        let rootfs = tmp.path().join("rootfs/ocibasic");
+        let rootfs = tmp.path().join("fs/ocibasic");
         assert!(rootfs.is_dir());
         assert_eq!(
             fs::read_to_string(rootfs.join("hello.txt")).unwrap(),
@@ -2223,7 +2226,7 @@ mod tests {
         )
         .unwrap();
 
-        let rootfs = tmp.path().join("rootfs/ocimulti");
+        let rootfs = tmp.path().join("fs/ocimulti");
         assert_eq!(
             fs::read_to_string(rootfs.join("base.txt")).unwrap(),
             "from layer 1\n"
@@ -2264,7 +2267,7 @@ mod tests {
         )
         .unwrap();
 
-        let rootfs = tmp.path().join("rootfs/ociwhiteout");
+        let rootfs = tmp.path().join("fs/ociwhiteout");
         assert_eq!(
             fs::read_to_string(rootfs.join("keep.txt")).unwrap(),
             "keep me\n"
@@ -2303,7 +2306,7 @@ mod tests {
         )
         .unwrap();
 
-        let rootfs = tmp.path().join("rootfs/ociindex");
+        let rootfs = tmp.path().join("fs/ociindex");
         assert_eq!(
             fs::read_to_string(rootfs.join("from-index.txt")).unwrap(),
             "via manifest index\n"

@@ -1,7 +1,10 @@
 //! Internal API for managing root filesystems used as overlayfs lower layers.
 //!
+//! NOTE: Internally the code uses "rootfs" (variables, structs, module name),
+//! but the CLI command is "fs" and the on-disk path is {datadir}/fs/.
+//!
 //! Provides functions for importing, listing, and removing root filesystems
-//! stored under `{datadir}/rootfs/{name}/`. Each rootfs is a complete
+//! stored under `{datadir}/fs/{name}/`. Each rootfs is a complete
 //! directory tree that containers reference via their state file.
 
 use std::collections::HashMap;
@@ -69,12 +72,12 @@ pub(crate) fn detect_distro(rootfs: &Path) -> String {
     String::new()
 }
 
-/// List all imported root filesystems under `{datadir}/rootfs/`.
+/// List all imported root filesystems under `{datadir}/fs/`.
 ///
-/// Returns entries sorted by name. If no rootfs directory exists,
+/// Returns entries sorted by name. If no fs directory exists,
 /// returns an empty vec (not an error).
 pub fn list(datadir: &Path) -> Result<Vec<RootfsEntry>> {
-    let rootfs_dir = datadir.join("rootfs");
+    let rootfs_dir = datadir.join("fs");
     if !rootfs_dir.exists() {
         return Ok(Vec::new());
     }
@@ -115,7 +118,7 @@ pub fn list(datadir: &Path) -> Result<Vec<RootfsEntry>> {
 
 /// Import a root filesystem from a directory, tarball, URL, or OCI image.
 ///
-/// Delegates to [`crate::import::run`].
+/// Delegates to [`crate::import::run`]. CLI command: `sdme fs import`.
 pub fn import(datadir: &Path, source: &str, name: &str, verbose: bool, force: bool) -> Result<()> {
     crate::import::run(datadir, source, name, verbose, force)
 }
@@ -123,28 +126,28 @@ pub fn import(datadir: &Path, source: &str, name: &str, verbose: bool, force: bo
 /// Remove an imported root filesystem.
 ///
 /// Validates the name, checks that no container references it, then removes
-/// the rootfs directory and its `.meta` sidecar.
+/// the fs directory and its `.meta` sidecar.
 ///
 /// To prevent a TOCTOU race where `sdme create --rootfs <name>` could
 /// reference the rootfs between the usage check and the deletion, we
-/// first rename the rootfs directory to a staging name (atomic on the same
+/// first rename the fs directory to a staging name (atomic on the same
 /// filesystem), then verify no container was created referencing it. If a
 /// reference appeared, we rename it back and bail.
 pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     validate_name(name)?;
 
-    let rootfs_path = datadir.join("rootfs").join(name);
+    let rootfs_path = datadir.join("fs").join(name);
     if !rootfs_path.exists() {
-        bail!("rootfs not found: {name}");
+        bail!("fs not found: {name}");
     }
 
     // Check that no container is using this rootfs (first pass).
     check_rootfs_in_use(datadir, name)?;
 
-    // Atomically rename the rootfs to a staging name so that any concurrent
-    // `sdme create --rootfs <name>` will fail with "rootfs not found" instead
+    // Atomically rename the fs entry to a staging name so that any concurrent
+    // `sdme create --rootfs <name>` will fail with "fs not found" instead
     // of creating a container with a dangling reference.
-    let removing_path = datadir.join("rootfs").join(format!(".{name}.removing"));
+    let removing_path = datadir.join("fs").join(format!(".{name}.removing"));
     fs::rename(&rootfs_path, &removing_path).with_context(|| {
         format!(
             "failed to rename {} to {}",
@@ -154,7 +157,7 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     })?;
 
     // Re-check after rename: if a container was created between the first check
-    // and the rename, we need to restore the rootfs.
+    // and the rename, we need to restore the fs entry.
     if let Err(e) = check_rootfs_in_use(datadir, name) {
         // Restore the rootfs directory.
         let _ = fs::rename(&removing_path, &rootfs_path);
@@ -165,11 +168,11 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     fs::remove_dir_all(&removing_path)
         .with_context(|| format!("failed to remove {}", removing_path.display()))?;
 
-    let meta_path = datadir.join("rootfs").join(format!(".{name}.meta"));
+    let meta_path = datadir.join("fs").join(format!(".{name}.meta"));
     let _ = fs::remove_file(meta_path);
 
     if verbose {
-        eprintln!("removed rootfs '{name}'");
+        eprintln!("removed fs '{name}'");
     }
 
     Ok(())
@@ -195,7 +198,7 @@ fn check_rootfs_in_use(datadir: &Path, name: &str) -> Result<()> {
                         .unwrap_or("unknown")
                         .to_string(),
                 };
-                bail!("rootfs '{name}' is in use by container '{container}'");
+                bail!("fs '{name}' is in use by container '{container}'");
             }
         }
     }
@@ -363,7 +366,7 @@ mod tests {
         import(tmp.path(), src.path().to_str().unwrap(), "real", false, false).unwrap();
 
         // Create a fake staging dir that should be skipped.
-        fs::create_dir_all(tmp.path().join("rootfs/.fake.importing")).unwrap();
+        fs::create_dir_all(tmp.path().join("fs/.fake.importing")).unwrap();
 
         let entries = list(tmp.path()).unwrap();
         assert_eq!(entries.len(), 1);
@@ -377,12 +380,12 @@ mod tests {
         fs::write(src.path().join("file.txt"), "data\n").unwrap();
 
         import(tmp.path(), src.path().to_str().unwrap(), "rmme", false, false).unwrap();
-        assert!(tmp.path().join("rootfs/rmme").is_dir());
-        assert!(tmp.path().join("rootfs/.rmme.meta").exists());
+        assert!(tmp.path().join("fs/rmme").is_dir());
+        assert!(tmp.path().join("fs/.rmme.meta").exists());
 
         remove(tmp.path(), "rmme", false).unwrap();
-        assert!(!tmp.path().join("rootfs/rmme").exists());
-        assert!(!tmp.path().join("rootfs/.rmme.meta").exists());
+        assert!(!tmp.path().join("fs/rmme").exists());
+        assert!(!tmp.path().join("fs/.rmme.meta").exists());
     }
 
     #[test]
@@ -415,7 +418,7 @@ mod tests {
             "unexpected error: {err}"
         );
         // Rootfs should still exist.
-        assert!(tmp.path().join("rootfs/inuse").is_dir());
+        assert!(tmp.path().join("fs/inuse").is_dir());
     }
 
     #[test]
@@ -432,7 +435,7 @@ mod tests {
         remove(tmp.path(), "beta", false).unwrap();
 
         assert!(list(tmp.path()).unwrap().is_empty());
-        assert!(!tmp.path().join("rootfs/alpha").exists());
-        assert!(!tmp.path().join("rootfs/beta").exists());
+        assert!(!tmp.path().join("fs/alpha").exists());
+        assert!(!tmp.path().join("fs/beta").exists());
     }
 }

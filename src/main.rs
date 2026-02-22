@@ -101,8 +101,8 @@ enum Command {
     },
 
     /// Manage root filesystems
-    #[command(subcommand)]
-    Rootfs(RootfsCommand),
+    #[command(name = "fs", subcommand)]
+    Fs(RootfsCommand),
 }
 
 #[derive(Subcommand)]
@@ -287,7 +287,7 @@ fn main() -> Result<()> {
             containers::stop(&name, cli.verbose)?;
             println!("stopped container '{name}'");
         }
-        Command::Rootfs(cmd) => match cmd {
+        Command::Fs(cmd) => match cmd {
             RootfsCommand::Import { source, name, force } => {
                 system_check::check_systemd_version(257)?;
                 rootfs::import(&cfg.datadir, &source, &name, cli.verbose, force)?;
@@ -302,7 +302,7 @@ fn main() -> Result<()> {
                     let distro_w = entries.iter().map(|e| e.distro.len()).max().unwrap().max(6);
                     println!("{:<name_w$}  {:<distro_w$}  PATH", "NAME", "DISTRO");
                     for entry in &entries {
-                        let path = cfg.datadir.join("rootfs").join(&entry.name);
+                        let path = cfg.datadir.join("fs").join(&entry.name);
                         println!("{:<name_w$}  {:<distro_w$}  {}", entry.name, entry.distro, path.display());
                     }
                 }
@@ -318,7 +318,7 @@ fn main() -> Result<()> {
                     }
                 }
                 if failed {
-                    bail!("some rootfs entries could not be removed");
+                    bail!("some fs entries could not be removed");
                 }
             }
         },
