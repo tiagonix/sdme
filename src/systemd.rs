@@ -685,6 +685,8 @@ pub fn write_env_file(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
 pub fn start(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     ensure_template_unit(datadir, verbose)?;
 
+    crate::containers::ensure_permissions(datadir, name)?;
+
     let env_path = datadir.join("containers").join(name).join("env");
     write_env_file(datadir, name, verbose)?;
 

@@ -45,6 +45,8 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
     let state_dir = datadir.join("state");
     fs::create_dir_all(&state_dir)
         .with_context(|| format!("failed to create {}", state_dir.display()))?;
+    set_dir_permissions(datadir, 0o700)?;
+    set_dir_permissions(&state_dir, 0o700)?;
 
     let state_path = state_dir.join(&name);
     let _lock_file = match OpenOptions::new()
@@ -79,12 +81,26 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
 
 fn do_create(datadir: &Path, name: &str, rootfs: &Path, verbose: bool) -> Result<()> {
     let container_dir = datadir.join("containers").join(name);
+    let containers_dir = datadir.join("containers");
+    fs::create_dir_all(&containers_dir)
+        .with_context(|| format!("failed to create {}", containers_dir.display()))?;
+    set_dir_permissions(&containers_dir, 0o700)?;
 
-    for sub in &["upper", "work", "merged", "shared"] {
+    // The upper directory becomes the root of the overlayfs merged view, so it
+    // must be world-readable (0o755) — otherwise non-root services inside the
+    // container (e.g. dbus-daemon running as messagebus) cannot traverse the
+    // filesystem. The merged mount point also needs 0o755. The work directory
+    // is overlayfs-internal and can stay restricted.
+    for (sub, mode) in &[
+        ("upper", 0o755),
+        ("work", 0o700),
+        ("merged", 0o755),
+        ("shared", 0o755),
+    ] {
         let dir = container_dir.join(sub);
         fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create {}", dir.display()))?;
-        set_dir_permissions(&dir, 0o700)?;
+        set_dir_permissions(&dir, *mode)?;
     }
 
     if verbose {
@@ -174,6 +190,21 @@ pub fn ensure_exists(datadir: &Path, name: &str) -> Result<()> {
     let container_dir = datadir.join("containers").join(name);
     if !container_dir.exists() {
         bail!("container '{name}' state file exists but directory is missing");
+    }
+    Ok(())
+}
+
+/// Fix directory permissions on containers created before the 0o755 fix.
+///
+/// Called from `systemd::start()` before writing the env file so that
+/// old containers work without requiring manual intervention or recreation.
+pub fn ensure_permissions(datadir: &Path, name: &str) -> Result<()> {
+    let container_dir = datadir.join("containers").join(name);
+    for (sub, mode) in &[("upper", 0o755), ("merged", 0o755), ("shared", 0o755)] {
+        let dir = container_dir.join(sub);
+        if dir.exists() {
+            set_dir_permissions(&dir, *mode)?;
+        }
     }
     Ok(())
 }
