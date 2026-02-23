@@ -33,6 +33,24 @@ mod dbus {
         .context("failed to create systemd manager proxy")
     }
 
+    fn machine1_manager(conn: &Connection) -> Result<Proxy<'_>> {
+        Proxy::new(
+            conn,
+            "org.freedesktop.machine1",
+            "/org/freedesktop/machine1",
+            "org.freedesktop.machine1.Manager",
+        )
+        .context("failed to create machine1 manager proxy")
+    }
+
+    fn is_machine_not_found(e: &zbus::Error) -> bool {
+        let msg = format!("{e:#}");
+        msg.contains("NoSuchMachine")
+            || msg.contains("No machine")
+            || msg.contains("UnknownObject")
+            || msg.contains("no such object")
+    }
+
     pub fn daemon_reload() -> Result<()> {
         let conn = connect()?;
         let proxy = systemd_manager(&conn)?;
@@ -87,19 +105,12 @@ mod dbus {
     /// Returns `Some(state)` where state is e.g. "opening", "running",
     /// "closing", or "abandoned".
     pub fn get_machine_state(conn: &Connection, name: &str) -> Result<Option<String>> {
-        let manager = Proxy::new(
-            conn,
-            "org.freedesktop.machine1",
-            "/org/freedesktop/machine1",
-            "org.freedesktop.machine1.Manager",
-        )
-        .context("failed to create machine1 manager proxy")?;
+        let manager = machine1_manager(conn)?;
 
         let reply = match manager.call_method("GetMachine", &(name,)) {
             Ok(r) => r,
             Err(e) => {
-                let msg = format!("{e:#}");
-                if msg.contains("NoSuchMachine") || msg.contains("No machine") {
+                if is_machine_not_found(&e) {
                     return Ok(None);
                 }
                 return Err(e).context("failed to call GetMachine");
@@ -125,12 +136,7 @@ mod dbus {
         let state: String = match machine_proxy.get_property("State") {
             Ok(s) => s,
             Err(e) => {
-                let msg = format!("{e:#}");
-                if msg.contains("UnknownObject")
-                    || msg.contains("NoSuchMachine")
-                    || msg.contains("No machine")
-                    || msg.contains("no such object")
-                {
+                if is_machine_not_found(&e) {
                     return Ok(None);
                 }
                 return Err(e).context("failed to read machine State property");
@@ -154,6 +160,20 @@ mod dbus {
             .build();
         MessageIterator::for_match_rule(rule, conn, Some(64))
             .context("failed to subscribe to machine1 signals")
+    }
+
+    /// Check whether a boot state is terminal.
+    ///
+    /// Returns `Ok(true)` if the container is running, `Err` if it reached
+    /// a terminal failure state, or `Ok(false)` if boot is still in progress.
+    fn check_boot_state(name: &str, state: &str) -> Result<bool> {
+        if state == "running" {
+            return Ok(true);
+        }
+        if state == "closing" || state == "abandoned" {
+            bail!("container '{name}' failed during boot (state: {state})");
+        }
+        Ok(false)
     }
 
     /// Wait for a machine to reach the "running" state.
@@ -186,11 +206,8 @@ mod dbus {
             if verbose {
                 eprintln!("container state: {state}");
             }
-            if state == "running" {
+            if check_boot_state(name, &state)? {
                 return Ok(());
-            }
-            if state == "closing" || state == "abandoned" {
-                bail!("container '{name}' failed during boot (state: {state})");
             }
         }
 
@@ -256,13 +273,8 @@ mod dbus {
                         if verbose {
                             eprintln!("container state: {state}");
                         }
-                        if state == "running" {
+                        if check_boot_state(name, &state)? {
                             return Ok(());
-                        }
-                        if state == "closing" || state == "abandoned" {
-                            bail!(
-                                "container '{name}' failed during boot (state: {state})"
-                            );
                         }
                     }
                 }
@@ -278,13 +290,8 @@ mod dbus {
                         if verbose {
                             eprintln!("container state: {state}");
                         }
-                        if state == "running" {
+                        if check_boot_state(name, &state)? {
                             return Ok(());
-                        }
-                        if state == "closing" || state == "abandoned" {
-                            bail!(
-                                "container '{name}' failed during boot (state: {state})"
-                            );
                         }
                     }
                 }
@@ -306,19 +313,12 @@ mod dbus {
     ///
     /// Returns `None` if the machine is not registered.
     fn get_machine_leader(conn: &Connection, name: &str) -> Result<Option<u32>> {
-        let manager = Proxy::new(
-            conn,
-            "org.freedesktop.machine1",
-            "/org/freedesktop/machine1",
-            "org.freedesktop.machine1.Manager",
-        )
-        .context("failed to create machine1 manager proxy")?;
+        let manager = machine1_manager(conn)?;
 
         let reply = match manager.call_method("GetMachine", &(name,)) {
             Ok(r) => r,
             Err(e) => {
-                let msg = format!("{e:#}");
-                if msg.contains("NoSuchMachine") || msg.contains("No machine") {
+                if is_machine_not_found(&e) {
                     return Ok(None);
                 }
                 return Err(e).context("failed to call GetMachine");
@@ -376,23 +376,18 @@ mod dbus {
         loop {
             crate::check_interrupted()?;
 
-            match zbus::blocking::connection::Builder::address(address.as_str()) {
-                Ok(builder) => match builder.build() {
-                    Ok(_) => {
-                        if verbose {
-                            eprintln!("container '{name}' D-Bus is ready");
-                        }
-                        return Ok(());
+            match zbus::blocking::connection::Builder::address(address.as_str())
+                .and_then(|b| b.build())
+            {
+                Ok(_) => {
+                    if verbose {
+                        eprintln!("container '{name}' D-Bus is ready");
                     }
-                    Err(e) => {
-                        if verbose {
-                            eprintln!("container D-Bus not ready: {e}");
-                        }
-                    }
-                },
+                    return Ok(());
+                }
                 Err(e) => {
                     if verbose {
-                        eprintln!("invalid D-Bus address: {e}");
+                        eprintln!("container D-Bus not ready: {e}");
                     }
                 }
             }
@@ -419,13 +414,7 @@ mod dbus {
     /// Use [`wait_for_shutdown`] to wait for full shutdown.
     pub fn terminate_machine(name: &str) -> Result<()> {
         let conn = connect()?;
-        let manager = Proxy::new(
-            &conn,
-            "org.freedesktop.machine1",
-            "/org/freedesktop/machine1",
-            "org.freedesktop.machine1.Manager",
-        )
-        .context("failed to create machine1 manager proxy")?;
+        let manager = machine1_manager(&conn)?;
 
         manager
             .call_method("TerminateMachine", &(name,))
@@ -439,30 +428,16 @@ mod dbus {
     /// Returns a vector of machine names. Returns an empty vector if the
     /// call fails (e.g. machined is not running).
     pub fn list_machines() -> Vec<String> {
-        let conn = match connect() {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
-        let manager = match Proxy::new(
-            &conn,
-            "org.freedesktop.machine1",
-            "/org/freedesktop/machine1",
-            "org.freedesktop.machine1.Manager",
-        ) {
-            Ok(p) => p,
-            Err(_) => return Vec::new(),
-        };
-        let reply = match manager.call_method("ListMachines", &()) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
-        // ListMachines returns a(ssso): name, class, service, object_path
-        let machines: Vec<(String, String, String, zbus::zvariant::OwnedObjectPath)> =
-            match reply.body().deserialize() {
-                Ok(m) => m,
-                Err(_) => return Vec::new(),
-            };
-        machines.into_iter().map(|(name, _, _, _)| name).collect()
+        fn inner() -> Result<Vec<String>> {
+            let conn = connect()?;
+            let manager = machine1_manager(&conn)?;
+            let reply = manager.call_method("ListMachines", &())?;
+            // ListMachines returns a(ssso): name, class, service, object_path
+            let machines: Vec<(String, String, String, zbus::zvariant::OwnedObjectPath)> =
+                reply.body().deserialize()?;
+            Ok(machines.into_iter().map(|(name, _, _, _)| name).collect())
+        }
+        inner().unwrap_or_default()
     }
 
     /// Read the ActiveState property of a systemd unit.

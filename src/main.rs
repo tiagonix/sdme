@@ -158,6 +158,45 @@ enum ConfigCommand {
     },
 }
 
+fn for_each_container(
+    datadir: &std::path::Path,
+    targets: &[String],
+    verb: &str,
+    past: &str,
+    action: impl Fn(&str) -> Result<()>,
+) -> Result<()> {
+    let mut failed = false;
+    for input in targets {
+        let name = match containers::resolve_name(datadir, input) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("error: {input}: {e}");
+                failed = true;
+                continue;
+            }
+        };
+        eprintln!("{verb} '{name}'");
+        if let Err(e) = action(&name) {
+            eprintln!("error: {name}: {e}");
+            failed = true;
+        } else {
+            println!("{name}");
+        }
+    }
+    if failed {
+        bail!("some containers could not be {past}");
+    }
+    Ok(())
+}
+
+fn await_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
+    let boot_start = std::time::Instant::now();
+    systemd::wait_for_boot(name, timeout, verbose)?;
+    let remaining = timeout.saturating_sub(boot_start.elapsed());
+    systemd::wait_for_dbus(name, remaining, verbose)?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -232,15 +271,7 @@ fn main() -> Result<()> {
             eprintln!("starting '{name}'");
             systemd::start(&cfg.datadir, &name, cli.verbose)?;
             let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-            let boot_start = std::time::Instant::now();
-            let boot_result = (|| -> Result<()> {
-                systemd::wait_for_boot(&name, boot_timeout, cli.verbose)?;
-                let remaining = boot_timeout.saturating_sub(boot_start.elapsed());
-                systemd::wait_for_dbus(&name, remaining, cli.verbose)?;
-                Ok(())
-            })();
-
-            if let Err(e) = boot_result {
+            if let Err(e) = await_boot(&name, boot_timeout, cli.verbose) {
                 eprintln!("boot failed, stopping '{name}'");
                 let _ = containers::stop(&name, cli.verbose);
                 return Err(e);
@@ -281,10 +312,7 @@ fn main() -> Result<()> {
             let boot_result = (|| -> Result<()> {
                 systemd::start(&cfg.datadir, &name, cli.verbose)?;
                 let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-                let boot_start = std::time::Instant::now();
-                systemd::wait_for_boot(&name, boot_timeout, cli.verbose)?;
-                let remaining = boot_timeout.saturating_sub(boot_start.elapsed());
-                systemd::wait_for_dbus(&name, remaining, cli.verbose)?;
+                await_boot(&name, boot_timeout, cli.verbose)?;
                 Ok(())
             })();
 
@@ -352,27 +380,11 @@ fn main() -> Result<()> {
             } else {
                 names
             };
-            let mut failed = false;
-            for input in &targets {
-                let name = match containers::resolve_name(&cfg.datadir, input) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        eprintln!("error: {input}: {e}");
-                        failed = true;
-                        continue;
-                    }
-                };
-                eprintln!("removing '{name}'");
-                if let Err(e) = containers::remove(&cfg.datadir, &name, cli.verbose) {
-                    eprintln!("error: {name}: {e}");
-                    failed = true;
-                } else {
-                    println!("{name}");
-                }
-            }
-            if failed {
-                bail!("some containers could not be removed");
-            }
+            let datadir = &cfg.datadir;
+            let verbose = cli.verbose;
+            for_each_container(datadir, &targets, "removing", "removed", |name| {
+                containers::remove(datadir, name, verbose)
+            })?;
         }
         Command::Stop { names, all } => {
             if all && !names.is_empty() {
@@ -394,32 +406,12 @@ fn main() -> Result<()> {
                 eprintln!("no running containers to stop");
                 return Ok(());
             }
-            let mut failed = false;
-            for input in &targets {
-                let name = match containers::resolve_name(&cfg.datadir, input) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        eprintln!("error: {input}: {e}");
-                        failed = true;
-                        continue;
-                    }
-                };
-                if let Err(e) = containers::ensure_exists(&cfg.datadir, &name) {
-                    eprintln!("error: {name}: {e}");
-                    failed = true;
-                    continue;
-                }
-                eprintln!("stopping '{name}'");
-                if let Err(e) = containers::stop(&name, cli.verbose) {
-                    eprintln!("error: {name}: {e}");
-                    failed = true;
-                } else {
-                    println!("{name}");
-                }
-            }
-            if failed {
-                bail!("some containers could not be stopped");
-            }
+            let datadir = &cfg.datadir;
+            let verbose = cli.verbose;
+            for_each_container(datadir, &targets, "stopping", "stopped", |name| {
+                containers::ensure_exists(datadir, name)?;
+                containers::stop(name, verbose)
+            })?;
         }
         Command::Fs(cmd) => match cmd {
             RootfsCommand::Import { source, name, force, install_packages } => {

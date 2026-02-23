@@ -47,11 +47,10 @@ pub(crate) fn parse_os_release(rootfs: &Path) -> HashMap<String, String> {
         if let Some((key, value)) = line.split_once('=') {
             let value = value.trim();
             // Strip surrounding double quotes if present.
-            let value = if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
-                &value[1..value.len() - 1]
-            } else {
-                value
-            };
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(value);
             map.insert(key.trim().to_string(), value.to_string());
         }
     }

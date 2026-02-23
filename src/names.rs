@@ -225,10 +225,6 @@ fn shuffle<T>(words: &mut [T]) -> Result<()> {
     Ok(())
 }
 
-fn registered_machines() -> Vec<String> {
-    crate::systemd::list_machines()
-}
-
 fn is_name_taken(datadir: &Path, name: &str, machines: &[String]) -> bool {
     if datadir.join("state").join(name).exists() {
         return true;
@@ -286,7 +282,7 @@ pub fn generate_name(datadir: &Path) -> Result<String> {
     let mut words: Vec<&str> = WORDLIST.to_vec();
     shuffle(&mut words)?;
 
-    let machines = registered_machines();
+    let machines = crate::systemd::list_machines();
 
     // Try each base word.
     for word in &words {
