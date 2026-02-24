@@ -141,18 +141,48 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits,
     )
     .with_context(|| format!("failed to write {}", hosts_path.display()))?;
 
-    // Mask systemd-resolved in the container. When a container shares the
-    // host's network namespace (the default, no --private-network), the
-    // container's own systemd-resolved cannot bind 127.0.0.53 (already owned
-    // by the host) and ends up with no upstream DNS servers. The NSS "resolve"
-    // module then intercepts all lookups, gets SERVFAIL from the broken
-    // resolved, and the [!UNAVAIL=return] action in nsswitch.conf prevents
-    // fallback to the "dns" module. Masking the service makes NSS skip the
-    // resolve module (UNAVAIL) and fall through to "dns", which reads
-    // /etc/resolv.conf and queries the host's resolver.
+    // Mask units known to conflict or fail in containers to prevent a degraded system state.
+    //
+    // - systemd-resolved.service:
+    //   When a container shares the host's network namespace (the default, no
+    //   --private-network), the container's own systemd-resolved cannot bind
+    //   127.0.0.53 (already owned by the host) and ends up with no upstream DNS
+    //   servers. The NSS "resolve" module then intercepts all lookups, gets
+    //   SERVFAIL from the broken resolved, and the [!UNAVAIL=return] action in
+    //   nsswitch.conf prevents fallback to the "dns" module. Masking the service
+    //   makes NSS skip the resolve module (UNAVAIL) and fall through to "dns",
+    //   which reads /etc/resolv.conf and queries the host's resolver.
+    //
+    // - systemd-modules-load.service:
+    //   Containers typically lack CAP_SYS_MODULE. When cloning the host rootfs,
+    //   the container inherits kernel module configuration (/etc/modules-load.d)
+    //   which it cannot fulfill, causing the unit to fail and the system to
+    //   report a degraded state.
+    //
+    // - systemd-journald-audit.socket:
+    //   The audit subsystem is not namespaced in the kernel; containers usually
+    //   cannot listen to audit events, causing this socket unit to fail.
+    //
+    // - systemd-networkd-wait-online.service:
+    //   This service frequently fails or timeouts in containers because networkd
+    //   is often skipped via ConditionVirtualization or lacks permission to
+    //   manage the host network interfaces.
     let systemd_unit_dir = etc_dir.join("systemd").join("system");
     fs::create_dir_all(&systemd_unit_dir)
         .with_context(|| format!("failed to create {}", systemd_unit_dir.display()))?;
+
+    let units_to_mask = [
+        "systemd-resolved.service",
+        "systemd-modules-load.service",
+        "systemd-journald-audit.socket",
+        "systemd-networkd-wait-online.service",
+    ];
+
+    for unit in units_to_mask {
+        let mask_path = systemd_unit_dir.join(unit);
+        symlink("/dev/null", &mask_path)
+            .with_context(|| format!("failed to mask {unit} at {}", mask_path.display()))?;
+    }
 
     // For host-rootfs containers, mask host-specific .mount and .swap
     // units from /etc/systemd/system/ so they don't leak through overlayfs.
@@ -162,10 +192,6 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits,
     if rootfs == Path::new("/") {
         mask_host_mount_units(&systemd_unit_dir, verbose)?;
     }
-
-    let resolved_mask = systemd_unit_dir.join("systemd-resolved.service");
-    symlink("/dev/null", &resolved_mask)
-        .with_context(|| format!("failed to mask systemd-resolved at {}", resolved_mask.display()))?;
 
     // Write a placeholder /etc/resolv.conf as a regular file so that
     // systemd-nspawn's --resolv-conf=auto can overwrite it with the host's
@@ -198,7 +224,7 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits,
         .with_context(|| format!("failed to write {}", fstab_path.display()))?;
 
     if verbose {
-        eprintln!("wrote hostname, hosts, resolv.conf, machine-id, and fstab files; masked systemd-resolved");
+        eprintln!("wrote configuration files and masked incompatible units");
     }
 
     let rootfs_value = if rootfs == Path::new("/") {
@@ -700,6 +726,20 @@ mod tests {
         assert!(container_dir.join("work").is_dir());
         assert!(container_dir.join("merged").is_dir());
         assert!(container_dir.join("shared").is_dir());
+
+        // Verify masked units exist.
+        let systemd_dir = container_dir.join("upper/etc/systemd/system");
+        for unit in &[
+            "systemd-resolved.service",
+            "systemd-modules-load.service",
+            "systemd-journald-audit.socket",
+            "systemd-networkd-wait-online.service",
+        ] {
+            let mask = systemd_dir.join(unit);
+            assert!(mask.exists(), "mask for {unit} should exist");
+            let target = fs::read_link(&mask).expect("should be a symlink");
+            assert_eq!(target.to_str(), Some("/dev/null"), "{unit} should be masked to /dev/null");
+        }
 
         // Verify hostname.
         let hostname = fs::read_to_string(container_dir.join("upper/etc/hostname")).unwrap();
