@@ -250,6 +250,21 @@ fn detect_compression_magic(magic: &[u8]) -> Result<Compression> {
     }
 }
 
+/// Helper to get a decompression reader based on the compression type.
+fn get_decoder(file: File, compression: &Compression) -> Result<Box<dyn Read>> {
+    match compression {
+        Compression::Gzip => Ok(Box::new(flate2::read::GzDecoder::new(file))),
+        Compression::Bzip2 => Ok(Box::new(bzip2::read::BzDecoder::new(file))),
+        Compression::Xz => Ok(Box::new(xz2::read::XzDecoder::new(file))),
+        Compression::Zstd => {
+            let decoder = zstd::stream::read::Decoder::new(file)
+                .context("failed to create zstd decoder")?;
+            Ok(Box::new(decoder))
+        },
+        Compression::None => Ok(Box::new(file)),
+    }
+}
+
 // --- Tarball extraction ---
 
 /// Unpack a tar archive from a reader into a destination directory.
@@ -293,13 +308,7 @@ fn import_tarball(tarball: &Path, staging_dir: &Path, verbose: bool) -> Result<(
     let file =
         File::open(tarball).with_context(|| format!("failed to open {}", tarball.display()))?;
 
-    match compression {
-        Compression::Gzip => unpack_tar(flate2::read::GzDecoder::new(file), staging_dir),
-        Compression::Bzip2 => unpack_tar(bzip2::read::BzDecoder::new(file), staging_dir),
-        Compression::Xz => unpack_tar(xz2::read::XzDecoder::new(file), staging_dir),
-        Compression::Zstd => unpack_tar(zstd::stream::read::Decoder::new(file)?, staging_dir),
-        Compression::None => unpack_tar(file, staging_dir),
-    }?;
+    unpack_tar(get_decoder(file, &compression)?, staging_dir)?;
 
     // Check if the extracted content is an OCI image layout.
     if is_oci_layout(staging_dir) {
@@ -457,21 +466,7 @@ fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: bool) -> Resul
         let blob_file = File::open(&blob_path)?;
 
         let compression = detect_compression_magic(&magic[..n])?;
-        match compression {
-            Compression::Gzip => {
-                unpack_oci_layer(flate2::read::GzDecoder::new(blob_file), staging_dir)?
-            }
-            Compression::Bzip2 => {
-                unpack_oci_layer(bzip2::read::BzDecoder::new(blob_file), staging_dir)?
-            }
-            Compression::Xz => {
-                unpack_oci_layer(xz2::read::XzDecoder::new(blob_file), staging_dir)?
-            }
-            Compression::Zstd => {
-                unpack_oci_layer(zstd::stream::read::Decoder::new(blob_file)?, staging_dir)?
-            }
-            Compression::None => unpack_oci_layer(blob_file, staging_dir)?,
-        }
+        unpack_oci_layer(get_decoder(blob_file, &compression)?, staging_dir)?;
     }
 
     Ok(())
@@ -1326,24 +1321,7 @@ fn decompress_if_needed(path: &Path, verbose: bool) -> Result<PathBuf> {
             let mut output = File::create(&decompressed)
                 .with_context(|| format!("failed to create {}", decompressed.display()))?;
 
-            let mut reader: Box<dyn std::io::Read> = match compression {
-                Compression::Gzip => {
-                    Box::new(flate2::read::GzDecoder::new(input))
-                }
-                Compression::Bzip2 => {
-                    Box::new(bzip2::read::BzDecoder::new(input))
-                }
-                Compression::Xz => {
-                    Box::new(xz2::read::XzDecoder::new(input))
-                }
-                Compression::Zstd => {
-                    Box::new(
-                        zstd::stream::read::Decoder::new(input)
-                            .context("failed to create zstd decoder")?,
-                    )
-                }
-                Compression::None => unreachable!(),
-            };
+            let mut reader = get_decoder(input, &compression)?;
 
             let mut buf = [0u8; 65536];
             loop {
