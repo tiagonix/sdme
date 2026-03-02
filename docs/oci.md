@@ -191,7 +191,8 @@ any rootfs type. Mutually exclusive with `--private-network`.
 **`--oci-pod` (OCI app process only):** Only the
 `sdme-oci-app.service` process enters the pod's network namespace.
 The container's init and other services remain in their own namespace.
-Requires an OCI app rootfs.
+Requires an OCI app rootfs and `--private-network` (or `--hardened` /
+`--strict`, which imply it).
 
 Both flags can be combined on the same container. You can even point
 them at the same pod (`--pod=X --oci-pod=X`).
@@ -216,7 +217,7 @@ sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v
 sudo sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
 
 sudo sdme pod new web-pod
-sudo sdme new --oci-pod=web-pod -r nginx web
+sudo sdme new --oci-pod=web-pod --hardened -r nginx web
 
 # from the host, reach nginx via the pod's netns
 sudo nsenter --net=/run/sdme/pods/web-pod/netns curl -s http://localhost
@@ -251,13 +252,13 @@ sudo sdme fs import mysql docker.io/mysql --base-fs=ubuntu -v
 
 # Web tier
 sudo sdme pod new web-tier
-sudo sdme new --oci-pod=web-tier -r nginx frontend
-sudo sdme new --oci-pod=web-tier -r nginx api-gateway
+sudo sdme new --oci-pod=web-tier --hardened -r nginx frontend
+sudo sdme new --oci-pod=web-tier --hardened -r nginx api-gateway
 
 # Data tier (separate pod, separate network)
 sudo sdme pod new data-tier
-sudo sdme new --oci-pod=data-tier -r redis cache
-sudo sdme new --oci-pod=data-tier -r mysql db
+sudo sdme new --oci-pod=data-tier --hardened -r redis cache
+sudo sdme new --oci-pod=data-tier --hardened -r mysql db
 ```
 
 Containers in `web-tier` can reach each other on localhost (nginx on
@@ -280,7 +281,7 @@ equivalent to `--pod` alone but also wires up the inner
 ```bash
 # Both container and app share the same pod netns
 sudo sdme pod new shared-pod
-sudo sdme new --pod=shared-pod --oci-pod=shared-pod -r nginx web
+sudo sdme new --pod=shared-pod --oci-pod=shared-pod --hardened -r nginx web
 ```
 
 ### Pod management
@@ -294,37 +295,13 @@ sdme pod rm -f my-pod        # force remove
 
 ## Security
 
-sdme provides opt-in security hardening for containers. The two main
-flags:
+OCI app containers should always be created with `--hardened` or
+`--strict`. These flags enable user namespace isolation, private
+network, and capability restrictions. `--oci-pod` requires
+`--hardened` or `--strict` (or at minimum `--private-network`).
 
-**`--hardened`** enables user namespace isolation, private network,
-no-new-privileges, and drops several capabilities:
-
-```bash
-sudo sdme new -r nginx --hardened
-```
-
-**`--strict`** implies `--hardened` and adds Docker-equivalent
-capability drops, seccomp filters, and the `sdme-default` AppArmor
-profile:
-
-```bash
-sudo sdme new -r nginx --strict
-```
-
-Individual flags (`--drop-capability`, `--capability`,
-`--no-new-privileges`, `--read-only`, `--system-call-filter`,
-`--apparmor-profile`) are also available for fine-grained control.
-
-User namespace isolation (`--userns`) works with OCI app containers.
-It maps container root to a high unprivileged UID on the host:
-
-```bash
-sudo sdme new -r nginx --userns
-```
-
-See [security.md](security.md) for a full analysis of sdme's
-isolation model and comparisons with Docker and Podman.
+See [security.md](security.md) for the full details on hardening
+flags and comparisons with Docker and Podman.
 
 ## Limitations
 

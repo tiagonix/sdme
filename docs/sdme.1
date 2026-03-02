@@ -876,7 +876,7 @@ Run two OCI app containers in a shared pod network namespace:
 .nf
 sdme fs import nginx docker.io/nginx \-\-base\-fs=ubuntu
 sdme pod new oci\-pod
-sdme new \-\-oci\-pod=oci\-pod \-r nginx web
+sdme new \-\-oci\-pod=oci\-pod \-\-hardened \-r nginx web
 # nginx binds port 80 on the pod's loopback
 .fi
 .RE
@@ -1064,7 +1064,12 @@ process enter the pod's netns via
 .BR NetworkNamespacePath= .
 The container's init and other services remain in their own network namespace.
 Requires an OCI app rootfs (the rootfs must contain
-.IR sdme\-oci\-app.service ).
+.IR sdme\-oci\-app.service )
+and
+.BR \-\-private\-network
+(or
+.BR \-\-hardened " / " \-\-strict ,
+which imply it).
 Pod membership is stored in the container's state file as
 .BR OCI_POD .
 .PP

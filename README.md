@@ -30,7 +30,7 @@ If you have infinite time and look through the
 [architecture](docs/architecture.md) you'll see where I started: really
 wanted to mimic what virtme-ng does, cloning the host's root filesystem
 with an overlayfs on / and booting up a container. It's what you get by
-default just running `sudo sdme new` and from there I went... far.
+default just running `sudo sdme new` and from there... I went... far.
 
 Once I got the lifecycle of the clone rootfs working, I thought it would
 be natural to allow using any other rootfs, not just my own. Importing a
