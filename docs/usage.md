@@ -77,8 +77,10 @@ sudo sdme ps                     # list containers
 sudo sdme join <name>            # enter a running container
 sudo sdme exec <name> -- ls /    # run a command inside
 sudo sdme logs <name>            # view container journal
-sudo sdme stop <name>            # graceful shutdown
-sudo sdme rm <name>              # remove container and files
+sudo sdme stop <name>...         # graceful shutdown
+sudo sdme stop --all             # stop all running containers
+sudo sdme rm <name>...           # remove container and files
+sudo sdme rm --all               # remove all containers
 ```
 
 `sdme new` is a shortcut that combines create, start, and join. For

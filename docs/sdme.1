@@ -190,11 +190,17 @@ below.
 Requires a permissive umask (see
 .B NOTES
 below).
-.SS sdme start \fIname\fR [\-t \fIseconds\fR]
-Start a stopped container.
+.SS sdme start \fIname\fR... [\-t \fIseconds\fR] [\-\-all]
+Start one or more stopped containers.
 Installs or updates the
 .B sdme@.service
-template unit if needed, then starts the unit via D\-Bus.
+template unit if needed, then starts each unit via D\-Bus.
+Containers are started sequentially; if one fails to boot, it is stopped
+and the remaining containers are still attempted.
+.PP
+Use
+.B \-\-all
+to start all stopped containers.
 Use
 .B \-t
 to override the boot timeout (default: 60 seconds or the
@@ -1032,8 +1038,7 @@ Create a pod, then assign containers to it:
 sdme pod new my\-pod
 sdme create \-\-pod=my\-pod \-r ubuntu db
 sdme create \-\-pod=my\-pod \-r ubuntu app
-sdme start db
-sdme start app
+sdme start db app
 .fi
 .RE
 .PP

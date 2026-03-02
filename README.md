@@ -81,19 +81,19 @@ only the OCI app in one, sharing it across apps in other containers on
 the same host. This is useful for composing control-plane
 instrumentation alongside application workloads on separate loopbacks.
 
-The last stage of the journey:
+The last stage of the journey was
 [security hardening](docs/security.md). Spent time adding the most
 relevant security options in an attempt to bring sdme containers on par
 with Docker and Podman. The models are quite different and I think the
 end result is very acceptable.
 
-My take aways from this journey in creating sdme:
+My takeaways from this journey in creating sdme:
 
-- I'm totally sold on vibe coding
-- It's a long and iterative process, there is no magic
-- It takes significant time to iterate, review, and refine
-- The verification tasks are insanely useful and AI is really good at
-  this
+- I'm totally sold on vibe coding; I can do kettlebells while vibing
+- It's a long and iterative process, there are no magic prompts
+- It takes significant time to define, review, and refine your craft
+- The choice of language matters less than domain knowledge; I'm new to Rust
+- The verification tasks are insanely useful and AI is really good at this
 
 The question I had to answer for myself was: what happens to two decades
 of systems knowledge when AI can write code faster than I can type? Does

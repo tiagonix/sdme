@@ -241,10 +241,11 @@ enum Command {
     /// Remove one or more containers
     Rm {
         /// Container names
+        #[arg(required_unless_present = "all")]
         names: Vec<String>,
 
         /// Remove all containers
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "names")]
         all: bool,
 
         /// Skip confirmation prompts
@@ -255,10 +256,11 @@ enum Command {
     /// Stop one or more running containers
     Stop {
         /// Container names
+        #[arg(required_unless_present = "all")]
         names: Vec<String>,
 
         /// Stop all running containers
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "names")]
         all: bool,
 
         /// Terminate (SIGTERM to nspawn leader, 30s timeout)
@@ -288,10 +290,15 @@ enum Command {
         cpu_weight: Option<String>,
     },
 
-    /// Start a container
+    /// Start one or more containers
     Start {
-        /// Container name
-        name: String,
+        /// Container names
+        #[arg(required_unless_present = "all")]
+        names: Vec<String>,
+
+        /// Start all stopped containers
+        #[arg(short, long, conflicts_with = "names")]
+        all: bool,
 
         /// Boot timeout in seconds (overrides config, default: 60)
         #[arg(short, long)]
@@ -357,10 +364,11 @@ OCI REGISTRY IMAGES:
     /// Remove one or more imported root filesystems
     Rm {
         /// Names of the rootfs entries to remove
+        #[arg(required_unless_present = "all")]
         names: Vec<String>,
 
         /// Remove all imported root filesystems
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "names")]
         all: bool,
 
         /// Skip confirmation prompts
@@ -471,6 +479,7 @@ enum PodCommand {
     /// Remove one or more pods
     Rm {
         /// Pod names
+        #[arg(required = true)]
         names: Vec<String>,
         /// Force removal even if containers reference the pod
         #[arg(short, long)]
@@ -922,19 +931,39 @@ fn main() -> Result<()> {
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             containers::set_limits(&cfg.datadir, &name, &limits, cli.verbose)?;
         }
-        Command::Start { name, timeout } => {
+        Command::Start {
+            names,
+            all,
+            timeout,
+        } => {
             system_check::check_systemd_version(252)?;
-            let name = containers::resolve_name(&cfg.datadir, &name)?;
-            containers::ensure_exists(&cfg.datadir, &name)?;
-            eprintln!("starting '{name}'");
-            systemd::start(&cfg.datadir, &name, cli.verbose)?;
-            let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-            if let Err(e) = systemd::await_boot(&name, boot_timeout, cli.verbose) {
-                sdme::reset_interrupt();
-                eprintln!("boot failed, stopping '{name}'");
-                let _ = containers::stop(&name, containers::StopMode::Terminate, cli.verbose);
-                return Err(e);
+            let targets: Vec<String> = if all {
+                containers::list(&cfg.datadir)?
+                    .into_iter()
+                    .filter(|e| e.status == "stopped")
+                    .map(|e| e.name)
+                    .collect()
+            } else {
+                names
+            };
+            if targets.is_empty() {
+                eprintln!("no stopped containers to start");
+                return Ok(());
             }
+            let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
+            let datadir = &cfg.datadir;
+            let verbose = cli.verbose;
+            for_each_container(datadir, &targets, "starting", "started", |name| {
+                containers::ensure_exists(datadir, name)?;
+                systemd::start(datadir, name, verbose)?;
+                if let Err(e) = systemd::await_boot(name, boot_timeout, verbose) {
+                    sdme::reset_interrupt();
+                    eprintln!("boot failed, stopping '{name}'");
+                    let _ = containers::stop(name, containers::StopMode::Terminate, verbose);
+                    return Err(e);
+                }
+                Ok(())
+            })?;
         }
         Command::Join { name, command } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
@@ -1129,12 +1158,6 @@ fn main() -> Result<()> {
             }
         }
         Command::Rm { names, all, force } => {
-            if all && !names.is_empty() {
-                bail!("--all cannot be combined with container names");
-            }
-            if !all && names.is_empty() {
-                bail!("provide one or more container names, or use --all");
-            }
             let targets: Vec<String> = if all {
                 let all_names: Vec<String> = containers::list(&cfg.datadir)?
                     .into_iter()
@@ -1174,12 +1197,6 @@ fn main() -> Result<()> {
             term,
             kill,
         } => {
-            if all && !names.is_empty() {
-                bail!("--all cannot be combined with container names");
-            }
-            if !all && names.is_empty() {
-                bail!("provide one or more container names, or use --all");
-            }
             let mode = if kill {
                 containers::StopMode::Kill
             } else if term {
@@ -1227,9 +1244,6 @@ fn main() -> Result<()> {
                 }
             }
             PodCommand::Rm { names, force } => {
-                if names.is_empty() {
-                    bail!("provide one or more pod names");
-                }
                 let mut failed = false;
                 for name in &names {
                     eprintln!("removing pod '{name}'");
@@ -1301,12 +1315,6 @@ fn main() -> Result<()> {
                 }
             }
             RootfsCommand::Rm { names, all, force } => {
-                if all && !names.is_empty() {
-                    bail!("--all cannot be combined with fs names");
-                }
-                if !all && names.is_empty() {
-                    bail!("provide one or more fs names, or use --all");
-                }
                 let targets: Vec<String> = if all {
                     let all_names: Vec<String> = rootfs::list(&cfg.datadir)?
                         .into_iter()

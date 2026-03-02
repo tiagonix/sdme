@@ -47,7 +47,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 |---------|-------------|
 | `sdme new` | Create, start, and enter a new container (accepts same security flags as `create`) |
 | `sdme create` | Create a new container (overlayfs dirs + state file). Security flags: `--strict`, `--hardened`, `--drop-capability`, `--capability`, `--no-new-privileges`, `--read-only`, `--system-call-filter`, `--apparmor-profile` |
-| `sdme start` | Start a container (installs/updates template unit, starts via D-Bus) |
+| `sdme start` | Start one or more containers (installs/updates template unit, starts via D-Bus). Supports `--all` to start all stopped containers |
 | `sdme join` | Enter a running container (`machinectl shell`) |
 | `sdme exec` | Run a one-off command in a running container (`machinectl shell`) |
 | `sdme stop` | Graceful shutdown via `SIGRTMIN+4` (default), `--term` for terminate, `--kill` for force-kill |
