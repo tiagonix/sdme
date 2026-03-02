@@ -17,7 +17,13 @@ per\-container upper layer.
 .PP
 Containers are managed as systemd template units
 .RB ( sdme@.service )
+with
+.B Type=notify
 and controlled via D\-Bus.
+The unit is considered active only after
+.BR systemd\-nspawn (1)
+sends its readiness notification, and a 2\-minute startup timeout
+catches hung boots.
 Interactive access uses
 .BR machinectl (1).
 .PP
@@ -662,6 +668,12 @@ after reboot when a container referencing the pod is started).
 .TP
 .I /etc/systemd/system/sdme@.service
 Systemd template unit (auto\-installed and auto\-updated).
+Uses
+.B Type=notify
+so the service is considered started only after
+.BR systemd\-nspawn (1)
+signals readiness.
+Exit code 133 is treated as a successful clean shutdown.
 .TP
 .I /etc/systemd/system/sdme@\fIname\fR.service.d/limits.conf
 Per\-container resource limits drop\-in (created when limits are set,
