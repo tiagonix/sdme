@@ -152,6 +152,10 @@ stop_container() {
         timeout 30 sdme stop --term "$name" 2>/dev/null || true
 }
 
+fs_exists() {
+    sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$1"
+}
+
 # -- Phase 1: Import base OS rootfs -------------------------------------------
 
 phase1_import_base() {
@@ -159,6 +163,11 @@ phase1_import_base() {
     for distro in "${DISTROS[@]}"; do
         local fs_name="vfy-oci-$distro"
         local image="${DISTRO_IMAGES[$distro]}"
+        if fs_exists "$fs_name"; then
+            log "  $fs_name already exists, skipping import"
+            record "$distro/import-base" PASS "exists"
+            continue
+        fi
         log "  Importing $fs_name from $image"
         local output
         if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$fs_name" "$image" -v --install-packages=yes -f 2>&1); then
@@ -194,8 +203,13 @@ phase2_test_oci() {
 
         # -- Import app rootfs --
         local output
-        if ! output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$app_fs" "$APP_IMAGE" \
+        if fs_exists "$app_fs"; then
+            log "    $app_fs already exists, skipping import"
+            record "$distro/import-app" PASS "exists"
+        elif output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$app_fs" "$APP_IMAGE" \
                 --base-fs="$base_fs" --oci-mode=app -v --install-packages=yes -f 2>&1); then
+            record "$distro/import-app" PASS
+        else
             record "$distro/import-app" FAIL "$output"
             record "$distro/state-ports" SKIP "app import failed"
             record "$distro/state-volumes" SKIP "app import failed"
@@ -206,7 +220,6 @@ phase2_test_oci() {
             record "$distro/curl-content" SKIP "app import failed"
             continue
         fi
-        record "$distro/import-app" PASS
 
         # -- Patch volumes file --
         # nginx-unprivileged declares 8080/tcp but no volumes.

@@ -163,7 +163,7 @@ impl SecurityConfig {
 
     /// Generate systemd-nspawn arguments for security options.
     ///
-    /// Does NOT include AppArmor — that goes into the systemd unit drop-in
+    /// Does NOT include AppArmor: that goes into the systemd unit drop-in
     /// as `AppArmorProfile=`, not as an nspawn flag.
     pub fn to_nspawn_args(&self) -> Vec<String> {
         let mut args = Vec::new();

@@ -131,7 +131,7 @@ enum Command {
         #[arg(long)]
         cpus: Option<String>,
 
-        /// CPU weight 1–10000 (default: 100)
+        /// CPU weight 1-10000 (default: 100)
         #[arg(long)]
         cpu_weight: Option<String>,
 
@@ -213,7 +213,7 @@ enum Command {
         #[arg(long)]
         cpus: Option<String>,
 
-        /// CPU weight 1–10000 (default: 100)
+        /// CPU weight 1-10000 (default: 100)
         #[arg(long)]
         cpu_weight: Option<String>,
 
@@ -301,7 +301,7 @@ enum Command {
         #[arg(long)]
         cpus: Option<String>,
 
-        /// CPU weight 1–10000 (default: 100)
+        /// CPU weight 1-10000 (default: 100)
         #[arg(long)]
         cpu_weight: Option<String>,
     },
@@ -781,7 +781,7 @@ fn read_oci_volumes_for_rootfs(
 /// - `--pod` is not combined with user namespace isolation (`--userns`,
 ///   `--hardened`). The kernel blocks `setns(CLONE_NEWNET)` from a child
 ///   user namespace into the pod's netns (owned by the init userns).
-///   Use `--oci-pod` instead — its inner systemd drop-in joins the pod
+///   Use `--oci-pod` instead: its inner systemd drop-in joins the pod
 ///   netns from inside the container, avoiding the cross-userns restriction.
 fn validate_pod_args(
     datadir: &std::path::Path,

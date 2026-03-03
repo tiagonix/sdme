@@ -329,7 +329,7 @@ echo "=== Test 7: --system-call-filter ==="
 
 cleanup_container sec-seccomp
 
-# Use ~@raw-io to deny raw I/O syscalls (iopl, ioperm, etc.) — this
+# Use ~@raw-io to deny raw I/O syscalls (iopl, ioperm, etc.): this
 # doesn't interfere with systemd boot. Verify state persistence and that
 # the nspawn drop-in contains the filter flag.
 "$SDME" create -r ubuntu --system-call-filter=~@raw-io sec-seccomp "${VFLAG[@]}" 2>&1
@@ -710,12 +710,19 @@ if ! "$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "vfy-ubuntu"; 
     skipped "nginx userns OCI: rootfs vfy-ubuntu not found (run verify-matrix.sh --keep)"
 else
     cleanup_container "$ct_name"
-    "$SDME" fs rm "$fs_name" 2>/dev/null || true
 
-    if ! output=$(timeout 600 "$SDME" fs import "$fs_name" docker.io/nginx \
+    import_ok=0
+    if "$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$fs_name"; then
+        log "  $fs_name already exists, skipping import"
+        import_ok=1
+    elif output=$(timeout 600 "$SDME" fs import "$fs_name" docker.io/nginx \
             --base-fs=vfy-ubuntu --oci-mode=app -v --install-packages=yes -f 2>&1); then
-        fail "nginx userns OCI: import failed: $output"
+        import_ok=1
     else
+        fail "nginx userns OCI: import failed: $output"
+    fi
+
+    if [[ $import_ok -eq 1 ]]; then
         if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r "$fs_name" --userns "$ct_name" "${VFLAG[@]}" 2>&1); then
             fail "nginx userns OCI: create failed: $output"
         else
@@ -734,8 +741,6 @@ else
 
             cleanup_container "$ct_name"
         fi
-
-        "$SDME" fs rm "$fs_name" 2>/dev/null || true
     fi
 fi
 

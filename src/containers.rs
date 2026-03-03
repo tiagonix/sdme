@@ -1468,7 +1468,7 @@ mod tests {
         assert_eq!(state.get("READ_ONLY"), Some("yes"));
         assert_eq!(state.get("SYSCALL_FILTER"), Some("~@mount"));
         assert_eq!(state.get("APPARMOR_PROFILE"), Some("sdme-container"));
-        // ADD_CAPS not set — should not appear.
+        // ADD_CAPS not set: should not appear.
         assert_eq!(state.get("ADD_CAPS"), None);
     }
 

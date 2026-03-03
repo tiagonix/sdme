@@ -218,7 +218,7 @@ fn validate_port(port: &str) -> Result<()> {
 fn validate_port_number(s: &str, full: &str, which: &str) -> Result<()> {
     let n: u16 = s
         .parse()
-        .map_err(|_| anyhow::anyhow!("invalid {which} port '{s}' in '{full}': expected 1–65535"))?;
+        .map_err(|_| anyhow::anyhow!("invalid {which} port '{s}' in '{full}': expected 1-65535"))?;
     if n == 0 {
         bail!("invalid {which} port '{s}' in '{full}': port 0 is not allowed");
     }

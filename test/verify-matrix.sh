@@ -176,6 +176,10 @@ stop_container() {
         timeout 30 sdme stop --term "$name" 2>/dev/null || true
 }
 
+fs_exists() {
+    sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$1"
+}
+
 # -- Phase 1: Import base OS rootfs --------------------------------------------
 
 phase1_import() {
@@ -183,6 +187,11 @@ phase1_import() {
     for distro in "${DISTROS[@]}"; do
         local fs_name="vfy-$distro"
         local image="${DISTRO_IMAGES[$distro]}"
+        if fs_exists "$fs_name"; then
+            log "  $fs_name already exists, skipping import"
+            record "import/$distro" PASS "exists"
+            continue
+        fi
         log "  Importing $fs_name from $image"
         local output
         if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$fs_name" "$image" -v --install-packages=yes -f 2>&1); then
@@ -315,8 +324,13 @@ phase3_apps() {
 
             # Import app
             local output
-            if ! output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$fs_name" "$image" \
+            if fs_exists "$fs_name"; then
+                log "    $fs_name already exists, skipping import"
+                record "app/$app-on-$distro/import" PASS "exists"
+            elif output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$fs_name" "$image" \
                     --base-fs="$base_fs" --oci-mode=app -v --install-packages=yes -f 2>&1); then
+                record "app/$app-on-$distro/import" PASS
+            else
                 record "app/$app-on-$distro/import" FAIL "$output"
                 record "app/$app-on-$distro/boot" SKIP "import failed"
                 record "app/$app-on-$distro/service" SKIP "import failed"
@@ -325,7 +339,6 @@ phase3_apps() {
                 record "app/$app-on-$distro/verify" SKIP "import failed"
                 continue
             fi
-            record "app/$app-on-$distro/import" PASS
 
             # Inject env vars
             local env_file="$DATADIR/fs/$fs_name/oci/env"

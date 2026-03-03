@@ -253,7 +253,7 @@ pub struct ResourceLimits {
     pub memory: Option<String>,
     /// `CPUQuota=`, stored as a number of CPUs (e.g. "2" → 200%)
     pub cpus: Option<String>,
-    /// `CPUWeight=`, integer 1–10000
+    /// `CPUWeight=`, integer 1-10000
     pub cpu_weight: Option<String>,
 }
 
@@ -379,13 +379,13 @@ fn cpus_to_quota(s: &str) -> u64 {
     (v * 100.0).round() as u64
 }
 
-/// Validate a cpu-weight value (integer 1–10000).
+/// Validate a cpu-weight value (integer 1-10000).
 fn validate_cpu_weight(s: &str) -> Result<()> {
     let v: u64 = s.parse().map_err(|_| {
-        anyhow::anyhow!("invalid --cpu-weight value '{s}': expected integer 1–10000")
+        anyhow::anyhow!("invalid --cpu-weight value '{s}': expected integer 1-10000")
     })?;
     if !(1..=10000).contains(&v) {
-        bail!("--cpu-weight must be 1–10000, got {v}");
+        bail!("--cpu-weight must be 1-10000, got {v}");
     }
     Ok(())
 }

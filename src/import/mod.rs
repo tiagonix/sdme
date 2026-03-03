@@ -3287,7 +3287,7 @@ pub(crate) mod tests {
             &config_json,
         );
 
-        // Import through run() — this goes through the OCI tarball path,
+        // Import through run(): this goes through the OCI tarball path,
         // not the registry path, so oci_config won't be set. The import
         // should succeed and extract the layer contents.
         run(

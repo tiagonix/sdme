@@ -4,8 +4,8 @@
 //! so their processes see the same localhost. This enables patterns like
 //! "database :5432 + app :8080, reachable via 127.0.0.1".
 //!
-//! **State (persistent):** `{datadir}/pods/{name}/state` — KEY=VALUE file.
-//! **Runtime (volatile):** `/run/sdme/pods/{name}/netns` — bind-mount of the
+//! **State (persistent):** `{datadir}/pods/{name}/state` (KEY=VALUE file).
+//! **Runtime (volatile):** `/run/sdme/pods/{name}/netns`: bind-mount of the
 //! network namespace fd. Disappears on reboot; lazily recreated by
 //! [`ensure_runtime`] when a container references the pod.
 
@@ -219,7 +219,7 @@ fn create_netns(name: &str, verbose: bool) -> Result<()> {
         fd
     };
 
-    // 2. unshare(CLONE_NEWNET) — create new network namespace.
+    // 2. unshare(CLONE_NEWNET): create new network namespace.
     let ret = unsafe { libc::unshare(libc::CLONE_NEWNET) };
     if ret != 0 {
         unsafe { libc::close(saved_fd) };
@@ -240,7 +240,7 @@ fn create_netns(name: &str, verbose: bool) -> Result<()> {
     let ret = unsafe { libc::setns(saved_fd, libc::CLONE_NEWNET) };
     unsafe { libc::close(saved_fd) };
     if ret != 0 {
-        // This is critical — we can't leave the process in the wrong netns.
+        // This is critical; we can't leave the process in the wrong netns.
         let err = std::io::Error::last_os_error();
         eprintln!("FATAL: failed to restore network namespace: {err}");
         std::process::exit(1);

@@ -178,7 +178,7 @@ fn build_noerror_agent() -> Result<ureq::Agent> {
 ///   requests a token from the realm, returns it.
 /// - Other → error.
 ///
-/// Note: tokens have a TTL (typically 300–600s). For images with many large
+/// Note: tokens have a TTL (typically 300-600s). For images with many large
 /// layers on slow connections, the token may expire mid-pull, causing a 401
 /// on a subsequent blob download. This is an uncommon edge case; fixing it
 /// properly requires token refresh logic.

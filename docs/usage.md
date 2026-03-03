@@ -15,12 +15,6 @@ everything else you already know.
 Download a static binary from
 [fiorix.github.io/sdme](https://fiorix.github.io/sdme/).
 
-Or use the install script:
-
-```bash
-curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh
-```
-
 sdme requires root for all operations. It talks to systemd over D-Bus
 and manages overlayfs mounts, both of which need elevated privileges.
 

@@ -2,11 +2,11 @@
 
 Last verified: 2026-03-03
 
-System: Linux 6.17.0-14-generic, systemd 257 (257.9-0ubuntu2.1), sdme 0.2.5
+System: Linux 6.17.0-14-generic, systemd 257 (257.9-0ubuntu2.1), sdme 0.3.0
 
 ## 1. Unit Tests
 
-sdme has 322 unit tests across 14 modules, all inline in the source files
+sdme has 355 unit tests across 15 modules, all inline in the source files
 they test. No external test dependencies are required.
 
 ### Running unit tests
@@ -23,20 +23,21 @@ cargo test -- --list          # list all tests without running
 
 | Module       | Tests | Coverage area                                    |
 |--------------|-------|--------------------------------------------------|
-| import       | 83    | OCI registry, tarball, directory, disk image     |
-| containers   | 32    | Create, state, opaque dirs, name resolution      |
+| import       | 97    | OCI registry, tarball, directory, disk image     |
+| containers   | 44    | Create, state, opaque dirs, OCI ports/volumes    |
 | devfd_shim   | 29    | LD_PRELOAD shim ELF generation (x86_64, aarch64) |
 | mounts       | 26    | Bind mount and env var configuration             |
 | build        | 23    | Buildfile parsing (FROM/RUN/COPY), copy validate |
 | security     | 20    | Capabilities, seccomp, AppArmor, hardening modes |
 | rootfs       | 18    | Rootfs listing, removal, os-release, distro      |
-| lib          | 16    | Utility: sudo_user, resource limits, interrupts  |
+| lib          | 17    | Utility: sudo_user, resource limits, interrupts  |
 | drop_privs   | 16    | Privilege drop ELF generation (x86_64, aarch64)  |
 | systemd      | 15    | D-Bus unit management, boot wait, lifecycle      |
 | config       | 14    | Config loading/saving, defaults, path resolution |
 | pod          | 11    | Pod creation, netns sharing, state persistence   |
 | network      | 11    | Network config validation, state serialization   |
 | names        | 5     | Name generation, collision avoidance             |
+| main         | 6     | OCI port auto-wiring integration tests           |
 | system_check | 3     | Dependency and version checks                    |
 
 3 tests are ignored by default (require root or network access):
@@ -53,7 +54,7 @@ The CI pipeline (`.github/workflows/rust.yml`) runs on every push to
 1. `cargo fmt --check` (formatting)
 2. `cargo clippy --locked -- -D warnings` (lints)
 3. `cargo build --locked --verbose` (build)
-4. `cargo test --locked --verbose` (all 322 unit tests)
+4. `cargo test --locked --verbose` (all 355 unit tests)
 
 Release builds (`.github/workflows/release.yml`, triggered by `v*` tags)
 additionally cross-compile musl binaries for x86_64 and aarch64.
@@ -141,7 +142,7 @@ sudo ./test/verify-security.sh
 
 ### Unit tests
 
-332 passed, 0 failed, 3 ignored.
+352 passed, 0 failed, 3 ignored.
 
 ### Base OS Import and Boot
 
@@ -224,6 +225,7 @@ mysqladmin status, pg_isready).
 | --hardened bundle (state check)         | PASS   |
 | --hardened with --capability override   | PASS   |
 | --apparmor-profile persistence          | PASS   |
+| --apparmor-profile drop-in              | SKIP   |
 | --apparmor-profile enforcement: boot    | PASS   |
 | --apparmor-profile enforcement: profile | PASS   |
 | --apparmor-profile enforcement: deny    | PASS   |
@@ -248,8 +250,10 @@ mysqladmin status, pg_isready).
 - **--hardened bundle**: verifies the combined effect (userns,
   private-network, no-new-privileges, cap drops) and that explicit
   `--capability` overrides suppress the corresponding hardened drop.
-- **AppArmor**: verifies profile name persists in state and
-  drop-in. Enforcement test installs the `sdme-default` profile
+- **AppArmor**: verifies profile name persists in state file.
+  The drop-in check is skipped when the test profile is not loaded
+  on the host (the start fails before writing the drop-in).
+  Enforcement test installs the `sdme-default` profile
   on the host, boots a container with
   `--apparmor-profile=sdme-default`, verifies PID 1 shows
   `sdme-default (enforce)` in `/proc/1/attr/apparmor/current`,
@@ -307,10 +311,10 @@ private network, blocking host-side connectivity.
 
 ### OCI Port Forwarding and Volume Mounting
 
-| Distro | Import Base | Import App | State Ports | State Volumes | Volume Dir | Boot | Service | Curl Port | Curl Content |
-|--------|-------------|------------|-------------|---------------|------------|------|---------|-----------|--------------|
-| ubuntu | PASS        | PASS       | PASS        | PASS          | PASS       | PASS | PASS    | PASS      | PASS         |
-| fedora | PASS        | PASS       | PASS        | PASS          | PASS       | PASS | PASS    | PASS      | PASS         |
+| Distro | Import | State | Volume | Boot | Curl |
+|--------|--------|-------|--------|------|------|
+| ubuntu | PASS   | PASS  | PASS   | PASS | PASS |
+| fedora | PASS   | PASS  | PASS   | PASS | PASS |
 
 App image: `quay.io/nginx/nginx-unprivileged` (listens on 8080/tcp).
 Containers created with `--private-network --network-veth` to exercise
@@ -318,15 +322,14 @@ port forwarding through a virtual ethernet pair. `systemd-networkd`
 is enabled in the overlayfs upper layer so the container-side `host0`
 interface gets configured via DHCP.
 
-Each distro cell verifies:
-- **Import**: base OS and nginx-unprivileged OCI app import
+Each column covers multiple checks per distro (18 total):
+- **Import**: base OS rootfs and nginx-unprivileged OCI app
 - **State**: `PORTS` contains `tcp:8080:8080`, `OCI_VOLUMES` is set
-- **Volume dir**: host-side directory at
+- **Volume**: host-side directory at
   `volumes/{name}/usr-share-nginx-html/` exists after create
-- **Boot + service**: container boots, `sdme-oci-app.service` is active
-- **Curl**: HTTP 200 on the port-forwarded port via the host-side veth
-  IP, response body contains the test HTML marker written to the
-  host-side volume directory
+- **Boot**: container starts, `sdme-oci-app.service` is active
+- **Curl**: HTTP 200 on the forwarded port via host-side veth IP,
+  response body contains the test HTML marker
 
 The volume path `/usr/share/nginx/html` (nginx document root) is
 appended to the rootfs `oci/volumes` file after import, since
