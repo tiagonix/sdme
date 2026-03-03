@@ -585,7 +585,7 @@ top of it and all imply `--private-network` automatically:
   bridge
 - `--network-zone <name>`: joins a named zone for inter-container
   networking
-- `--port / -p <HOST:CONTAINER[/PROTO]>`: forwards a port (TCP by
+- `--port / -p <[PROTO:]HOST[:CONTAINER]>`: forwards a port (TCP by
   default, repeatable)
 
 These flags are available on both `sdme create` and `sdme new`. They
@@ -602,7 +602,7 @@ drop-in at start time.
 
 Bridge and zone names are validated (alphanumeric, hyphens,
 underscores). Port specs are validated for format
-(`HOST:CONTAINER[/PROTO]`) and range (1-65535).
+(`[PROTO:]HOST[:CONTAINER]`) and range (1-65535).
 
 ## 10. Pods
 

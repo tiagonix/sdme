@@ -1,8 +1,8 @@
 # sdme: Tests
 
-Last verified: 2026-03-02
+Last verified: 2026-03-03
 
-System: Linux 6.17.0-14-generic, systemd 257 (257.9-0ubuntu2.1), sdme 0.1.6
+System: Linux 6.17.0-14-generic, systemd 257 (257.9-0ubuntu2.1), sdme 0.2.5
 
 ## 1. Unit Tests
 
@@ -98,6 +98,25 @@ sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
 sudo ./test/verify-pods.sh
 ```
 
+### verify-oci.sh
+
+OCI port forwarding and volume mounting end-to-end validation. Imports
+`nginx-unprivileged` as an OCI app on two base distros, verifies that
+OCI-declared ports and volumes are auto-wired into the container state,
+and confirms nginx serves custom content from a host-side volume through
+port-forwarded networking.
+
+```bash
+sudo ./test/verify-oci.sh
+sudo ./test/verify-oci.sh --distro ubuntu  # single distro
+sudo ./test/verify-oci.sh --keep           # keep artifacts
+```
+
+Each distro cell verifies: base import, app import, PORTS and
+OCI_VOLUMES in the state file, host volume directory creation, container
+boot, `sdme-oci-app.service` active, HTTP 200 on the forwarded port,
+and response body containing the test HTML content.
+
 ### verify-security.sh
 
 Security hardening and user namespace end-to-end validation. Tests CLI
@@ -122,7 +141,7 @@ sudo ./test/verify-security.sh
 
 ### Unit tests
 
-319 passed, 0 failed, 3 ignored.
+332 passed, 0 failed, 3 ignored.
 
 ### Base OS Import and Boot
 
@@ -285,3 +304,32 @@ Each cell verifies: container created with `--hardened`, boots
 successfully, and `sdme-oci-app.service` is active. App-specific
 health checks (HTTP, CLI) are skipped because `--hardened` enables
 private network, blocking host-side connectivity.
+
+### OCI Port Forwarding and Volume Mounting
+
+| Distro | Import Base | Import App | State Ports | State Volumes | Volume Dir | Boot | Service | Curl Port | Curl Content |
+|--------|-------------|------------|-------------|---------------|------------|------|---------|-----------|--------------|
+| ubuntu | PASS        | PASS       | PASS        | PASS          | PASS       | PASS | PASS    | PASS      | PASS         |
+| fedora | PASS        | PASS       | PASS        | PASS          | PASS       | PASS | PASS    | PASS      | PASS         |
+
+App image: `quay.io/nginx/nginx-unprivileged` (listens on 8080/tcp).
+Containers created with `--private-network --network-veth` to exercise
+port forwarding through a virtual ethernet pair. `systemd-networkd`
+is enabled in the overlayfs upper layer so the container-side `host0`
+interface gets configured via DHCP.
+
+Each distro cell verifies:
+- **Import**: base OS and nginx-unprivileged OCI app import
+- **State**: `PORTS` contains `tcp:8080:8080`, `OCI_VOLUMES` is set
+- **Volume dir**: host-side directory at
+  `volumes/{name}/usr-share-nginx-html/` exists after create
+- **Boot + service**: container boots, `sdme-oci-app.service` is active
+- **Curl**: HTTP 200 on the port-forwarded port via the host-side veth
+  IP, response body contains the test HTML marker written to the
+  host-side volume directory
+
+The volume path `/usr/share/nginx/html` (nginx document root) is
+appended to the rootfs `oci/volumes` file after import, since
+nginx-unprivileged declares exposed ports but no volumes. This
+exercises the full pipeline: read volumes file, create host dirs,
+add bind mounts, serve content.

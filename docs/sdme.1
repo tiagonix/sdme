@@ -1,4 +1,4 @@
-.TH SDME 1 "2026-03-01" "sdme" "User Commands"
+.TH SDME 1 "2026-03-03" "sdme" "User Commands"
 .SH NAME
 sdme \- lightweight systemd\-nspawn containers with overlayfs
 .SH SYNOPSIS
@@ -805,11 +805,11 @@ sudo https_proxy=http://proxy:3128 sdme fs import ubuntu https://example.com/ubu
 .fi
 .RE
 .PP
-Create a container with a private network and port forwarding:
+Create a container with a private network, veth, and port forwarding:
 .PP
 .RS
 .nf
-sdme new \-\-private\-network \-\-port 8080:80 webserver \-r ubuntu
+sdme new \-\-private\-network \-\-network\-veth \-\-port 8080:80 webserver \-r ubuntu
 .fi
 .RE
 .PP
@@ -974,18 +974,29 @@ creates automatically.
 Example:
 .BR myzone .
 .TP
-.BI \-\-port ", " \-p " " host:container[/proto]
+.BI \-\-port ", " \-p " " [proto:]host[:container]
 Forward a port from the host to the container.
 Implies
 .BR \-\-private\-network .
-The protocol is
+The protocol prefix is
 .B tcp
 (default) or
 .BR udp .
+If the container port is omitted, the host port is used for both.
 Can be specified multiple times for multiple ports.
+Port forwarding requires a virtual ethernet pair to route traffic;
+combine with
+.BR \-\-network\-veth ,
+.BR \-\-network\-bridge ,
+or
+.BR \-\-network\-zone .
+The container must run
+.BR systemd\-networkd (8)
+to configure the container\-side interface via DHCP.
 Example:
 .BR 8080:80 ,
-.BR 53:53/udp .
+.BR tcp:8080:80 ,
+.BR udp:53:53 .
 .PP
 Network configuration is stored in the container's state file and applied at
 start time via environment variables in the systemd unit.
@@ -1057,7 +1068,23 @@ network namespace (via
 or
 .BR \-\-strict ).
 Each OCI port is mapped from the same host port to the same container port
-(e.g.\& 80:80/tcp).
+(e.g.\& tcp:80:80).
+.PP
+Port forwarding requires a virtual ethernet pair to route traffic between
+host and container.
+Combine
+.B \-\-private\-network
+with
+.BR \-\-network\-veth ,
+.BR \-\-network\-bridge ,
+or
+.B \-\-network\-zone
+for ports to be reachable.
+The container must have
+.BR systemd\-networkd (8)
+enabled so the container\-side interface
+.RI ( host0 )
+gets configured via DHCP.
 .PP
 User\-supplied
 .B \-\-port

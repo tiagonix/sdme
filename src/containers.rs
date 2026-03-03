@@ -446,7 +446,7 @@ pub fn resolve_rootfs(datadir: &Path, rootfs: Option<&str>) -> Result<PathBuf> {
 /// Read `/oci/ports` from a rootfs and return port forwarding rules.
 ///
 /// Each line in the file is `PORT/PROTO` (e.g. `80/tcp`). Returns
-/// `"PORT:PORT/PROTO"` entries mapping the same port on host and container.
+/// `"PROTO:PORT:PORT"` entries suitable for systemd-nspawn `--port=`.
 /// Returns an empty vec if the file doesn't exist or is empty.
 pub fn read_oci_ports(rootfs: &Path) -> Vec<String> {
     let ports_path = rootfs.join("oci/ports");
@@ -461,7 +461,7 @@ pub fn read_oci_ports(rootfs: &Path) -> Vec<String> {
             continue;
         }
         // Expect "PORT/PROTO" format
-        let (port_str, _proto) = match line.split_once('/') {
+        let (port_str, proto) = match line.split_once('/') {
             Some((p, proto)) => (p, proto),
             None => {
                 eprintln!("warning: invalid OCI port entry (no protocol): {line}");
@@ -475,8 +475,8 @@ pub fn read_oci_ports(rootfs: &Path) -> Vec<String> {
                 continue;
             }
         };
-        // Map same port on host and container
-        result.push(format!("{port}:{line}"));
+        // Map same port on host and container: proto:host:container
+        result.push(format!("{proto}:{port}:{port}"));
     }
     result
 }
@@ -1517,7 +1517,7 @@ mod tests {
         fs::create_dir_all(rootfs.join("oci")).unwrap();
         fs::write(rootfs.join("oci/ports"), "80/tcp\n3306/tcp\n").unwrap();
         let ports = read_oci_ports(&rootfs);
-        assert_eq!(ports, vec!["80:80/tcp", "3306:3306/tcp"]);
+        assert_eq!(ports, vec!["tcp:80:80", "tcp:3306:3306"]);
     }
 
     #[test]
@@ -1531,7 +1531,7 @@ mod tests {
         )
         .unwrap();
         let ports = read_oci_ports(&rootfs);
-        assert_eq!(ports, vec!["80:80/tcp", "443:443/tcp"]);
+        assert_eq!(ports, vec!["tcp:80:80", "tcp:443:443"]);
     }
 
     #[test]
@@ -1541,7 +1541,7 @@ mod tests {
         fs::create_dir_all(rootfs.join("oci")).unwrap();
         fs::write(rootfs.join("oci/ports"), "53/udp\n").unwrap();
         let ports = read_oci_ports(&rootfs);
-        assert_eq!(ports, vec!["53:53/udp"]);
+        assert_eq!(ports, vec!["udp:53:53"]);
     }
 
     // --- read_oci_volumes tests ---

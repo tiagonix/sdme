@@ -3190,9 +3190,9 @@ pub(crate) mod tests {
         // Verify read_oci_ports can parse what setup_app_image wrote.
         let ports = crate::containers::read_oci_ports(&staging);
         assert_eq!(ports.len(), 2);
-        // read_oci_ports returns "PORT:PORT/PROTO" format.
-        assert!(ports.contains(&"443:443/tcp".to_string()));
-        assert!(ports.contains(&"80:80/tcp".to_string()));
+        // read_oci_ports returns "PROTO:PORT:PORT" format.
+        assert!(ports.contains(&"tcp:443:443".to_string()));
+        assert!(ports.contains(&"tcp:80:80".to_string()));
     }
 
     #[test]

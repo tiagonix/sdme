@@ -367,7 +367,7 @@ sudo sdme create -r mysql --bind /srv/mysql-data:/oci/root/var/lib/mysql
 OCI images declare exposed ports in their image config (e.g. nginx
 exposes 80/tcp, mysql exposes 3306/tcp). sdme reads these from the
 `/oci/ports` file in the rootfs and auto-forwards them when creating
-a container with `--private-network`, `--hardened`, or `--strict`.
+a container with a private network namespace.
 
 ### How it works
 
@@ -378,17 +378,38 @@ rules mapping each OCI port to the same host port:
 
 ```bash
 # nginx exposes 80/tcp; sdme auto-forwards it
-sudo sdme create -r nginx --hardened
-# equivalent to: sudo sdme create -r nginx --hardened --port 80:80/tcp
+sudo sdme create -r nginx --private-network --network-veth
+# equivalent to: sudo sdme create -r nginx --private-network --network-veth --port tcp:80:80
+```
+
+Port forwarding uses systemd-nspawn's `--port` flag, which requires a
+virtual ethernet pair (`--network-veth`, `--network-bridge`, or
+`--network-zone`) to route traffic between host and container. Using
+`--private-network` alone creates an isolated loopback-only network
+with no path for forwarded packets.
+
+The container must also have `systemd-networkd` enabled so the
+container-side interface (`host0`) gets configured via DHCP. Most
+imported distro rootfs have the networkd config files installed
+(`80-container-host0.network`) but the service disabled by default.
+Enable it before first boot:
+
+```bash
+# Enable networkd in the overlayfs upper layer
+sudo ln -sf /usr/lib/systemd/system/systemd-networkd.service \
+    /var/lib/sdme/containers/<name>/upper/etc/systemd/system/multi-user.target.wants/systemd-networkd.service
 ```
 
 ### Network modes
 
-**Private network** (`--private-network`, `--hardened`, `--strict`):
+**Private network with veth** (`--private-network --network-veth`):
 OCI ports are auto-forwarded. The host port matches the container
-port (e.g. 80:80/tcp). User `--port` flags take priority — if you
-specify `--port 8080:80/tcp`, the auto-forward for port 80 is
-skipped.
+port (e.g. `tcp:80:80`). User `--port` flags take priority; if you
+specify `--port tcp:8080:80`, the auto-forward for port 80 is
+skipped. Traffic reaches the container through a virtual ethernet pair
+with NAT rules managed by systemd-nspawn. Curl the host-side veth IP
+(not localhost) to reach forwarded ports; systemd-nspawn's nft rules
+exclude 127.0.0.0/8 from DNAT in the output chain.
 
 **Host network** (default, no `--private-network`): Services bind
 directly to the host's interfaces, so no forwarding is needed. sdme
@@ -399,12 +420,18 @@ network namespace. Ports are accessible from other containers in the
 same pod via localhost. No auto-forwarding is applied since there is
 no private network namespace.
 
+**Hardened/strict** (`--hardened`, `--strict`): These enable
+`--private-network` (triggering auto-forwarding in the state file),
+but do not add `--network-veth`. The ports are stored in the
+container's state but cannot be reached from the host without also
+adding `--network-veth`.
+
 ### Opting out
 
 Use `--no-oci-ports` to suppress auto-forwarding:
 
 ```bash
-sudo sdme create -r nginx --hardened --no-oci-ports
+sudo sdme create -r nginx --private-network --network-veth --no-oci-ports
 ```
 
 ### Manual override
@@ -414,7 +441,7 @@ port:
 
 ```bash
 # Map host port 8080 to container port 80
-sudo sdme create -r nginx --hardened --port 8080:80/tcp --no-oci-ports
+sudo sdme create -r nginx --private-network --network-veth --port tcp:8080:80 --no-oci-ports
 ```
 
 ## Limitations

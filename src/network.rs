@@ -23,7 +23,7 @@ pub struct NetworkConfig {
     pub network_bridge: Option<String>,
     /// Join named network zone (--network-zone=<name>)
     pub network_zone: Option<String>,
-    /// Port forwarding rules (--port=<host>:<container>[/<proto>])
+    /// Port forwarding rules (--port=[proto:]host[:container])
     pub ports: Vec<String>,
 }
 
@@ -406,7 +406,7 @@ mod tests {
             network_veth: true,
             network_bridge: Some("br0".to_string()),
             network_zone: Some("myzone".to_string()),
-            ports: vec!["8080:80".to_string(), "443:443/tcp".to_string()],
+            ports: vec!["8080:80".to_string(), "tcp:443:443".to_string()],
         };
         let args = network.to_nspawn_args();
         assert!(args.contains(&"--private-network".to_string()));
@@ -415,7 +415,7 @@ mod tests {
         assert!(args.contains(&"--network-bridge=br0".to_string()));
         assert!(args.contains(&"--network-zone=myzone".to_string()));
         assert!(args.contains(&"--port=8080:80".to_string()));
-        assert!(args.contains(&"--port=443:443/tcp".to_string()));
+        assert!(args.contains(&"--port=tcp:443:443".to_string()));
     }
 
     #[test]

@@ -48,7 +48,7 @@ struct NetworkArgs {
     #[arg(long)]
     network_zone: Option<String>,
 
-    /// Forward port HOST:CONTAINER[/PROTO] (implies --private-network, repeatable)
+    /// Forward port [PROTO:]HOST[:CONTAINER] (implies --private-network, repeatable)
     #[arg(long = "port", short = 'p')]
     ports: Vec<String>,
 }
@@ -706,27 +706,18 @@ fn auto_wire_oci_ports(rootfs_path: &std::path::Path, network: &mut NetworkConfi
 
     if network.private_network {
         // Collect container port numbers already specified by the user.
+        // User ports may be "[proto:]host[:container]"; container port
+        // is the last colon-separated segment (or the only one).
         let user_container_ports: std::collections::HashSet<u16> = network
             .ports
             .iter()
-            .filter_map(|p| {
-                // Port format: "HOST:CONTAINER[/PROTO]"
-                let port_part = p.split('/').next().unwrap_or(p);
-                port_part
-                    .split(':')
-                    .nth(1)
-                    .and_then(|s| s.parse::<u16>().ok())
-            })
+            .filter_map(|p| p.rsplit(':').next().and_then(|s| s.parse::<u16>().ok()))
             .collect();
 
         let mut added = Vec::new();
         for port in &oci_ports {
-            // Extract container port number from "PORT:PORT/PROTO"
-            let container_port: Option<u16> = port
-                .split('/')
-                .next()
-                .and_then(|s| s.split(':').nth(1))
-                .and_then(|s| s.parse().ok());
+            // Extract container port from "PROTO:HOST:CONTAINER"
+            let container_port: Option<u16> = port.rsplit(':').next().and_then(|s| s.parse().ok());
             if let Some(cp) = container_port {
                 if !user_container_ports.contains(&cp) {
                     network.ports.push(port.clone());
@@ -739,9 +730,18 @@ fn auto_wire_oci_ports(rootfs_path: &std::path::Path, network: &mut NetworkConfi
             eprintln!("auto-forwarding OCI ports: {}", added.join(", "));
         }
     } else {
-        let display: Vec<&str> = oci_ports
+        // Display as "PORT/PROTO" for readability (e.g. "8080/tcp").
+        let display: Vec<String> = oci_ports
             .iter()
-            .filter_map(|p| p.split_once(':').map(|(_, rest)| rest))
+            .filter_map(|p| {
+                // Format is "PROTO:HOST:CONTAINER"; show "CONTAINER/PROTO"
+                let parts: Vec<&str> = p.splitn(3, ':').collect();
+                if parts.len() == 3 {
+                    Some(format!("{}/{}", parts[2], parts[0]))
+                } else {
+                    None
+                }
+            })
             .collect();
         eprintln!(
             "OCI image exposes ports: {} (host network, no forwarding needed)",
@@ -1538,8 +1538,8 @@ mod tests {
         auto_wire_oci_ports(&rootfs, &mut network);
 
         assert_eq!(network.ports.len(), 2);
-        assert!(network.ports.contains(&"80:80/tcp".to_string()));
-        assert!(network.ports.contains(&"443:443/tcp".to_string()));
+        assert!(network.ports.contains(&"tcp:80:80".to_string()));
+        assert!(network.ports.contains(&"tcp:443:443".to_string()));
 
         let _ = fs::remove_dir_all(&rootfs);
     }
@@ -1549,7 +1549,7 @@ mod tests {
         let rootfs = make_rootfs_with_ports("skip", "80/tcp\n443/tcp\n8080/tcp\n");
         let mut network = NetworkConfig {
             private_network: true,
-            ports: vec!["9090:80/tcp".to_string()], // User already mapped container port 80
+            ports: vec!["tcp:9090:80".to_string()], // User already mapped container port 80
             ..Default::default()
         };
 
@@ -1558,12 +1558,12 @@ mod tests {
         // Port 80 should NOT be added (user already specified it).
         // Ports 443 and 8080 should be added.
         assert_eq!(network.ports.len(), 3); // 1 user + 2 auto
-        assert!(network.ports.contains(&"9090:80/tcp".to_string())); // user's original
-        assert!(network.ports.contains(&"443:443/tcp".to_string()));
-        assert!(network.ports.contains(&"8080:8080/tcp".to_string()));
+        assert!(network.ports.contains(&"tcp:9090:80".to_string())); // user's original
+        assert!(network.ports.contains(&"tcp:443:443".to_string()));
+        assert!(network.ports.contains(&"tcp:8080:8080".to_string()));
         // Should NOT have a duplicate mapping for port 80.
         assert!(
-            !network.ports.contains(&"80:80/tcp".to_string()),
+            !network.ports.contains(&"tcp:80:80".to_string()),
             "should not auto-forward port 80 when user already specified it"
         );
 
@@ -1638,8 +1638,8 @@ mod tests {
         auto_wire_oci_ports(&rootfs, &mut network);
 
         assert_eq!(network.ports.len(), 2);
-        assert!(network.ports.contains(&"53:53/udp".to_string()));
-        assert!(network.ports.contains(&"80:80/tcp".to_string()));
+        assert!(network.ports.contains(&"udp:53:53".to_string()));
+        assert!(network.ports.contains(&"tcp:80:80".to_string()));
 
         let _ = fs::remove_dir_all(&rootfs);
     }
