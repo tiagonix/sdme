@@ -73,7 +73,7 @@ sudo sdme fs import archlinux docker.io/archlinux
 
 NixOS rootfs can also be imported, but must be built with systemd and
 dbus included (NixOS is declarative, so sdme cannot install packages
-into it). See [test/nix/](test/nix/) for a ready-to-use Nix
+into it). See [test/scripts/nix/](test/scripts/nix/) for a ready-to-use Nix
 configuration and build script.
 
 Each imported rootfs becomes a reusable template. Spin up as many

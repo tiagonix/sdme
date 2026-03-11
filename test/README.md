@@ -61,8 +61,8 @@ Integration tests run real containers end-to-end. They require root,
 a working systemd-nspawn installation, and network access for importing
 rootfs from OCI registries.
 
-All scripts are in the `test/` directory. Set `VERBOSE=1` for detailed
-output on any script.
+All scripts are in the `test/scripts/` directory. Set `VERBOSE=1` for
+detailed output on any script.
 
 ### verify-matrix.sh
 
@@ -70,9 +70,9 @@ Full distro x OCI app verification matrix. Imports distro rootfs from
 OCI registries, then tests OCI applications on each distro.
 
 ```bash
-sudo ./test/verify-matrix.sh
-sudo ./test/verify-matrix.sh --distro ubuntu --app redis   # single cell
-sudo ./test/verify-matrix.sh --keep                        # keep artifacts
+sudo ./test/scripts/verify-matrix.sh
+sudo ./test/scripts/verify-matrix.sh --distro ubuntu --app redis   # single cell
+sudo ./test/scripts/verify-matrix.sh --keep                        # keep artifacts
 ```
 
 Each cell verifies: app import with `--base-fs`, container boot,
@@ -80,7 +80,7 @@ Each cell verifies: app import with `--base-fs`, container boot,
 app-specific health check (HTTP 200 for nginx-unprivileged, redis-cli
 ping, pg_isready).
 
-See `./test/verify-matrix.sh --help` for all options.
+See `./test/scripts/verify-matrix.sh --help` for all options.
 
 ### verify-pods.sh
 
@@ -91,7 +91,7 @@ Requires the `ubuntu` rootfs imported beforehand:
 
 ```bash
 sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
-sudo ./test/verify-pods.sh
+sudo ./test/scripts/verify-pods.sh
 ```
 
 ### verify-oci.sh
@@ -103,9 +103,9 @@ and confirms nginx serves custom content from a host-side volume through
 port-forwarded networking.
 
 ```bash
-sudo ./test/verify-oci.sh
-sudo ./test/verify-oci.sh --distro ubuntu  # single distro
-sudo ./test/verify-oci.sh --keep           # keep artifacts
+sudo ./test/scripts/verify-oci.sh
+sudo ./test/scripts/verify-oci.sh --distro ubuntu  # single distro
+sudo ./test/scripts/verify-oci.sh --keep           # keep artifacts
 ```
 
 Each distro cell verifies: base import, app import, PORTS and
@@ -126,11 +126,11 @@ Requires the `ubuntu` rootfs. For multi-distro userns tests, also requires
 ```bash
 # Basic security tests (ubuntu rootfs only)
 sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
-sudo ./test/verify-security.sh
+sudo ./test/scripts/verify-security.sh
 
 # Full run including multi-distro userns tests
-sudo ./test/verify-matrix.sh --keep
-sudo ./test/verify-security.sh
+sudo ./test/scripts/verify-matrix.sh --keep
+sudo ./test/scripts/verify-security.sh
 ```
 
 ## Running a full test pass
@@ -142,10 +142,10 @@ Before tagging a release, run everything from a clean state:
 cargo test
 
 # 2. Integration tests (order matters: matrix first, then the rest)
-sudo ./test/verify-matrix.sh --keep
-sudo ./test/verify-pods.sh
-sudo ./test/verify-oci.sh
-sudo ./test/verify-security.sh
+sudo ./test/scripts/verify-matrix.sh --keep
+sudo ./test/scripts/verify-pods.sh
+sudo ./test/scripts/verify-oci.sh
+sudo ./test/scripts/verify-security.sh
 ```
 
 Use `--keep` on verify-matrix.sh so that verify-security.sh can reuse
