@@ -437,7 +437,7 @@ image** or an **application image** based on the image config:
 Application images require a base rootfs specified with `--base-fs`:
 
 ```bash
-sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
 sudo sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
 ```
 

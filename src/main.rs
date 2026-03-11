@@ -164,6 +164,10 @@ enum Command {
         #[arg(long)]
         no_oci_volumes: bool,
 
+        /// Set environment variable for the OCI app service (KEY=VALUE, repeatable)
+        #[arg(long, value_name = "KEY=VALUE")]
+        oci_env: Vec<String>,
+
         /// Enable auto-start on boot
         #[arg(long)]
         enable: bool,
@@ -173,6 +177,9 @@ enum Command {
     Exec {
         /// Container name
         name: String,
+        /// Run command inside the OCI app root (/oci/root)
+        #[arg(long)]
+        oci: bool,
         /// Command to run inside the container
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
@@ -200,6 +207,9 @@ enum Command {
     Logs {
         /// Container name
         name: String,
+        /// Show logs for the OCI app service instead of the container unit
+        #[arg(long)]
+        oci: bool,
         /// Extra arguments passed to journalctl (e.g. -f, -n 100)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -258,6 +268,10 @@ enum Command {
         /// Do not auto-mount volumes declared in the OCI image
         #[arg(long)]
         no_oci_volumes: bool,
+
+        /// Set environment variable for the OCI app service (KEY=VALUE, repeatable)
+        #[arg(long, value_name = "KEY=VALUE")]
+        oci_env: Vec<String>,
 
         /// Enable auto-start on boot
         #[arg(long)]
@@ -385,7 +399,7 @@ OCI REGISTRY IMAGES:
                       unit is generated to run the application.
 
     Examples:
-      sdme fs import ubuntu docker.io/ubuntu -v
+      sdme fs import ubuntu docker.io/ubuntu -v --install-packages=yes
       sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
       sdme fs import myapp ghcr.io/org/app:v1 --oci-mode=app --base-fs=ubuntu")]
     Import {
@@ -632,6 +646,13 @@ fn parse_mounts(args: MountArgs) -> Result<(BindConfig, EnvConfig)> {
     let envs = EnvConfig { vars: args.envs };
     envs.validate()?;
     Ok((binds, envs))
+}
+
+/// Validate `--oci-env` values using the same rules as `-e`/`--env`.
+fn validate_oci_envs(envs: Vec<String>) -> Result<Vec<String>> {
+    let tmp = EnvConfig { vars: envs };
+    tmp.validate()?;
+    Ok(tmp.vars)
 }
 
 /// Build a `SecurityConfig` from CLI flags (for `create` / `new`).
@@ -1028,6 +1049,7 @@ fn main() -> Result<()> {
             security,
             no_oci_ports,
             no_oci_volumes,
+            oci_env,
             enable,
         } => {
             system_check::check_systemd_version(252)?;
@@ -1045,6 +1067,7 @@ fn main() -> Result<()> {
                 network.private_network,
             )?;
             let (binds, envs) = parse_mounts(mounts)?;
+            let oci_envs = validate_oci_envs(oci_env)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
 
             // Auto-wire OCI ports if the rootfs declares them.
@@ -1071,6 +1094,7 @@ fn main() -> Result<()> {
                 envs,
                 security: sec,
                 oci_volumes,
+                oci_envs,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
@@ -1080,15 +1104,19 @@ fn main() -> Result<()> {
             }
             println!("{name}");
         }
-        Command::Exec { name, command } => {
+        Command::Exec { name, oci, command } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
-            let status = containers::exec(
-                &cfg.datadir,
-                &name,
-                &command,
-                cfg.join_as_sudo_user,
-                cli.verbose,
-            )?;
+            let status = if oci {
+                containers::exec_oci(&cfg.datadir, &name, &command, cli.verbose)?
+            } else {
+                containers::exec(
+                    &cfg.datadir,
+                    &name,
+                    &command,
+                    cfg.join_as_sudo_user,
+                    cli.verbose,
+                )?
+            };
             std::process::exit(status.code().unwrap_or(1));
         }
         Command::Set {
@@ -1184,27 +1212,44 @@ fn main() -> Result<()> {
             )?;
             std::process::exit(status.code().unwrap_or(1));
         }
-        Command::Logs { name, args } => {
-            system_check::check_dependencies(
-                &[("journalctl", "apt install systemd")],
-                cli.verbose,
-            )?;
+        Command::Logs { name, oci, args } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
-            let unit = systemd::service_name(&name);
-            let mut cmd = std::process::Command::new("journalctl");
-            cmd.args(["-u", &unit]);
-            cmd.args(&args);
-            if cli.verbose {
-                eprintln!(
-                    "exec: journalctl {}",
-                    cmd.get_args()
-                        .map(|a| a.to_string_lossy())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
+            if oci {
+                let mut command = vec![
+                    "/usr/bin/journalctl".to_string(),
+                    "-u".to_string(),
+                    "sdme-oci-app.service".to_string(),
+                ];
+                command.extend(args);
+                let status = containers::exec(
+                    &cfg.datadir,
+                    &name,
+                    &command,
+                    cfg.join_as_sudo_user,
+                    cli.verbose,
+                )?;
+                std::process::exit(status.code().unwrap_or(1));
+            } else {
+                system_check::check_dependencies(
+                    &[("journalctl", "apt install systemd")],
+                    cli.verbose,
+                )?;
+                let unit = systemd::service_name(&name);
+                let mut cmd = std::process::Command::new("journalctl");
+                cmd.args(["-u", &unit]);
+                cmd.args(&args);
+                if cli.verbose {
+                    eprintln!(
+                        "exec: journalctl {}",
+                        cmd.get_args()
+                            .map(|a| a.to_string_lossy())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                }
+                let err = cmd.exec();
+                bail!("failed to exec journalctl: {err}");
             }
-            let err = cmd.exec();
-            bail!("failed to exec journalctl: {err}");
         }
         Command::New {
             name,
@@ -1221,6 +1266,7 @@ fn main() -> Result<()> {
             security,
             no_oci_ports,
             no_oci_volumes,
+            oci_env,
             enable,
             command,
         } => {
@@ -1239,6 +1285,7 @@ fn main() -> Result<()> {
                 network.private_network,
             )?;
             let (binds, envs) = parse_mounts(mounts)?;
+            let oci_envs = validate_oci_envs(oci_env)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
 
             // Auto-wire OCI ports if the rootfs declares them.
@@ -1265,6 +1312,7 @@ fn main() -> Result<()> {
                 envs,
                 security: sec,
                 oci_volumes,
+                oci_envs,
             };
             let is_host_rootfs = opts.rootfs.is_none();
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;

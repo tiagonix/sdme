@@ -5,7 +5,7 @@ set -euo pipefail
 # Must run as root. Requires a base Ubuntu rootfs imported as "ubuntu".
 #
 # Usage:
-#   sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v
+#   sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
 #   sudo ./test/verify-pods.sh
 #
 # Tests:

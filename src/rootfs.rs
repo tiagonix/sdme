@@ -79,6 +79,10 @@ pub(crate) enum DistroFamily {
     Debian,
     /// Fedora, CentOS, AlmaLinux, RHEL, Rocky (uses dnf).
     Fedora,
+    /// Arch Linux and derivatives (uses pacman).
+    Arch,
+    /// openSUSE, SLES, and derivatives (uses zypper).
+    Suse,
     /// NixOS (declarative; no imperative package install).
     NixOS,
     /// Unrecognized distribution.
@@ -109,6 +113,25 @@ pub(crate) fn detect_distro_family(rootfs: &Path) -> DistroFamily {
             .any(|w| w == "fedora" || w == "rhel")
     {
         return DistroFamily::Fedora;
+    }
+
+    if id == "arch" || id_like.split_whitespace().any(|w| w == "arch") {
+        return DistroFamily::Arch;
+    }
+
+    const SUSE_IDS: &[&str] = &[
+        "opensuse-leap",
+        "opensuse-tumbleweed",
+        "opensuse-microos",
+        "sles",
+        "sled",
+    ];
+    if SUSE_IDS.contains(&id)
+        || id_like
+            .split_whitespace()
+            .any(|w| w == "suse" || w == "opensuse")
+    {
+        return DistroFamily::Suse;
     }
 
     DistroFamily::Unknown
@@ -539,5 +562,57 @@ mod tests {
     fn test_detect_distro_family_no_os_release() {
         let tmp = TempSourceDir::new("family-none");
         assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Unknown);
+    }
+
+    #[test]
+    fn test_detect_distro_family_arch() {
+        let tmp = TempSourceDir::new("family-arch");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(tmp.path().join("etc/os-release"), "ID=arch\n").unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Arch);
+    }
+
+    #[test]
+    fn test_detect_distro_family_arch_derivative() {
+        let tmp = TempSourceDir::new("family-endeavour");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/os-release"),
+            "ID=endeavouros\nID_LIKE=arch\n",
+        )
+        .unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Arch);
+    }
+
+    #[test]
+    fn test_detect_distro_family_opensuse_tumbleweed() {
+        let tmp = TempSourceDir::new("family-tumbleweed");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/os-release"),
+            "ID=opensuse-tumbleweed\nID_LIKE=\"opensuse suse\"\n",
+        )
+        .unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Suse);
+    }
+
+    #[test]
+    fn test_detect_distro_family_opensuse_leap() {
+        let tmp = TempSourceDir::new("family-leap");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/os-release"),
+            "ID=opensuse-leap\nID_LIKE=\"opensuse suse\"\n",
+        )
+        .unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Suse);
+    }
+
+    #[test]
+    fn test_detect_distro_family_sles() {
+        let tmp = TempSourceDir::new("family-sles");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(tmp.path().join("etc/os-release"), "ID=sles\nID_LIKE=suse\n").unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Suse);
     }
 }

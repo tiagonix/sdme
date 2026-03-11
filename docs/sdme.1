@@ -43,7 +43,7 @@ Path to config file.
 Default:
 .IR ~/.config/sdme/sdmerc .
 .SH COMMANDS
-.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-no\-oci\-ports] [\-\-no\-oci\-volumes] [\-\-] [\fIcommand\fR...]
+.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-oci\-env \fIKEY=VALUE\fR]... [\-\-enable] [\-\-no\-oci\-ports] [\-\-no\-oci\-volumes] [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
 .I name
@@ -94,6 +94,14 @@ to set environment variables; see
 below.
 .PP
 Use
+.B \-\-oci\-env
+to set environment variables for the OCI app service (written to
+.IR /oci/env
+in the overlayfs upper layer); see
+.B OCI ENVIRONMENT
+below.
+.PP
+Use
 .B \-\-pod
 to join a pod network namespace (entire container); see
 .B PODS
@@ -112,6 +120,10 @@ to enable user namespace isolation; see
 .B USER NAMESPACES
 below.
 .PP
+Use
+.B \-\-enable
+to enable auto\-start on boot via systemd.
+.PP
 Security hardening options can be set with
 .BR \-\-strict ,
 .BR \-\-hardened ,
@@ -128,7 +140,7 @@ below.
 .PP
 If boot fails or is interrupted (Ctrl+C), the just\-created container is
 automatically removed.
-.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-no\-oci\-ports] [\-\-no\-oci\-volumes]
+.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-oci\-env \fIKEY=VALUE\fR]... [\-\-enable] [\-\-no\-oci\-ports] [\-\-no\-oci\-volumes]
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
 Resource limits can be set with
@@ -162,6 +174,11 @@ to set environment variables; see
 .B BIND MOUNTS AND ENVIRONMENT
 below.
 Use
+.B \-\-oci\-env
+to set environment variables for the OCI app service; see
+.B OCI ENVIRONMENT
+below.
+Use
 .B \-\-pod
 to join a pod network namespace (entire container); see
 .B PODS
@@ -178,6 +195,10 @@ Use
 to enable user namespace isolation; see
 .B USER NAMESPACES
 below.
+.PP
+Use
+.B \-\-enable
+to enable auto\-start on boot via systemd.
 .PP
 Security hardening options can be set with
 .BR \-\-strict ,
@@ -224,15 +245,34 @@ below for details on each flag.
 .PP
 If the container is running, a note is printed advising a restart for the
 changes to take effect.
-.SS sdme join \fIname\fR [\-\-] [\fIcommand\fR...]
+.SS sdme join \fIname\fR [\-\-start] [\-t \fIseconds\fR] [\-\-] [\fIcommand\fR...]
 Enter a running container using
 .BR machinectl (1)
 shell.
 An optional command overrides the default login shell.
-.SS sdme exec \fIname\fR \fIcommand\fR [\fIargs\fR...]
+.PP
+Use
+.B \-\-start
+to start the container first if it is stopped.
+Use
+.B \-t
+to override the boot timeout when combined with
+.BR \-\-start .
+.SS sdme exec [\-\-oci] \fIname\fR \fIcommand\fR [\fIargs\fR...]
 Run a one\-off command in a running container using
 .BR machinectl (1)
 shell.
+.PP
+Use
+.B \-\-oci
+to run the command inside the OCI app root
+.RI ( /oci/root )
+via
+.BR systemd\-run (1)
+with
+.BR RootDirectory=/oci/root .
+This is useful for running app\-specific tools (e.g.\& redis\-cli, pg_isready)
+without needing chroot installed in the container.
 .SS sdme stop [\-a] [\-\-term] [\-\-kill] \fIname\fR...
 Stop one or more running containers.
 The default mode sends SIGRTMIN+4 to the container leader for a clean
@@ -267,9 +307,20 @@ A POD column is shown when any container uses \fB\-\-pod\fR.
 An OCI\-POD column is shown when any container uses \fB\-\-oci\-pod\fR.
 A USERNS column is shown when any container uses \fB\-\-userns\fR.
 A BINDS column is shown when any container has bind mounts configured.
+An ENABLED column is shown when any container has auto\-start enabled.
 Health checks detect broken containers (missing directories, missing rootfs).
 The OS column shows the distro name from the rootfs os\-release file.
-.SS sdme logs \fIname\fR [\fIargs\fR...]
+.SS sdme enable \fIname\fR...
+Enable one or more containers to start automatically on boot.
+Creates a systemd
+.B wants
+symlink so the container's unit starts at boot time.
+.SS sdme disable \fIname\fR...
+Disable auto\-start for one or more containers.
+Removes the systemd
+.B wants
+symlink.
+.SS sdme logs [\-\-oci] \fIname\fR [\fIargs\fR...]
 View container logs by executing
 .BR journalctl (1)
 for the container's service unit.
@@ -277,6 +328,14 @@ Extra arguments are passed through to journalctl
 (e.g.\&
 .BR \-f ,
 .BR "\-n 100" ).
+.PP
+Use
+.B \-\-oci
+to show logs for the OCI app service
+.RI ( sdme\-oci\-app.service )
+instead of the container unit.
+This runs journalctl inside the container via
+.BR machinectl (1).
 .SS sdme fs import \fIname\fR \fIsource\fR [\-f] [\-\-install\-packages \fImode\fR] [\-\-oci\-mode \fImode\fR] [\-\-base\-fs \fIrootfs\fR]
 Import a root filesystem.
 After import, systemd is detected in the rootfs; if missing, distro\-specific
@@ -1057,6 +1116,40 @@ Example:
 .PP
 Bind mounts and environment variables are stored in the container's state file
 and applied at start time via the systemd nspawn drop\-in configuration.
+.SH OCI ENVIRONMENT
+.TP
+.BI \-\-oci\-env " KEY=VALUE"
+Set an environment variable for the OCI app service.
+Can be specified multiple times.
+The value is written to
+.I /oci/env
+in the container's overlayfs upper layer.
+The
+.B sdme\-oci\-app.service
+unit reads this file via
+.BR EnvironmentFile= .
+.PP
+This is separate from
+.BR \-e / \-\-env ,
+which sets environment variables for the container's systemd init (PID 1) via
+nspawn
+.B \-\-setenv=
+flags.
+Use
+.B \-\-oci\-env
+for variables the OCI application needs (e.g.\&
+.BR POSTGRES_PASSWORD ,
+.BR REDIS_ARGS ).
+.PP
+Requires an OCI app rootfs (the rootfs must contain
+.IR /oci/env ).
+Example:
+.PP
+.RS
+.nf
+sdme create \-r postgresql \-\-oci\-env POSTGRES_PASSWORD=secret mydb
+.fi
+.RE
 .SH OCI PORT FORWARDING
 When creating a container from an OCI app rootfs that declares exposed ports
 (in

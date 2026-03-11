@@ -4,8 +4,8 @@ set -uo pipefail
 # verify-matrix.sh - end-to-end verification of distro x OCI app matrix
 # Run as root. Uses vfy- prefix for all artifacts.
 
-DISTROS=(debian ubuntu fedora centos almalinux)
-APPS=(nginx redis mysql postgres)
+DISTROS=(debian ubuntu fedora centos almalinux suse archlinux)
+APPS=(nginx-unprivileged redis postgresql)
 
 declare -A DISTRO_IMAGES=(
     [debian]="docker.io/debian:stable"
@@ -13,20 +13,20 @@ declare -A DISTRO_IMAGES=(
     [fedora]="quay.io/fedora/fedora:41"
     [centos]="quay.io/centos/centos:stream9"
     [almalinux]="quay.io/almalinuxorg/almalinux:9"
+    [suse]="docker.io/opensuse/tumbleweed:latest"
+    [archlinux]="docker.io/archlinux:latest"
 )
 
 declare -A APP_IMAGES=(
-    [nginx]="docker.io/nginx"
-    [mysql]="docker.io/mysql"
-    [postgres]="docker.io/postgres"
+    [nginx-unprivileged]="docker.io/nginxinc/nginx-unprivileged"
     [redis]="docker.io/redis"
+    [postgresql]="docker.io/postgres"
 )
 
 declare -A APP_READY_WAIT=(
-    [nginx]=3
-    [mysql]=15
-    [postgres]=10
+    [nginx-unprivileged]=3
     [redis]=3
+    [postgresql]=10
 )
 
 DATADIR="/var/lib/sdme"
@@ -267,9 +267,9 @@ phase2_boot() {
 app_verify() {
     local app="$1" ct_name="$2"
     case "$app" in
-        nginx)
+        nginx-unprivileged)
             local code
-            code=$(timeout 10 curl -s -o /dev/null -w '%{http_code}' http://localhost:80 2>&1) || true
+            code=$(timeout 10 curl -s -o /dev/null -w '%{http_code}' http://localhost:8080 2>&1) || true
             if [[ "$code" == "200" ]]; then
                 return 0
             else
@@ -277,18 +277,14 @@ app_verify() {
                 return 1
             fi
             ;;
-        mysql)
-            timeout 10 sdme exec "$ct_name" \
-                /usr/sbin/chroot /oci/root /usr/bin/mysqladmin -u root -psecret status 2>&1
-            ;;
-        postgres)
-            timeout 10 sdme exec "$ct_name" \
-                /usr/sbin/chroot /oci/root /bin/su - postgres -c 'pg_isready' 2>&1
+        postgresql)
+            timeout 10 sdme exec --oci "$ct_name" \
+                /bin/su - postgres -c 'pg_isready' 2>&1
             ;;
         redis)
             local reply
-            reply=$(timeout 10 sdme exec "$ct_name" \
-                /usr/sbin/chroot /oci/root /usr/local/bin/redis-cli ping 2>&1) || true
+            reply=$(timeout 10 sdme exec --oci "$ct_name" \
+                /usr/local/bin/redis-cli ping 2>&1) || true
             if [[ "$reply" == *"PONG"* ]]; then
                 return 0
             else
@@ -340,19 +336,14 @@ phase3_apps() {
                 continue
             fi
 
-            # Inject env vars
-            local env_file="$DATADIR/fs/$fs_name/oci/env"
+            # Build create args with OCI env vars
+            local create_args=(-r "$fs_name")
             case "$app" in
-                mysql)
-                    echo 'MYSQL_ROOT_PASSWORD=secret' >> "$env_file"
-                    ;;
-                postgres)
-                    echo 'POSTGRES_PASSWORD=secret' >> "$env_file"
-                    ;;
+                postgresql) create_args+=(--oci-env "POSTGRES_PASSWORD=secret") ;;
             esac
 
             # Create
-            if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$fs_name" "$ct_name" 2>&1); then
+            if ! output=$(timeout "$TIMEOUT_BOOT" sdme create "${create_args[@]}" "$ct_name" 2>&1); then
                 record "app/$app-on-$distro/boot" FAIL "create failed: $output"
                 record "app/$app-on-$distro/service" SKIP "create failed"
                 record "app/$app-on-$distro/logs" SKIP "create failed"
@@ -386,8 +377,7 @@ phase3_apps() {
             fi
 
             # Logs
-            if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" \
-                    /usr/bin/journalctl -u sdme-oci-app.service --no-pager -n 10 2>&1); then
+            if output=$(timeout "$TIMEOUT_TEST" sdme logs --oci "$ct_name" --no-pager -n 10 2>&1); then
                 record "app/$app-on-$distro/logs" PASS
             else
                 record "app/$app-on-$distro/logs" FAIL "$output"
@@ -496,9 +486,15 @@ phase3c_hardened_apps() {
 
             log "  Hardened testing $app on $distro"
 
+            # Build create args with OCI env vars
+            local create_args=(-r "$fs_name" --hardened)
+            case "$app" in
+                postgresql) create_args+=(--oci-env "POSTGRES_PASSWORD=secret") ;;
+            esac
+
             # Create with --hardened
             local output
-            if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$fs_name" --hardened "$ct_name" 2>&1); then
+            if ! output=$(timeout "$TIMEOUT_BOOT" sdme create "${create_args[@]}" "$ct_name" 2>&1); then
                 record "hardened-app/$app-on-$distro/boot" FAIL "create failed: $output"
                 record "hardened-app/$app-on-$distro/service" SKIP "create failed"
                 continue

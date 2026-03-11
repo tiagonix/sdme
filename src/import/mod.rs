@@ -791,6 +791,12 @@ fn install_commands(family: &DistroFamily) -> Vec<String> {
         DistroFamily::Fedora => {
             vec!["dnf install -y systemd dbus util-linux pam; dnf clean all".into()]
         }
+        DistroFamily::Arch => {
+            vec!["pacman -Sy --noconfirm systemd dbus && pacman -Scc --noconfirm".into()]
+        }
+        DistroFamily::Suse => {
+            vec!["zypper --non-interactive install systemd dbus-1 && zypper clean --all".into()]
+        }
         _ => vec![],
     }
 }
@@ -891,6 +897,12 @@ fn machinectl_fix_commands(family: &DistroFamily) -> Vec<String> {
             "apt-get {s} update && apt-get {s} install -y login && \
              apt-get clean && rm -rf /var/lib/apt/lists/*"
         )],
+        DistroFamily::Arch => {
+            vec!["pacman -Sy --noconfirm util-linux pam && pacman -Scc --noconfirm".into()]
+        }
+        DistroFamily::Suse => {
+            vec!["zypper --non-interactive install util-linux pam && zypper clean --all".into()]
+        }
         _ => vec![],
     }
 }

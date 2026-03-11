@@ -56,6 +56,57 @@ sudo sdme join <name>       # re-enter a running container
 sudo sdme rm <name>         # remove a container
 ```
 
+## Any distro
+
+Import root filesystems from OCI registries and run containers of any
+distribution, regardless of your host:
+
+```bash
+sudo sdme fs import debian docker.io/debian
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04
+sudo sdme fs import fedora quay.io/fedora/fedora
+sudo sdme fs import centos quay.io/centos/centos:stream9
+sudo sdme fs import almalinux quay.io/almalinuxorg/almalinux:9
+sudo sdme fs import suse docker.io/opensuse/tumbleweed
+sudo sdme fs import archlinux docker.io/archlinux
+```
+
+Each imported rootfs becomes a reusable template. Spin up as many
+containers as you want from it; each gets its own overlayfs layer:
+
+```bash
+sudo sdme new -r ubuntu
+sudo sdme new -r fedora
+```
+
+You can also import from local directories, tarballs, QCOW2 cloud
+images, and debootstrap output. See [usage.md](docs/usage.md) for
+details.
+
+## OCI applications
+
+sdme can run any Docker or Podman container image (nginx, redis,
+postgresql, anything on Docker Hub or any OCI registry) as a systemd
+service inside a booted container. No Docker or Podman required.
+
+```bash
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+sudo sdme fs import redis docker.io/redis --base-fs=ubuntu -v
+sudo sdme new -r redis
+```
+
+Inside the container, the OCI app runs as a managed systemd service:
+
+```bash
+systemctl status sdme-oci-app.service
+```
+
+This gives you the OCI packaging model (pull from any registry) with
+the systemd operational model (journalctl, systemctl, cgroup limits,
+security hardening). See
+[OCI integration](docs/architecture.md#8-oci-integration) for the
+full story.
+
 ## Further reading
 
 - [docs/usage.md](docs/usage.md) -- Full user guide: install,
@@ -72,4 +123,5 @@ sudo sdme rm <name>         # remove a container
   systemd-nspawn
 - [docs/macos.md](docs/macos.md) -- Running sdme on macOS via lima-vm
 - [docs/tests.md](docs/tests.md) -- Test suite overview
+- [docs/test_results.md](docs/test_results.md) -- Latest test results
 - [docs/story.md](docs/story.md) -- The backstory and project stats

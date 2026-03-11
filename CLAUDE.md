@@ -46,14 +46,14 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | Command | Description |
 |---------|-------------|
 | `sdme new` | Create, start, and enter a new container (accepts same flags as `create`) |
-| `sdme create` | Create a new container (overlayfs dirs + state file). Security flags: `--strict`, `--hardened`, `--drop-capability`, `--capability`, `--no-new-privileges`, `--read-only`, `--system-call-filter`, `--apparmor-profile`. OCI flags: `--no-oci-ports`, `--no-oci-volumes` |
+| `sdme create` | Create a new container (overlayfs dirs + state file). Security flags: `--strict`, `--hardened`, `--drop-capability`, `--capability`, `--no-new-privileges`, `--read-only`, `--system-call-filter`, `--apparmor-profile`. OCI flags: `--no-oci-ports`, `--no-oci-volumes`, `--oci-env KEY=VALUE` (sets env vars for the OCI app service via the `/oci/env` file, separate from `-e` which sets nspawn env vars) |
 | `sdme start` | Start one or more containers (installs/updates template unit, starts via D-Bus). Supports `--all` to start all stopped containers |
-| `sdme join` | Enter a running container (`machinectl shell`) |
-| `sdme exec` | Run a one-off command in a running container (`machinectl shell`) |
+| `sdme join` | Enter a running container (`machinectl shell`). `--start` starts the container first if stopped |
+| `sdme exec` | Run a one-off command in a running container (`machinectl shell`). `--oci` runs the command inside `/oci/root` via `systemd-run --property=RootDirectory=/oci/root` |
 | `sdme stop` | Graceful shutdown via `SIGRTMIN+4` (default), `--term` for terminate, `--kill` for force-kill |
 | `sdme rm` | Remove containers (stops if running, deletes state + files) |
 | `sdme ps` | List containers with status, health, OS, pod/OCI-pod/userns/binds (if any) |
-| `sdme logs` | View container logs (exec's `journalctl`) |
+| `sdme logs` | View container logs (exec's `journalctl`). `--oci` shows the OCI app service logs (`journalctl -u sdme-oci-app.service` inside the container) |
 | `sdme fs import` | Import a rootfs from a directory, tarball, URL, OCI image, or QCOW2 disk image |
 | `sdme fs ls` | List imported root filesystems |
 | `sdme fs rm` | Remove imported root filesystems |
@@ -63,6 +63,8 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme pod new` | Create a new pod (shared network namespace) |
 | `sdme pod ls` | List pods |
 | `sdme pod rm` | Remove pods |
+| `sdme enable` | Enable containers to auto-start on boot |
+| `sdme disable` | Disable container auto-start |
 | `sdme config apparmor-profile` | Print the default AppArmor profile for sdme containers |
 | `sdme config completions` | Generate shell completions (Bash, Fish, Zsh) |
 
@@ -128,7 +130,7 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
 - **Datadir**: always `/var/lib/sdme`.
 - **Container management**: `join` and `exec` spawn `machinectl shell` and forward the exit status. `stop` has three tiers: graceful (default; `KillMachine` SIGRTMIN+4 to leader, 90s), terminate (`--term`; `TerminateMachine`, 30s), force-kill (`--kill`; `KillMachine` SIGKILL to all, 15s). `--term` and `--kill` are mutually exclusive. Internal callers use `StopMode::Terminate`.
 - **D-Bus**: used for `start_unit`, `daemon_reload`, `is_unit_active`, `get_systemd_version`, `kill_machine`, `terminate_machine`. Always system bus.
-- **Rootfs import sources**: `sdme fs import` auto-detects source type: URL, directory, QCOW2 (via `qemu-nbd`), OCI tarball (detected by `oci-layout` file), OCI registry reference, or plain tarball (compression detected from magic bytes). After import, systemd is detected; if missing, distro-specific packages are installed via chroot (`--install-packages` controls this).
+- **Rootfs import sources**: `sdme fs import` auto-detects source type: URL, directory, QCOW2 (via `qemu-nbd`), OCI tarball (detected by `oci-layout` file), OCI registry reference, or plain tarball (compression detected from magic bytes). After import, systemd is detected; if missing, distro-specific packages are installed via chroot (`--install-packages` controls this). Supported distro families: Debian (apt-get), Fedora (dnf), Arch (pacman), SUSE (zypper), NixOS (no-op).
 - **HTTP proxy support**: URL downloads respect standard proxy env vars (`https_proxy`, `http_proxy`, `all_proxy`, and uppercase variants). Since sdme runs as root, users must pass proxy variables through sudo (e.g. `sudo -E`). Configured in `build_http_agent()` (`src/import/mod.rs`).
 - **Rootfs patching at import**: patches imported rootfs for nspawn compatibility: masks `systemd-resolved`, unmasks `systemd-logind` if masked, installs missing packages for `machinectl shell` (e.g. `util-linux`, `pam` on RHEL-family). For host-rootfs containers, resolved is masked in the overlayfs upper layer during `create` instead.
 - **Opaque dirs**: `-o` / `--overlayfs-opaque-dirs` on `create`/`new` sets `trusted.overlay.opaque` xattr, hiding lower-layer contents. For host-rootfs containers, `host_rootfs_opaque_dirs` config applies when no `-o` given (default: `/etc/systemd/system,/var/log`). Paths validated by `containers::validate_opaque_dirs()` (absolute, no `..`, no duplicates). Merge logic in `resolve_opaque_dirs()` in `main.rs`. When `/etc/systemd/system` is opaque, the `dbus.service` symlink (alias for the D-Bus implementation, e.g. `dbus-broker.service`) is preserved from the lower layer into the upper layer so `dbus.socket` can activate its service.

@@ -34,6 +34,7 @@ pub struct CreateOptions {
     pub envs: EnvConfig,
     pub security: SecurityConfig,
     pub oci_volumes: Vec<String>,
+    pub oci_envs: Vec<String>,
 }
 
 /// Read the current process umask. There is no "get umask" syscall, so
@@ -346,6 +347,37 @@ fn do_create(
     opts.security.write_to_state(&mut state);
     if !opaque_dirs.is_empty() {
         state.set("OPAQUE_DIRS", opaque_dirs.join(","));
+    }
+
+    // Write OCI env vars to the overlayfs upper layer. This copies the
+    // lower layer's /oci/env (if it exists) and appends the user-supplied
+    // vars, so each container gets its own env file independent of the
+    // shared rootfs.
+    if !opts.oci_envs.is_empty() {
+        let lower_env = rootfs.join("oci/env");
+        if lower_env.exists() {
+            let upper_oci = container_dir.join("upper/oci");
+            fs::create_dir_all(&upper_oci)
+                .with_context(|| format!("failed to create {}", upper_oci.display()))?;
+            let upper_env = upper_oci.join("env");
+            let mut content = fs::read_to_string(&lower_env)
+                .with_context(|| format!("failed to read {}", lower_env.display()))?;
+            for var in &opts.oci_envs {
+                content.push_str(var);
+                content.push('\n');
+            }
+            fs::write(&upper_env, &content)
+                .with_context(|| format!("failed to write {}", upper_env.display()))?;
+            if verbose {
+                eprintln!(
+                    "wrote {} OCI env var(s) to {}",
+                    opts.oci_envs.len(),
+                    upper_env.display()
+                );
+            }
+        } else {
+            bail!("--oci-env requires an OCI app rootfs (no /oci/env found in rootfs)");
+        }
     }
 
     // State file was already created atomically by create(); write content to it.
@@ -846,6 +878,15 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
     Ok(result)
 }
 
+/// Verify that a container exists and is currently running.
+fn ensure_running(datadir: &Path, name: &str) -> Result<()> {
+    ensure_exists(datadir, name)?;
+    if !systemd::is_active(name)? {
+        bail!("container '{name}' is not running");
+    }
+    Ok(())
+}
+
 pub fn join(
     datadir: &Path,
     name: &str,
@@ -853,12 +894,7 @@ pub fn join(
     join_as_sudo_user: bool,
     verbose: bool,
 ) -> Result<ExitStatus> {
-    ensure_exists(datadir, name)?;
-
-    if !systemd::is_active(name)? {
-        bail!("container '{name}' is not running");
-    }
-
+    ensure_running(datadir, name)?;
     machinectl_shell(datadir, name, command, join_as_sudo_user, verbose)
 }
 
@@ -869,13 +905,44 @@ pub fn exec(
     join_as_sudo_user: bool,
     verbose: bool,
 ) -> Result<ExitStatus> {
-    ensure_exists(datadir, name)?;
+    ensure_running(datadir, name)?;
+    machinectl_shell(datadir, name, command, join_as_sudo_user, verbose)
+}
 
-    if !systemd::is_active(name)? {
-        bail!("container '{name}' is not running");
+/// Run a command inside a container's OCI app root (/oci/root) using
+/// `systemd-run --machine=` with `RootDirectory=/oci/root`. This avoids
+/// requiring `chroot` to be installed inside the container.
+pub fn exec_oci(
+    datadir: &Path,
+    name: &str,
+    command: &[String],
+    verbose: bool,
+) -> Result<ExitStatus> {
+    ensure_running(datadir, name)?;
+
+    let mut cmd = std::process::Command::new("systemd-run");
+    cmd.args([
+        "--machine",
+        name,
+        "--pipe",
+        "--quiet",
+        "--property=RootDirectory=/oci/root",
+        "--",
+    ]);
+    cmd.args(command);
+
+    if verbose {
+        eprintln!(
+            "exec: systemd-run {}",
+            cmd.get_args()
+                .map(|a| a.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
 
-    machinectl_shell(datadir, name, command, join_as_sudo_user, verbose)
+    let status = cmd.status().context("failed to run systemd-run")?;
+    Ok(status)
 }
 
 fn machinectl_shell(
@@ -1653,5 +1720,54 @@ mod tests {
         let vol_base = tmp.path().join("volumes/voltest");
         assert!(vol_base.join("var-lib-mysql").exists());
         assert!(vol_base.join("data").exists());
+    }
+
+    #[test]
+    fn test_create_oci_env_merge() {
+        let _lock = UMASK_LOCK.lock().unwrap();
+        let tmp = tmp();
+        // Create a rootfs with oci/env containing an existing var.
+        let rootfs_dir = tmp.path().join("fs/envoci");
+        fs::create_dir_all(rootfs_dir.join("oci")).unwrap();
+        fs::write(rootfs_dir.join("oci/env"), "EXISTING=value\n").unwrap();
+
+        let opts = CreateOptions {
+            name: Some("envtest".to_string()),
+            rootfs: Some("envoci".to_string()),
+            oci_envs: vec!["NEW_VAR=hello".to_string(), "OTHER=world".to_string()],
+            ..Default::default()
+        };
+        let name = create(tmp.path(), &opts, false).unwrap();
+        assert_eq!(name, "envtest");
+
+        // Verify upper/oci/env has both original and new vars.
+        let upper_env = tmp.path().join("containers/envtest/upper/oci/env");
+        let content = fs::read_to_string(&upper_env).unwrap();
+        assert!(content.contains("EXISTING=value"));
+        assert!(content.contains("NEW_VAR=hello"));
+        assert!(content.contains("OTHER=world"));
+    }
+
+    #[test]
+    fn test_create_oci_env_no_oci_rootfs() {
+        let _lock = UMASK_LOCK.lock().unwrap();
+        let tmp = tmp();
+        // Create a rootfs without oci/env.
+        let rootfs_dir = tmp.path().join("fs/plainfs");
+        fs::create_dir_all(&rootfs_dir).unwrap();
+
+        let opts = CreateOptions {
+            name: Some("nooci".to_string()),
+            rootfs: Some("plainfs".to_string()),
+            oci_envs: vec!["FOO=bar".to_string()],
+            ..Default::default()
+        };
+        let result = create(tmp.path(), &opts, false);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("--oci-env requires an OCI app rootfs"),
+            "unexpected error: {msg}"
+        );
     }
 }

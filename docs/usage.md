@@ -69,12 +69,15 @@ Once a container exists, you manage it with familiar patterns:
 ```bash
 sudo sdme ps                     # list containers
 sudo sdme join <name>            # enter a running container
+sudo sdme join --start <name>    # start if stopped, then enter
 sudo sdme exec <name> -- ls /    # run a command inside
 sudo sdme logs <name>            # view container journal
 sudo sdme stop <name>...         # graceful shutdown
 sudo sdme stop --all             # stop all running containers
 sudo sdme rm <name>...           # remove container and files
 sudo sdme rm --all               # remove all containers
+sudo sdme enable <name>...       # auto-start on boot
+sudo sdme disable <name>...      # remove auto-start
 ```
 
 `sdme new` is a shortcut that combines create, start, and join. For
@@ -157,7 +160,7 @@ systemd operational model (journalctl, systemctl, cgroup limits).
 
 ```bash
 # Import a base OS if you haven't already
-sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
 
 # Import nginx as an OCI app on top of ubuntu
 sudo sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
@@ -180,6 +183,36 @@ To avoid passing `--base-fs` every time, set a default:
 
 ```bash
 sudo sdme config set default_base_fs ubuntu
+```
+
+### OCI environment variables
+
+Use `--oci-env` on `create` or `new` to set environment variables for
+the OCI app service. These are written to the OCI env file
+(`/oci/env`) in the container's overlayfs upper layer and read by the
+`sdme-oci-app.service` unit via `EnvironmentFile=`.
+
+This is separate from `-e`/`--env`, which sets environment variables
+for the container's systemd init (PID 1) via nspawn `--setenv=` flags.
+
+```bash
+sudo sdme new -r postgresql --oci-env POSTGRES_PASSWORD=secret
+```
+
+### OCI exec and logs
+
+Run a command inside the OCI app root (`/oci/root`) without needing
+chroot:
+
+```bash
+sudo sdme exec --oci mycontainer redis-cli ping
+```
+
+View the OCI app service journal instead of the container unit journal:
+
+```bash
+sudo sdme logs --oci mycontainer
+sudo sdme logs --oci mycontainer -f    # follow mode
 ```
 
 See the [OCI integration section](architecture.md#8-oci-integration)
@@ -426,7 +459,8 @@ make                        # same as cargo build --release
 sudo make install           # install to /usr/local (does NOT rebuild)
 ```
 
-See [tests.md](tests.md) for the full test matrix and CI details.
+See [tests.md](tests.md) for the test suite and [test_results.md](test_results.md)
+for the latest verified results.
 
 ## Further reading
 
@@ -441,4 +475,5 @@ See [tests.md](tests.md) for the full test matrix and CI details.
 - [OCI-to-nspawn bridging](hacks.md): how sdme handles non-root OCI
   users and /dev/stdout compatibility
 - [macOS](macos.md): running sdme on macOS via lima-vm
-- [Tests](tests.md): unit tests, integration tests, results
+- [Tests](tests.md): test suite, how to run
+- [Test results](test_results.md): latest verified results

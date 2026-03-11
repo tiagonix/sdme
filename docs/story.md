@@ -98,11 +98,10 @@ building the loop of test, review, fix, and converge.
 # Project Stats
 
 In ~11 days we built a 19.7k-line Rust systems tool with 140 commits,
-335 tests, support for 6 import source types, 4 distro families, 2
+359 tests, support for 6 import source types, 6 distro families, 2
 CPU architectures (with hand-written ELF emitters), 3 security tiers,
 OCI registry pulling, pod networking, and a full container lifecycle
-manager -- averaging ~13 commits and ~1,800 lines of gross churn per
-day.
+manager.
 
 ## Project Timeline
 
@@ -182,7 +181,7 @@ entire current codebase was rewritten/reworked.
 
 ## Test Coverage
 
-335 unique test functions across 24 test modules (every source file
+359 unique test functions across 24 test modules (every source file
 has a `mod tests`).
 
 Test areas include:
@@ -225,14 +224,16 @@ Test areas include:
 Directory, tarball (gz/bz2/xz/zstd auto-detected), URL, QCOW2 (via
 qemu-nbd), raw disk image, OCI registry.
 
-### Supported OS/Distro Families: 4
+### Supported OS/Distro Families: 6
 
 | Family  | Distros                                | Package Manager          |
 |---------|----------------------------------------|--------------------------|
 | Debian  | Debian, Ubuntu, derivatives            | apt-get                  |
 | Fedora  | Fedora, CentOS, AlmaLinux, RHEL, Rocky | dnf                      |
+| Arch    | Arch Linux, derivatives                | pacman                   |
+| SUSE    | openSUSE Tumbleweed, Leap, SLES        | zypper                   |
 | NixOS   | NixOS                                  | declarative (no install) |
-| Unknown | Arch, others                           | best-effort              |
+| Unknown | others                                 | best-effort              |
 
 ### OCI Registry Support
 
