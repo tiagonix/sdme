@@ -651,16 +651,28 @@ fn mask_host_mount_units(upper_systemd_dir: &Path, verbose: bool) -> Result<()> 
 pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     ensure_exists(datadir, name)?;
 
-    // Read state before removal to check for OCI volumes.
+    // Read state before removal to check for OCI volumes and enabled state.
     let state_file = datadir.join("state").join(name);
-    let has_oci_volumes = if state_file.exists() {
+    let (has_oci_volumes, is_enabled) = if state_file.exists() {
         State::read_from(&state_file)
             .ok()
-            .and_then(|s| s.get("OCI_VOLUMES").map(|v| !v.is_empty()))
-            .unwrap_or(false)
+            .map(|s| {
+                let oci = s.get("OCI_VOLUMES").map(|v| !v.is_empty()).unwrap_or(false);
+                let enabled = s.is_yes("ENABLED");
+                (oci, enabled)
+            })
+            .unwrap_or((false, false))
     } else {
-        false
+        (false, false)
     };
+
+    // Disable the unit if it was enabled (best-effort).
+    if is_enabled {
+        if verbose {
+            eprintln!("disabling unit for '{name}'");
+        }
+        let _ = systemd::disable_unit_only(name);
+    }
 
     if systemd::is_active(name)? {
         if verbose {
@@ -706,6 +718,7 @@ pub struct ContainerInfo {
     pub pod: String,
     pub oci_pod: String,
     pub userns: bool,
+    pub enabled: bool,
     pub binds: String,
 }
 
@@ -769,12 +782,13 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         let state = State::read_from(&state_path);
 
         // Extract all state-dependent fields at once.
-        let (rootfs_name, pod, oci_pod, userns, binds) = match &state {
+        let (rootfs_name, pod, oci_pod, userns, enabled, binds) = match &state {
             Ok(s) => (
                 s.rootfs().to_string(),
                 s.get("POD").unwrap_or("").to_string(),
                 s.get("OCI_POD").unwrap_or("").to_string(),
                 s.is_yes("USERNS"),
+                s.is_yes("ENABLED"),
                 s.get("BINDS").unwrap_or("").to_string(),
             ),
             Err(_) => {
@@ -783,6 +797,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
                     String::new(),
                     String::new(),
                     String::new(),
+                    false,
                     false,
                     String::new(),
                 )
@@ -824,6 +839,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             pod,
             oci_pod,
             userns,
+            enabled,
             binds,
         });
     }

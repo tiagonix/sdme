@@ -69,6 +69,24 @@ mod dbus {
         Ok(())
     }
 
+    pub fn enable_unit(unit: &str) -> Result<()> {
+        let conn = connect()?;
+        let proxy = systemd_manager(&conn)?;
+        proxy
+            .call_method("EnableUnitFiles", &(vec![unit], false, false))
+            .with_context(|| format!("systemctl enable {unit} failed"))?;
+        Ok(())
+    }
+
+    pub fn disable_unit(unit: &str) -> Result<()> {
+        let conn = connect()?;
+        let proxy = systemd_manager(&conn)?;
+        proxy
+            .call_method("DisableUnitFiles", &(vec![unit], false))
+            .with_context(|| format!("systemctl disable {unit} failed"))?;
+        Ok(())
+    }
+
     pub fn is_unit_active(unit: &str) -> Result<bool> {
         let conn = connect()?;
         let manager = systemd_manager(&conn)?;
@@ -692,6 +710,42 @@ pub fn is_active(name: &str) -> Result<bool> {
     }
 }
 
+pub fn enable(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
+    ensure_template_unit(verbose)?;
+    let unit = service_name(name);
+    if verbose {
+        eprintln!("enabling unit: {unit}");
+    }
+    dbus::enable_unit(&unit)?;
+    let state_path = datadir.join("state").join(name);
+    let mut state = State::read_from(&state_path)?;
+    state.set("ENABLED", "yes");
+    state.write_to(&state_path)?;
+    Ok(())
+}
+
+pub fn disable(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
+    let unit = service_name(name);
+    if verbose {
+        eprintln!("disabling unit: {unit}");
+    }
+    dbus::disable_unit(&unit)?;
+    let state_path = datadir.join("state").join(name);
+    let mut state = State::read_from(&state_path)?;
+    state.set("ENABLED", "no");
+    state.write_to(&state_path)?;
+    Ok(())
+}
+
+/// Disable the systemd unit without updating the state file.
+///
+/// Used during container removal to clean up the enabled symlink
+/// before the state file is deleted. Best-effort: errors are ignored
+/// by the caller.
+pub fn disable_unit_only(name: &str) -> Result<()> {
+    dbus::disable_unit(&service_name(name))
+}
+
 pub fn wait_for_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
     dbus::wait_for_boot(name, timeout, verbose)
 }
@@ -772,6 +826,9 @@ DevicePolicy=closed
 DeviceAllow=/dev/net/tun rwm
 DeviceAllow=char-pts rw
 TimeoutStartSec=2min
+
+[Install]
+WantedBy=multi-user.target
 "#
     .to_string()
 }

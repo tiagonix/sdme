@@ -163,6 +163,10 @@ enum Command {
         /// Do not auto-mount volumes declared in the OCI image
         #[arg(long)]
         no_oci_volumes: bool,
+
+        /// Enable auto-start on boot
+        #[arg(long)]
+        enable: bool,
     },
 
     /// Run a command in a running container
@@ -178,6 +182,15 @@ enum Command {
     Join {
         /// Container name
         name: String,
+
+        /// Start the container if it is stopped
+        #[arg(long)]
+        start: bool,
+
+        /// Boot timeout in seconds (overrides config, default: 60)
+        #[arg(short, long)]
+        timeout: Option<u64>,
+
         /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -246,6 +259,10 @@ enum Command {
         #[arg(long)]
         no_oci_volumes: bool,
 
+        /// Enable auto-start on boot
+        #[arg(long)]
+        enable: bool,
+
         /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -286,6 +303,20 @@ enum Command {
         /// Force-kill all processes (SIGKILL, 15s timeout)
         #[arg(long, conflicts_with = "term")]
         kill: bool,
+    },
+
+    /// Enable containers to start automatically on boot
+    Enable {
+        /// Container names
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
+
+    /// Disable containers from starting automatically on boot
+    Disable {
+        /// Container names
+        #[arg(required = true)]
+        names: Vec<String>,
     },
 
     /// Set resource limits on a container (replaces all limits)
@@ -530,6 +561,27 @@ fn for_each_container(
     }
     if failed {
         bail!("some containers could not be {past}");
+    }
+    Ok(())
+}
+
+/// Start a container and wait for it to boot.
+///
+/// On boot failure (or Ctrl+C), resets the interrupt flag and stops the
+/// container so it doesn't linger in a half-booted state. Used by `start`
+/// and `join --start`.
+fn start_and_await_boot(
+    datadir: &std::path::Path,
+    name: &str,
+    boot_timeout: std::time::Duration,
+    verbose: bool,
+) -> Result<()> {
+    systemd::start(datadir, name, verbose)?;
+    if let Err(e) = systemd::await_boot(name, boot_timeout, verbose) {
+        sdme::reset_interrupt();
+        eprintln!("boot failed, stopping '{name}'");
+        let _ = containers::stop(name, containers::StopMode::Terminate, verbose);
+        return Err(e);
     }
     Ok(())
 }
@@ -976,6 +1028,7 @@ fn main() -> Result<()> {
             security,
             no_oci_ports,
             no_oci_volumes,
+            enable,
         } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
@@ -1021,6 +1074,10 @@ fn main() -> Result<()> {
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
+            if enable {
+                systemd::enable(&cfg.datadir, &name, cli.verbose)?;
+                eprintln!("enabled '{name}' for auto-start on boot");
+            }
             println!("{name}");
         }
         Command::Exec { name, command } => {
@@ -1068,18 +1125,55 @@ fn main() -> Result<()> {
             let verbose = cli.verbose;
             for_each_container(datadir, &targets, "starting", "started", |name| {
                 containers::ensure_exists(datadir, name)?;
-                systemd::start(datadir, name, verbose)?;
-                if let Err(e) = systemd::await_boot(name, boot_timeout, verbose) {
-                    sdme::reset_interrupt();
-                    eprintln!("boot failed, stopping '{name}'");
-                    let _ = containers::stop(name, containers::StopMode::Terminate, verbose);
-                    return Err(e);
-                }
-                Ok(())
+                start_and_await_boot(datadir, name, boot_timeout, verbose)
             })?;
         }
-        Command::Join { name, command } => {
+        Command::Enable { names } => {
+            let datadir = &cfg.datadir;
+            let verbose = cli.verbose;
+            for_each_container(datadir, &names, "enabling", "enabled", |name| {
+                containers::ensure_exists(datadir, name)?;
+                systemd::enable(datadir, name, verbose)
+            })?;
+        }
+        Command::Disable { names } => {
+            let datadir = &cfg.datadir;
+            let verbose = cli.verbose;
+            for_each_container(datadir, &names, "disabling", "disabled", |name| {
+                containers::ensure_exists(datadir, name)?;
+                systemd::disable(datadir, name, verbose)
+            })?;
+        }
+        Command::Join {
+            name,
+            start,
+            timeout,
+            command,
+        } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
+            containers::ensure_exists(&cfg.datadir, &name)?;
+
+            if !systemd::is_active(&name)? {
+                let should_start = if start {
+                    true
+                } else if interactive {
+                    eprintln!("container '{name}' is stopped");
+                    sdme::confirm_default_yes("start it? [Y/n] ")?
+                } else {
+                    bail!("container '{name}' is not running (use --start to start it)");
+                };
+
+                if !should_start {
+                    bail!("aborted");
+                }
+
+                system_check::check_systemd_version(252)?;
+                eprintln!("starting '{name}'");
+                let boot_timeout =
+                    std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
+                start_and_await_boot(&cfg.datadir, &name, boot_timeout, cli.verbose)?;
+            }
+
             eprintln!("joining '{name}'");
             let status = containers::join(
                 &cfg.datadir,
@@ -1127,6 +1221,7 @@ fn main() -> Result<()> {
             security,
             no_oci_ports,
             no_oci_volumes,
+            enable,
             command,
         } => {
             system_check::check_systemd_version(252)?;
@@ -1174,6 +1269,11 @@ fn main() -> Result<()> {
             let is_host_rootfs = opts.rootfs.is_none();
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
+
+            if enable {
+                systemd::enable(&cfg.datadir, &name, cli.verbose)?;
+                eprintln!("enabled '{name}' for auto-start on boot");
+            }
 
             // Warn about hardened/strict implications for interactive use.
             if hardened && is_host_rootfs {
@@ -1239,6 +1339,7 @@ fn main() -> Result<()> {
                     None
                 };
                 let show_userns = entries.iter().any(|e| e.userns);
+                let show_enabled = entries.iter().any(|e| e.enabled);
                 let binds_display: Vec<String> =
                     entries.iter().map(|e| e.binds_display()).collect();
                 let binds_w = if binds_display.iter().any(|b| !b.is_empty()) {
@@ -1260,6 +1361,9 @@ fn main() -> Result<()> {
                 if show_userns {
                     print!("  USERNS");
                 }
+                if show_enabled {
+                    print!("  ENABLED");
+                }
                 if let Some(bw) = binds_w {
                     print!("  {:<bw$}", "BINDS");
                 }
@@ -1278,6 +1382,9 @@ fn main() -> Result<()> {
                     }
                     if show_userns {
                         print!("  {:<6}", if e.userns { "yes" } else { "" });
+                    }
+                    if show_enabled {
+                        print!("  {:<7}", if e.enabled { "yes" } else { "" });
                     }
                     if let Some(bw) = binds_w {
                         print!("  {:<bw$}", binds_display[i]);
