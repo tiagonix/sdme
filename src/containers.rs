@@ -172,7 +172,7 @@ fn do_create(
     let hosts_path = etc_dir.join("hosts");
     fs::write(
         &hosts_path,
-        format!("127.0.0.1 localhost {name}\n::1 localhost\n"),
+        format!("127.0.0.1 localhost {name}\n::1 localhost {name}\n"),
     )
     .with_context(|| format!("failed to write {}", hosts_path.display()))?;
 
@@ -1153,7 +1153,7 @@ mod tests {
         let hosts = fs::read_to_string(container_dir.join("upper/etc/hosts")).unwrap();
         assert_eq!(
             hosts,
-            format!("127.0.0.1 localhost {name}\n::1 localhost\n")
+            format!("127.0.0.1 localhost {name}\n::1 localhost {name}\n")
         );
 
         // Verify state file.
@@ -1180,7 +1180,7 @@ mod tests {
 
         let hosts =
             fs::read_to_string(tmp.path().join("containers/hello/upper/etc/hosts")).unwrap();
-        assert_eq!(hosts, "127.0.0.1 localhost hello\n::1 localhost\n");
+        assert_eq!(hosts, "127.0.0.1 localhost hello\n::1 localhost hello\n");
 
         let state = State::read_from(&tmp.path().join("state/hello")).unwrap();
         assert_eq!(state.get("NAME"), Some("hello"));
