@@ -2,13 +2,13 @@
 
 Last verified: 2026-03-12
 
-System: Linux 6.17.0-14-generic (aarch64), systemd 257 (257.9-0ubuntu2.1), sdme 0.3.0
+System: Linux 6.19.2-2-cachyos (x86_64), systemd 259 (259.1-1-arch), sdme 0.3.1
 
 See [README.md](README.md) for how to run the tests.
 
 ## Unit tests
 
-359 passed, 0 failed, 3 ignored.
+360 passed, 0 failed, 3 ignored.
 
 ## Base OS Import and Boot
 
@@ -20,26 +20,26 @@ See [README.md](README.md) for how to run the tests.
 | centos    | quay.io/centos/centos:stream9     | PASS   | PASS |
 | almalinux | quay.io/almalinuxorg/almalinux:9  | PASS   | PASS |
 | suse      | docker.io/opensuse/tumbleweed     | PASS   | PASS |
-| archlinux | docker.io/archlinux               | SKIP   | SKIP |
+| archlinux | docker.io/archlinux               | PASS   | PASS |
 
 Boot tests verify: container create, systemd reaching `running` state,
 journalctl access, and systemctl unit listing.
 
-archlinux is skipped on aarch64: the `docker.io/archlinux` image only
+archlinux requires x86_64: the `docker.io/archlinux` image only
 publishes `linux/amd64` manifests.
 
 ## OCI App Matrix
 
-| App                | Image                              | deb  | ubu  | fed  | cen  | alma | suse |
-|--------------------|------------------------------------|------|------|------|------|------|------|
-| nginx-unprivileged | docker.io/nginxinc/nginx-unpriv... | PASS | PASS | PASS | PASS | PASS | PASS |
-| redis              | docker.io/redis                    | PASS | PASS | PASS | PASS | PASS | PASS |
-| postgresql         | docker.io/postgres                 | PASS | PASS | PASS | PASS | PASS | PASS |
+| App                | Image                              | deb  | ubu  | fed  | cen  | alma | suse | arch |
+|--------------------|------------------------------------|------|------|------|------|------|------|------|
+| nginx-unprivileged | docker.io/nginxinc/nginx-unpriv... | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
+| redis              | docker.io/redis                    | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
+| postgresql         | docker.io/postgres                 | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
 
 Each cell verifies: app import with `--base-fs`, container boot,
 `sdme-oci-app.service` active, journal and status accessible, and
-app-specific health check (HTTP 200 for nginx-unprivileged, redis-cli
-ping, pg_isready).
+app-specific health check (marker file served by nginx-unprivileged,
+redis-cli ping, pg_isready).
 
 ## Pod Tests
 
@@ -107,6 +107,7 @@ ping, pg_isready).
 | fedora boot with --userns              | PASS   |
 | centos boot with --userns              | PASS   |
 | almalinux boot with --userns           | PASS   |
+| archlinux boot with --userns           | PASS   |
 | nginx OCI app with --userns            | PASS   |
 
 - **CLI validation**: verifies that invalid capability names, syscall filter
@@ -130,9 +131,9 @@ ping, pg_isready).
   and confirms denied writes (e.g. `/proc/sysrq-trigger`) are
   blocked.
 - **--userns boot**: each distro boots with `--userns`, systemd reaches
-  `running` or `degraded` state. suse and archlinux skipped (require
-  rootfs from `verify-matrix.sh --keep`; suse userns has a systemd
-  258 UID/GID shift incompatibility on this host).
+  `running` or `degraded` state. suse skipped (requires rootfs from
+  `verify-matrix.sh --keep`; suse userns has a systemd UID/GID shift
+  incompatibility).
 - **--userns OCI app**: nginx imported as OCI app on ubuntu base, container
   created with `--userns`, `sdme-oci-app.service` is active.
 
@@ -146,6 +147,7 @@ ping, pg_isready).
 | centos    | PASS   | PASS    |
 | almalinux | PASS   | PASS    |
 | suse      | PASS   | PASS    |
+| archlinux | PASS   | PASS    |
 
 Each distro is created with `--hardened` and verified to reach `running`
 or `degraded` state. Hardened enables user namespace isolation,
@@ -162,18 +164,21 @@ private network, no-new-privileges, and drops
 | nginx-unprivileged | centos    | PASS | PASS    |
 | nginx-unprivileged | almalinux | PASS | PASS    |
 | nginx-unprivileged | suse      | FAIL | SKIP    |
+| nginx-unprivileged | archlinux | PASS | PASS    |
 | redis              | debian    | PASS | PASS    |
 | redis              | ubuntu    | PASS | PASS    |
 | redis              | fedora    | PASS | PASS    |
 | redis              | centos    | PASS | PASS    |
 | redis              | almalinux | PASS | PASS    |
 | redis              | suse      | FAIL | SKIP    |
+| redis              | archlinux | PASS | PASS    |
 | postgresql         | debian    | PASS | PASS    |
 | postgresql         | ubuntu    | PASS | PASS    |
 | postgresql         | fedora    | PASS | PASS    |
 | postgresql         | centos    | PASS | PASS    |
 | postgresql         | almalinux | PASS | PASS    |
 | postgresql         | suse      | FAIL | SKIP    |
+| postgresql         | archlinux | PASS | PASS    |
 
 Each cell verifies: container created with `--hardened`, boots
 successfully, and `sdme-oci-app.service` is active. App-specific
@@ -181,10 +186,9 @@ health checks (HTTP, CLI) are skipped because `--hardened` enables
 private network, blocking host-side connectivity.
 
 Hardened suse OCI apps fail because the openSUSE Tumbleweed rootfs
-ships systemd 258 which has a UID/GID shift incompatibility with the
-host systemd 257 (`Failed to adjust UID/GID shift of OS tree`). The
-suse base OS boots fine with `--hardened` (no OCI app overlay). This
-is a systemd version mismatch, not an sdme issue.
+has a UID/GID shift incompatibility (`Failed to adjust UID/GID shift
+of OS tree`). The suse base OS boots fine with `--hardened` (no OCI
+app overlay). This is a systemd version mismatch, not an sdme issue.
 
 ## OCI Port Forwarding and Volume Mounting
 

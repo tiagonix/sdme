@@ -585,6 +585,18 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_distro_family_cachyos() {
+        let tmp = TempSourceDir::new("family-cachyos");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/os-release"),
+            "ID=cachyos\nID_LIKE=arch\n",
+        )
+        .unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Arch);
+    }
+
+    #[test]
     fn test_detect_distro_family_opensuse_tumbleweed() {
         let tmp = TempSourceDir::new("family-tumbleweed");
         fs::create_dir_all(tmp.path().join("etc")).unwrap();

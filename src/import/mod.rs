@@ -595,6 +595,7 @@ fn detect_systemd_presence(rootfs: &Path) -> SystemdPresence {
         "usr/bin/dbus-daemon",
         "usr/bin/dbus-broker",
         "usr/lib/dbus-1/dbus-daemon-launch-helper",
+        "usr/lib/dbus-daemon-launch-helper",
     ]
     .iter()
     .any(|p| rootfs.join(p).exists())

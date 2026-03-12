@@ -29,6 +29,7 @@ declare -A APP_READY_WAIT=(
     [postgresql]=10
 )
 
+NGINX_MARKER="sdme-matrix-test-$$"
 DATADIR="/var/lib/sdme"
 KEEP=0
 REPORT_DIR="."
@@ -273,11 +274,14 @@ app_verify() {
     local app="$1" ct_name="$2"
     case "$app" in
         nginx-unprivileged)
-            local code
-            code=$(timeout 10 curl -s -o /dev/null -w '%{http_code}' http://localhost:8080 2>&1) || true
-            if [[ "$code" == "200" ]]; then
+            # Curl the marker file written into the upper layer before start.
+            local body
+            body=$(timeout 10 curl -s http://localhost:8080/sdme-test.txt 2>&1) || true
+            if [[ "$body" == *"$NGINX_MARKER"* ]]; then
                 return 0
             else
+                local code
+                code=$(timeout 10 curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/sdme-test.txt 2>&1) || true
                 echo "HTTP $code"
                 return 1
             fi
@@ -341,6 +345,20 @@ phase3_apps() {
                 continue
             fi
 
+            # Skip nginx if port 8080 is already in use (host-network containers
+            # share ports with the host; a conflicting listener causes silent
+            # bind failures inside the container).
+            if [[ "$app" == "nginx-unprivileged" ]] && ss -tlnH '( sport = :8080 )' | grep -q .; then
+                local blocker
+                blocker=$(ss -tlnp '( sport = :8080 )' | tail -1)
+                record "app/$app-on-$distro/boot" SKIP "port 8080 in use: $blocker"
+                record "app/$app-on-$distro/service" SKIP "port 8080 in use"
+                record "app/$app-on-$distro/logs" SKIP "port 8080 in use"
+                record "app/$app-on-$distro/status" SKIP "port 8080 in use"
+                record "app/$app-on-$distro/verify" SKIP "port 8080 in use"
+                continue
+            fi
+
             # Build create args with OCI env vars
             local create_args=(-r "$fs_name")
             case "$app" in
@@ -355,6 +373,15 @@ phase3_apps() {
                 record "app/$app-on-$distro/status" SKIP "create failed"
                 record "app/$app-on-$distro/verify" SKIP "create failed"
                 continue
+            fi
+
+            # Write nginx test file into the overlayfs upper layer before
+            # start so the marker is present when nginx boots. This avoids
+            # depending on the default welcome page which varies by distro.
+            if [[ "$app" == "nginx-unprivileged" ]]; then
+                local html_dir="$DATADIR/containers/$ct_name/upper/oci/root/usr/share/nginx/html"
+                mkdir -p "$html_dir"
+                echo "$NGINX_MARKER" > "$html_dir/sdme-test.txt"
             fi
 
             # Start

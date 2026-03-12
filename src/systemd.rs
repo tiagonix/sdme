@@ -757,6 +757,11 @@ pub fn wait_for_dbus(name: &str, timeout: std::time::Duration, verbose: bool) ->
 /// Wait for a container to complete boot and D-Bus readiness.
 ///
 /// Combines `wait_for_boot` and `wait_for_dbus` with shared timeout tracking.
+///
+/// TODO: for OCI app containers, optionally wait for `sdme-oci-app.service`
+/// to reach active state. Currently we only wait for the container's systemd
+/// to boot, so a failing OCI app service (e.g. port conflict) goes unnoticed
+/// until the user checks manually.
 pub fn await_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
     let boot_start = std::time::Instant::now();
     wait_for_boot(name, timeout, verbose)?;
