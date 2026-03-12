@@ -219,7 +219,7 @@ image (one imported with `--base-fs`):
 3. If the user is non-root, the name is resolved against `etc/passwd` and
    `etc/group` inside the OCI rootfs, and the `drop_privs` binary is
    written to `/.sdme-drop-privs` (mode `0o111`, execute-only).
-4. A systemd service unit (`sdme-oci-app.service`) is generated with
+4. A systemd service unit (`sdme-oci-{name}.service`) is generated with
    both binaries wired in.
 
 ### Generated unit (non-root user)
@@ -229,10 +229,10 @@ Both the privilege dropper and the devfd shim appear in the same unit:
 ```ini
 [Service]
 Type=exec
-RootDirectory=/oci/root
+RootDirectory=/oci/apps/nginx/root
 MountAPIVFS=yes
 Environment=LD_PRELOAD=/.sdme-devfd-shim.so
-EnvironmentFile=-/oci/env
+EnvironmentFile=-/oci/apps/nginx/env
 ExecStart=/.sdme-drop-privs 101 101 / /docker-entrypoint.sh nginx -g 'daemon off;'
 ```
 
@@ -247,12 +247,12 @@ For root users, `drop_privs` is not needed. The devfd shim still applies:
 ```ini
 [Service]
 Type=exec
-RootDirectory=/oci/root
+RootDirectory=/oci/apps/nginx/root
 MountAPIVFS=yes
 Environment=LD_PRELOAD=/.sdme-devfd-shim.so
 ExecStart=/docker-entrypoint.sh nginx -g 'daemon off;'
 WorkingDirectory=/
-EnvironmentFile=-/oci/env
+EnvironmentFile=-/oci/apps/nginx/env
 User=root
 ```
 

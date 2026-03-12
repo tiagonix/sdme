@@ -150,8 +150,8 @@ sudo sdme fs rm ubuntu           # remove a rootfs
 Beyond base OS images, sdme can run OCI application images (nginx,
 redis, mysql, postgresql, anything on Docker Hub) as systemd services
 inside containers. The concept: take a base OS rootfs that has systemd,
-place the OCI app rootfs under `/oci/root`, and generate a systemd
-service that chroots into it.
+place the OCI app rootfs under `/oci/apps/{name}/root`, and generate a
+systemd service (`sdme-oci-{name}.service`) that chroots into it.
 
 You get the OCI packaging model (pull from any registry) with the
 systemd operational model (journalctl, systemctl, cgroup limits).
@@ -172,7 +172,7 @@ sudo sdme new -r nginx
 Inside the container:
 
 ```bash
-systemctl status sdme-oci-app.service
+systemctl status sdme-oci-nginx.service
 curl -s http://localhost
 ```
 
@@ -189,8 +189,8 @@ sudo sdme config set default_base_fs ubuntu
 
 Use `--oci-env` on `create` or `new` to set environment variables for
 the OCI app service. These are written to the OCI env file
-(`/oci/env`) in the container's overlayfs upper layer and read by the
-`sdme-oci-app.service` unit via `EnvironmentFile=`.
+(`/oci/apps/{name}/env`) in the container's overlayfs upper layer and
+read by the `sdme-oci-{name}.service` unit via `EnvironmentFile=`.
 
 This is separate from `-e`/`--env`, which sets environment variables
 for the container's systemd init (PID 1) via nspawn `--setenv=` flags.
@@ -201,7 +201,7 @@ sudo sdme new -r postgresql --oci-env POSTGRES_PASSWORD=secret
 
 ### OCI exec and logs
 
-Run a command inside the OCI app root (`/oci/root`) without needing
+Run a command inside the OCI app root (`/oci/apps/{name}/root`) without needing
 chroot:
 
 ```bash
@@ -257,7 +257,7 @@ with `--userns` and `--hardened` because the kernel blocks
 `setns(CLONE_NEWNET)` across user namespace boundaries.
 
 **`--oci-pod` (app process only):** Only the
-`sdme-oci-app.service` process enters the pod's network namespace.
+`sdme-oci-{name}.service` process enters the pod's network namespace.
 The container's systemd init and other services remain in their own
 namespace:
 

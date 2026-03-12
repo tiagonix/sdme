@@ -317,9 +317,9 @@ test_oci_apps() {
             record "oci/nginx-boot" PASS
             sleep 3
 
-            # systemctl status sdme-oci-app.service (from inside)
+            # systemctl status sdme-oci-nginx.service (from inside)
             if output=$(timeout "$TIMEOUT_TEST" $SDME exec "$nginx_ct" \
-                    /usr/bin/systemctl is-active sdme-oci-app.service 2>&1); then
+                    /usr/bin/systemctl is-active sdme-oci-nginx.service 2>&1); then
                 record "oci/nginx-service" PASS
             else
                 record "oci/nginx-service" FAIL "$output"

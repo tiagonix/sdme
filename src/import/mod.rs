@@ -68,6 +68,21 @@ pub(crate) fn shell_join(args: &[String]) -> String {
         .join(" ")
 }
 
+/// Derive the OCI app name from an image reference string.
+///
+/// For registry images (e.g. `docker.io/nginx:latest`), returns the last
+/// path component of the repository with underscores replaced by hyphens
+/// (for systemd unit name compatibility).
+/// For non-registry sources (tarballs, dirs), falls back to the rootfs name.
+pub(crate) fn derive_app_name(source: &str, rootfs_name: &str) -> String {
+    if let Some(img) = registry::ImageReference::parse(source) {
+        let last = img.repository.rsplit('/').next().unwrap_or(&img.repository);
+        last.replace('_', "-")
+    } else {
+        rootfs_name.to_string()
+    }
+}
+
 /// Controls whether systemd packages are installed during rootfs import.
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum InstallPackages {
@@ -1107,11 +1122,226 @@ pub(crate) fn resolve_oci_user(oci_root: &Path, user: &str) -> Result<Option<Res
 
 // --- OCI application image support ---
 
+/// Configuration for setting up an OCI app inside a combined rootfs.
+///
+/// Shared by `setup_app_image()` (single-app import) and kube's
+/// `setup_kube_container()`. Each app lives under `/oci/apps/{name}/`.
+pub(crate) struct OciAppSetup<'a> {
+    /// App name (e.g. "nginx", "redis").
+    pub name: &'a str,
+    /// Combined rootfs being built (for unit dir paths).
+    pub staging_dir: &'a Path,
+    /// App directory: `/oci/apps/{name}` within staging.
+    pub app_dir: &'a Path,
+    /// App root: `/oci/apps/{name}/root` within staging.
+    pub app_root: &'a Path,
+    /// Pre-built ExecStart command string.
+    pub exec_start: &'a str,
+    /// Working directory inside the app root.
+    pub working_dir: &'a str,
+    /// User spec from the OCI config (e.g. "root", "nginx", "101:101").
+    pub user: &'a str,
+    /// Pre-merged environment lines (`KEY=VALUE`).
+    pub env_lines: Vec<String>,
+    /// OCI config (for ports, volumes, stop_signal).
+    pub config: &'a registry::OciContainerConfig,
+    /// Image reference string for unit file comments.
+    pub image_ref: &'a str,
+    /// Restart policy for systemd unit (None = omit `Restart=` line).
+    pub restart_policy: Option<&'a str>,
+    /// Extra `BindPaths=`/`BindReadOnlyPaths=` lines for the service unit.
+    pub bind_paths: Vec<String>,
+    /// Verbose output.
+    pub verbose: bool,
+}
+
+/// Set up a single OCI app inside a combined rootfs.
+///
+/// Creates the service unit, env/ports/volumes files, deploys devfd shim
+/// and drop_privs binary. Common logic shared by `setup_app_image()` and
+/// kube's `setup_kube_container()`.
+pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
+    // 1. Ensure essential runtime directories.
+    for (dir, mode) in [
+        ("tmp", 0o1777),
+        ("run", 0o755),
+        ("var/run", 0o755),
+        ("var/tmp", 0o1777),
+    ] {
+        use std::os::unix::fs::DirBuilderExt;
+        let path = opts.app_root.join(dir);
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::DirBuilder::new()
+                .mode(mode)
+                .create(&path)
+                .with_context(|| format!("failed to create {}", path.display()))?;
+        }
+    }
+
+    // 2. Deploy devfd shim.
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => crate::drop_privs::Arch::X86_64,
+        "aarch64" => crate::drop_privs::Arch::Aarch64,
+        other => bail!("unsupported architecture: {other}"),
+    };
+    let shim_bytes = crate::devfd_shim::generate(arch);
+    let shim_path = opts.app_root.join(".sdme-devfd-shim.so");
+    fs::write(&shim_path, &shim_bytes)
+        .with_context(|| format!("failed to write {}", shim_path.display()))?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o444))
+        .with_context(|| format!("failed to set permissions on {}", shim_path.display()))?;
+    if opts.verbose {
+        eprintln!("wrote devfd shim: {}", shim_path.display());
+    }
+
+    // 3. Resolve user, deploy drop_privs if non-root.
+    let resolved_user = resolve_oci_user(opts.app_root, opts.user)?;
+    if let Some(ref ru) = resolved_user {
+        let elf_bytes = crate::drop_privs::generate(arch);
+        let drop_privs_path = opts.app_root.join(".sdme-drop-privs");
+        fs::write(&drop_privs_path, &elf_bytes)
+            .with_context(|| format!("failed to write {}", drop_privs_path.display()))?;
+        fs::set_permissions(&drop_privs_path, fs::Permissions::from_mode(0o111)).with_context(
+            || format!("failed to set permissions on {}", drop_privs_path.display()),
+        )?;
+        if opts.verbose {
+            eprintln!(
+                "wrote drop_privs binary for uid={} gid={}: {}",
+                ru.uid,
+                ru.gid,
+                drop_privs_path.display()
+            );
+        }
+    }
+
+    // 4. Write env file.
+    if !opts.env_lines.is_empty() {
+        let env_path = opts.app_dir.join("env");
+        let content = opts.env_lines.join("\n") + "\n";
+        fs::write(&env_path, &content)
+            .with_context(|| format!("failed to write {}", env_path.display()))?;
+    }
+
+    // 5. Write ports file.
+    if let Some(ref ports) = opts.config.exposed_ports {
+        if !ports.is_empty() {
+            let content = sorted_keys_joined(ports, "\n") + "\n";
+            fs::write(opts.app_dir.join("ports"), &content)
+                .context("failed to write ports file")?;
+        }
+    }
+
+    // 6. Write volumes file.
+    if let Some(ref vols) = opts.config.volumes {
+        if !vols.is_empty() {
+            let content = sorted_keys_joined(vols, "\n") + "\n";
+            fs::write(opts.app_dir.join("volumes"), &content)
+                .context("failed to write volumes file")?;
+        }
+    }
+
+    // 7. Build the [Service] section.
+    let bind_paths_section = if opts.bind_paths.is_empty() {
+        String::new()
+    } else {
+        opts.bind_paths.join("\n") + "\n"
+    };
+
+    let stop_signal_line = opts
+        .config
+        .stop_signal
+        .as_ref()
+        .map(|sig| format!("KillSignal={sig}\n"))
+        .unwrap_or_default();
+
+    let service_section = if let Some(ref ru) = resolved_user {
+        let drop_privs_exec = format!(
+            "/.sdme-drop-privs {} {} {} {}",
+            ru.uid, ru.gid, opts.working_dir, opts.exec_start
+        );
+        format!(
+            "\
+RootDirectory=/oci/apps/{name}/root
+MountAPIVFS=yes
+Environment=LD_PRELOAD=/.sdme-devfd-shim.so
+EnvironmentFile=-/oci/apps/{name}/env
+ExecStart={drop_privs_exec}
+{stop_signal_line}{bind_paths_section}",
+            name = opts.name
+        )
+    } else {
+        format!(
+            "\
+RootDirectory=/oci/apps/{name}/root
+MountAPIVFS=yes
+Environment=LD_PRELOAD=/.sdme-devfd-shim.so
+ExecStart={exec_start}
+WorkingDirectory={working_dir}
+EnvironmentFile=-/oci/apps/{name}/env
+User={user}
+{stop_signal_line}{bind_paths_section}",
+            name = opts.name,
+            exec_start = opts.exec_start,
+            working_dir = opts.working_dir,
+            user = opts.user,
+        )
+    };
+
+    let restart_line = match opts.restart_policy {
+        Some(policy) => format!("Restart={policy}\n"),
+        None => String::new(),
+    };
+
+    let service_name = format!("sdme-oci-{}.service", opts.name);
+    let unit_content = format!(
+        r#"# Generated by sdme from image: {image_ref}
+[Unit]
+Description=OCI app: {name} ({image_ref})
+After=network.target
+
+[Service]
+Type=exec
+{service_section}{restart_line}
+[Install]
+WantedBy=multi-user.target
+"#,
+        image_ref = opts.image_ref,
+        name = opts.name,
+    );
+
+    let unit_dir = opts.staging_dir.join("etc/systemd/system");
+    fs::create_dir_all(&unit_dir)
+        .with_context(|| format!("failed to create {}", unit_dir.display()))?;
+    let unit_path = unit_dir.join(&service_name);
+    fs::write(&unit_path, &unit_content)
+        .with_context(|| format!("failed to write {}", unit_path.display()))?;
+
+    // 8. Enable via symlink.
+    let wants_dir = unit_dir.join("multi-user.target.wants");
+    fs::create_dir_all(&wants_dir)
+        .with_context(|| format!("failed to create {}", wants_dir.display()))?;
+    let symlink_path = wants_dir.join(&service_name);
+    std::os::unix::fs::symlink(format!("../{service_name}"), &symlink_path)
+        .with_context(|| format!("failed to create symlink {}", symlink_path.display()))?;
+
+    if opts.verbose {
+        eprintln!("wrote unit file: {}", unit_path.display());
+    }
+
+    Ok(())
+}
+
 /// Set up an application image by combining a base rootfs with the OCI rootfs.
 ///
-/// The OCI rootfs (already extracted in staging_dir) is moved to `/oci/root`
-/// inside a copy of the base rootfs. A systemd unit is generated to chroot
-/// into the OCI rootfs and run the application's entrypoint/cmd.
+/// The OCI rootfs (already extracted in staging_dir) is moved to
+/// `/oci/apps/{app_name}/root` inside a copy of the base rootfs. A systemd
+/// unit is generated to chroot into the OCI rootfs and run the application's
+/// entrypoint/cmd.
 #[allow(clippy::too_many_arguments)]
 fn setup_app_image(
     datadir: &Path,
@@ -1119,6 +1349,7 @@ fn setup_app_image(
     rootfs_dir: &Path,
     name: &str,
     base_name: &str,
+    app_name: &str,
     config: &registry::OciContainerConfig,
     image_ref: &str,
     verbose: bool,
@@ -1174,19 +1405,20 @@ fn setup_app_image(
     crate::copy::copy_tree(&base_dir, staging_dir, verbose)
         .with_context(|| format!("failed to copy base rootfs from {}", base_dir.display()))?;
 
-    // 3. Move OCI rootfs contents into staging_dir/oci/root/.
-    let oci_root = staging_dir.join("oci/root");
-    fs::create_dir_all(&oci_root)
-        .with_context(|| format!("failed to create {}", oci_root.display()))?;
+    // 3. Move OCI rootfs contents into staging_dir/oci/apps/{app_name}/root/.
+    let app_dir = staging_dir.join("oci/apps").join(app_name);
+    let app_root = app_dir.join("root");
+    fs::create_dir_all(&app_root)
+        .with_context(|| format!("failed to create {}", app_root.display()))?;
 
     if verbose {
-        eprintln!("moving OCI rootfs to {}", oci_root.display());
+        eprintln!("moving OCI rootfs to {}", app_root.display());
     }
     for entry in
         fs::read_dir(&oci_tmp).with_context(|| format!("failed to read {}", oci_tmp.display()))?
     {
         let entry = entry?;
-        let dest = oci_root.join(entry.file_name());
+        let dest = app_root.join(entry.file_name());
         fs::rename(entry.path(), &dest).with_context(|| {
             format!(
                 "failed to move {} to {}",
@@ -1196,211 +1428,25 @@ fn setup_app_image(
         })?;
     }
 
-    // 3b. Ensure essential runtime directories exist in OCI root.
-    // Docker provides /tmp, /run, /var/run, /var/tmp as tmpfs mounts at runtime,
-    // so they may not exist in the extracted image layers. The chrooted service
-    // needs them.
-    //
-    // Use DirBuilder with explicit mode on the leaf directory so it's created
-    // with the right permissions atomically (no umask-stripped window).
-    for (dir, mode) in [
-        ("tmp", 0o1777),
-        ("run", 0o755),
-        ("var/run", 0o755),
-        ("var/tmp", 0o1777),
-    ] {
-        use std::os::unix::fs::DirBuilderExt;
-        let path = oci_root.join(dir);
-        if !path.exists() {
-            // Ensure parents exist (inherits umask, fine for /var etc.).
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
-            fs::DirBuilder::new()
-                .mode(mode)
-                .create(&path)
-                .with_context(|| format!("failed to create {}", path.display()))?;
-        }
-    }
+    // 4. Set up the OCI app (common logic).
+    let env_lines = config.env.clone().unwrap_or_default();
+    setup_oci_app(&OciAppSetup {
+        name: app_name,
+        staging_dir,
+        app_dir: &app_dir,
+        app_root: &app_root,
+        exec_start: &exec_start,
+        working_dir,
+        user,
+        env_lines,
+        config,
+        image_ref,
+        restart_policy: None,
+        bind_paths: Vec::new(),
+        verbose,
+    })?;
 
-    // 3c. Deploy devfd shim for LD_PRELOAD.
-    //
-    // OCI images commonly symlink log files to /dev/stdout or /dev/stderr
-    // (e.g. nginx). Under systemd, FDs 1/2 are journal sockets; open() on
-    // /proc/self/fd/N returns ENXIO for sockets. The shim intercepts
-    // open()/openat() and returns dup(N) for /dev/std{in,out,err},
-    // /dev/fd/{0,1,2}, and /proc/self/fd/{0,1,2}.
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => crate::drop_privs::Arch::X86_64,
-        "aarch64" => crate::drop_privs::Arch::Aarch64,
-        other => bail!("unsupported architecture: {other}"),
-    };
-    let shim_bytes = crate::devfd_shim::generate(arch);
-    let shim_path = oci_root.join(".sdme-devfd-shim.so");
-    fs::write(&shim_path, &shim_bytes)
-        .with_context(|| format!("failed to write {}", shim_path.display()))?;
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o444))
-        .with_context(|| format!("failed to set permissions on {}", shim_path.display()))?;
-    if verbose {
-        eprintln!("wrote devfd shim: {}", shim_path.display());
-    }
-
-    // 3d. If the OCI image specifies a non-root user, write the drop_privs
-    // binary so the service can switch UIDs without relying on systemd's
-    // User= (which resolves via host NSS before entering the chroot).
-    let resolved_user = resolve_oci_user(&oci_root, user)?;
-    if let Some(ref ru) = resolved_user {
-        let elf_bytes = crate::drop_privs::generate(arch);
-        let drop_privs_path = oci_root.join(".sdme-drop-privs");
-        fs::write(&drop_privs_path, &elf_bytes)
-            .with_context(|| format!("failed to write {}", drop_privs_path.display()))?;
-        // Mode 0o111: execute-only for everyone, not readable/writable.
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&drop_privs_path, fs::Permissions::from_mode(0o111)).with_context(
-            || format!("failed to set permissions on {}", drop_privs_path.display()),
-        )?;
-        if verbose {
-            eprintln!(
-                "wrote drop_privs binary for uid={} gid={}: {}",
-                ru.uid,
-                ru.gid,
-                drop_privs_path.display()
-            );
-        }
-    }
-
-    // 4. Write OCI env file.
-    if let Some(ref env_vars) = config.env {
-        if !env_vars.is_empty() {
-            let env_path = staging_dir.join("oci/env");
-            let content = env_vars.join("\n") + "\n";
-            fs::write(&env_path, &content)
-                .with_context(|| format!("failed to write {}", env_path.display()))?;
-        }
-    }
-
-    // 4b. Write OCI ports file.
-    if let Some(ref ports) = config.exposed_ports {
-        if !ports.is_empty() {
-            let content = sorted_keys_joined(ports, "\n") + "\n";
-            fs::write(staging_dir.join("oci/ports"), &content)
-                .with_context(|| "failed to write oci/ports")?;
-        }
-    }
-
-    // 4c. Write OCI volumes file.
-    if let Some(ref vols) = config.volumes {
-        if !vols.is_empty() {
-            let content = sorted_keys_joined(vols, "\n") + "\n";
-            fs::write(staging_dir.join("oci/volumes"), &content)
-                .with_context(|| "failed to write oci/volumes")?;
-        }
-    }
-
-    // 5. Generate the systemd unit file.
-    let unit_dir = staging_dir.join("etc/systemd/system");
-    fs::create_dir_all(&unit_dir)
-        .with_context(|| format!("failed to create {}", unit_dir.display()))?;
-
-    let port_comment = config
-        .exposed_ports
-        .as_ref()
-        .filter(|p| !p.is_empty())
-        .map(sorted_keys_csv)
-        .unwrap_or_else(|| "none".to_string());
-
-    let volume_comment = config
-        .volumes
-        .as_ref()
-        .filter(|v| !v.is_empty())
-        .map(sorted_keys_csv)
-        .unwrap_or_else(|| "none".to_string());
-
-    let stop_signal_line = config
-        .stop_signal
-        .as_ref()
-        .map(|sig| format!("KillSignal={sig}\n"))
-        .unwrap_or_default();
-
-    // Build the [Service] section depending on whether drop_privs is used.
-    let service_section = if let Some(ref ru) = resolved_user {
-        // Non-root user: use drop_privs binary to switch uid/gid and set workdir.
-        // The drop_privs binary does setgroups(0,NULL) → setgid → setuid → chdir → execve.
-        // This avoids systemd's User= which resolves via host NSS before chroot.
-        let drop_privs_exec = format!(
-            "/.sdme-drop-privs {} {} {} {}",
-            ru.uid, ru.gid, working_dir, exec_start
-        );
-        format!(
-            "\
-RootDirectory=/oci/root
-MountAPIVFS=yes
-Environment=LD_PRELOAD=/.sdme-devfd-shim.so
-EnvironmentFile=-/oci/env
-ExecStart={drop_privs_exec}
-{stop_signal_line}"
-        )
-    } else {
-        // Root user: use standard systemd directives.
-        format!(
-            "\
-RootDirectory=/oci/root
-MountAPIVFS=yes
-Environment=LD_PRELOAD=/.sdme-devfd-shim.so
-ExecStart={exec_start}
-WorkingDirectory={working_dir}
-EnvironmentFile=-/oci/env
-User={user}
-{stop_signal_line}"
-        )
-    };
-
-    let unit_content = format!(
-        r#"# Generated by sdme from OCI image: {image_ref}
-# OCI metadata saved under /oci/:
-#   /oci/root    : application rootfs
-#   /oci/env     : environment variables
-#   /oci/ports   : exposed ports (if any)
-#   /oci/volumes : declared volumes (if any)
-
-[Unit]
-Description=OCI application (image: {image_ref})
-After=network.target
-
-[Service]
-Type=exec
-{service_section}
-# TODO(sdme): bind-mount declared volumes into the chroot.
-# OCI volumes: {volume_comment}
-# Use: sdme create -b /host/path:/container/path -r <this-rootfs>
-
-# TODO(sdme): wire up port forwarding from host to container.
-# OCI ports: {port_comment}
-# Use: sdme create --port HOST:CONTAINER -r <this-rootfs>
-
-[Install]
-WantedBy=multi-user.target
-"#
-    );
-    let unit_path = unit_dir.join("sdme-oci-app.service");
-    fs::write(&unit_path, &unit_content)
-        .with_context(|| format!("failed to write {}", unit_path.display()))?;
-
-    if verbose {
-        eprintln!("wrote unit file: {}", unit_path.display());
-    }
-
-    // 6. Enable the unit via symlink.
-    let wants_dir = unit_dir.join("multi-user.target.wants");
-    fs::create_dir_all(&wants_dir)
-        .with_context(|| format!("failed to create {}", wants_dir.display()))?;
-    let symlink_path = wants_dir.join("sdme-oci-app.service");
-    std::os::unix::fs::symlink("../sdme-oci-app.service", &symlink_path)
-        .with_context(|| format!("failed to create symlink {}", symlink_path.display()))?;
-
-    // 7. Clean up temp OCI dir.
+    // 5. Clean up temp OCI dir.
     let _ = make_removable(&oci_tmp);
     fs::remove_dir_all(&oci_tmp)
         .with_context(|| format!("failed to remove {}", oci_tmp.display()))?;
@@ -1521,12 +1567,14 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         } else {
             match base_fs {
                 Some(base_name) => {
+                    let app_name = derive_app_name(source, name);
                     let setup_result = setup_app_image(
                         datadir,
                         &staging_dir,
                         &rootfs_dir,
                         name,
                         base_name,
+                        &app_name,
                         cc,
                         source,
                         verbose,
@@ -1875,6 +1923,28 @@ pub(crate) mod tests {
             use std::sync::atomic::Ordering;
             crate::INTERRUPTED.store(false, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn test_derive_app_name_registry() {
+        assert_eq!(
+            derive_app_name("docker.io/nginx:latest", "fallback"),
+            "nginx"
+        );
+        assert_eq!(
+            derive_app_name("docker.io/oliver006/redis_exporter:latest", "fb"),
+            "redis-exporter"
+        );
+        assert_eq!(
+            derive_app_name("quay.io/centos/centos:stream10", "fb"),
+            "centos"
+        );
+    }
+
+    #[test]
+    fn test_derive_app_name_non_registry() {
+        assert_eq!(derive_app_name("/path/to/dir", "myfs"), "myfs");
+        assert_eq!(derive_app_name("some-tarball.tar.gz", "myfs"), "myfs");
     }
 
     #[test]
@@ -2889,17 +2959,18 @@ pub(crate) mod tests {
             &datadir.join("fs"),
             "myapp",
             "base",
+            "myapp",
             &config,
             "test-image:latest",
             false,
         )
         .unwrap();
 
-        // OCI rootfs should be under staging/oci/root/.
-        assert!(staging.join("oci/root/app.bin").is_file());
+        // OCI rootfs should be under staging/oci/apps/myapp/root/.
+        assert!(staging.join("oci/apps/myapp/root/app.bin").is_file());
 
         // Service unit should exist.
-        let unit = staging.join("etc/systemd/system/sdme-oci-app.service");
+        let unit = staging.join("etc/systemd/system/sdme-oci-myapp.service");
         assert!(unit.is_file());
         let unit_content = fs::read_to_string(&unit).unwrap();
         assert!(
@@ -2909,17 +2980,19 @@ pub(crate) mod tests {
 
         // Symlink for multi-user.target.wants.
         let symlink =
-            staging.join("etc/systemd/system/multi-user.target.wants/sdme-oci-app.service");
+            staging.join("etc/systemd/system/multi-user.target.wants/sdme-oci-myapp.service");
         assert!(symlink.symlink_metadata().unwrap().file_type().is_symlink());
 
         // Essential runtime dirs.
-        assert!(staging.join("oci/root/tmp").is_dir());
-        assert!(staging.join("oci/root/run").is_dir());
-        assert!(staging.join("oci/root/var/tmp").is_dir());
-        assert!(staging.join("oci/root/var/run").is_dir());
+        assert!(staging.join("oci/apps/myapp/root/tmp").is_dir());
+        assert!(staging.join("oci/apps/myapp/root/run").is_dir());
+        assert!(staging.join("oci/apps/myapp/root/var/tmp").is_dir());
+        assert!(staging.join("oci/apps/myapp/root/var/run").is_dir());
 
         // devfd shim.
-        assert!(staging.join("oci/root/.sdme-devfd-shim.so").is_file());
+        assert!(staging
+            .join("oci/apps/myapp/root/.sdme-devfd-shim.so")
+            .is_file());
     }
 
     #[test]
@@ -2942,13 +3015,14 @@ pub(crate) mod tests {
             &datadir.join("fs"),
             "envapp",
             "base",
+            "envapp",
             &config,
             "test:latest",
             false,
         )
         .unwrap();
 
-        let env_path = staging.join("oci/env");
+        let env_path = staging.join("oci/apps/envapp/env");
         assert!(env_path.is_file());
         let env_content = fs::read_to_string(&env_path).unwrap();
         assert!(env_content.contains("FOO=bar"));
@@ -2979,13 +3053,14 @@ pub(crate) mod tests {
             &datadir.join("fs"),
             "portapp",
             "base",
+            "portapp",
             &config,
             "test:latest",
             false,
         )
         .unwrap();
 
-        let ports_path = staging.join("oci/ports");
+        let ports_path = staging.join("oci/apps/portapp/ports");
         assert!(ports_path.is_file());
         let ports_content = fs::read_to_string(&ports_path).unwrap();
         let lines: Vec<&str> = ports_content.lines().collect();
@@ -3016,13 +3091,14 @@ pub(crate) mod tests {
             &datadir.join("fs"),
             "volapp",
             "base",
+            "volapp",
             &config,
             "test:latest",
             false,
         )
         .unwrap();
 
-        let volumes_path = staging.join("oci/volumes");
+        let volumes_path = staging.join("oci/apps/volapp/volumes");
         assert!(volumes_path.is_file());
         let volumes_content = fs::read_to_string(&volumes_path).unwrap();
         let lines: Vec<&str> = volumes_content.lines().collect();
@@ -3050,13 +3126,14 @@ pub(crate) mod tests {
             &datadir.join("fs"),
             "wdapp",
             "base",
+            "wdapp",
             &config,
             "test:latest",
             false,
         )
         .unwrap();
 
-        let unit = staging.join("etc/systemd/system/sdme-oci-app.service");
+        let unit = staging.join("etc/systemd/system/sdme-oci-wdapp.service");
         let unit_content = fs::read_to_string(&unit).unwrap();
         assert!(
             unit_content.contains("WorkingDirectory=/app"),
@@ -3093,6 +3170,7 @@ pub(crate) mod tests {
             &datadir.join("fs"),
             "userapp",
             "base",
+            "userapp",
             &config,
             "nginx:latest",
             false,
@@ -3100,9 +3178,11 @@ pub(crate) mod tests {
         .unwrap();
 
         // drop_privs binary should exist.
-        assert!(staging.join("oci/root/.sdme-drop-privs").is_file());
+        assert!(staging
+            .join("oci/apps/userapp/root/.sdme-drop-privs")
+            .is_file());
 
-        let unit = staging.join("etc/systemd/system/sdme-oci-app.service");
+        let unit = staging.join("etc/systemd/system/sdme-oci-userapp.service");
         let unit_content = fs::read_to_string(&unit).unwrap();
         // ExecStart should use drop_privs with uid/gid.
         assert!(
@@ -3136,6 +3216,7 @@ pub(crate) mod tests {
             &datadir.join("fs"),
             "rootapp",
             "base",
+            "rootapp",
             &config,
             "test:latest",
             false,
@@ -3144,11 +3225,13 @@ pub(crate) mod tests {
 
         // No drop_privs binary.
         assert!(
-            !staging.join("oci/root/.sdme-drop-privs").exists(),
+            !staging
+                .join("oci/apps/rootapp/root/.sdme-drop-privs")
+                .exists(),
             "drop_privs should not exist for root user"
         );
 
-        let unit = staging.join("etc/systemd/system/sdme-oci-app.service");
+        let unit = staging.join("etc/systemd/system/sdme-oci-rootapp.service");
         let unit_content = fs::read_to_string(&unit).unwrap();
         assert!(
             unit_content.contains("User=root"),
@@ -3175,6 +3258,7 @@ pub(crate) mod tests {
             &datadir.join("fs"),
             "nobase",
             "nonexistent",
+            "nobase",
             &config,
             "test:latest",
             false,
@@ -3204,6 +3288,7 @@ pub(crate) mod tests {
             &datadir.join("fs"),
             "noentry",
             "base",
+            "noentry",
             &config,
             "test:latest",
             false,
@@ -3236,13 +3321,14 @@ pub(crate) mod tests {
             &datadir.join("fs"),
             "sigapp",
             "base",
+            "sigapp",
             &config,
             "test:latest",
             false,
         )
         .unwrap();
 
-        let unit = staging.join("etc/systemd/system/sdme-oci-app.service");
+        let unit = staging.join("etc/systemd/system/sdme-oci-sigapp.service");
         let unit_content = fs::read_to_string(&unit).unwrap();
         assert!(
             unit_content.contains("KillSignal=SIGTERM"),
@@ -3273,6 +3359,7 @@ pub(crate) mod tests {
             &datadir.join("fs"),
             "prtapp",
             "base",
+            "prtapp",
             &config,
             "test:latest",
             false,
@@ -3310,6 +3397,7 @@ pub(crate) mod tests {
             &datadir.join("fs"),
             "volrt",
             "base",
+            "volrt",
             &config,
             "test:latest",
             false,
@@ -3344,19 +3432,22 @@ pub(crate) mod tests {
             &datadir.join("fs"),
             "cmtapp",
             "base",
+            "cmtapp",
             &config,
             "my-image:v1",
             false,
         )
         .unwrap();
 
-        let unit = staging.join("etc/systemd/system/sdme-oci-app.service");
+        let unit = staging.join("etc/systemd/system/sdme-oci-cmtapp.service");
         let unit_content = fs::read_to_string(&unit).unwrap();
         // Unit should reference the image name.
         assert!(unit_content.contains("my-image:v1"));
-        // Port and volume comments.
-        assert!(unit_content.contains("8080/tcp"));
-        assert!(unit_content.contains("/data"));
+        // Ports and volumes should be written to separate files.
+        let ports = fs::read_to_string(staging.join("oci/apps/cmtapp/ports")).unwrap();
+        assert!(ports.contains("8080/tcp"));
+        let volumes = fs::read_to_string(staging.join("oci/apps/cmtapp/volumes")).unwrap();
+        assert!(volumes.contains("/data"));
     }
 
     #[test]

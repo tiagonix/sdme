@@ -894,6 +894,39 @@ fn read_oci_volumes_for_rootfs(
     Ok(volumes)
 }
 
+/// Resolve the OCI app name for a container.
+///
+/// Checks the state file for `OCI_APP` or `KUBE_CONTAINERS` keys first,
+/// then falls back to auto-detecting from the rootfs.
+fn resolve_oci_app_name(datadir: &std::path::Path, name: &str) -> Result<String> {
+    let state_path = datadir.join("state").join(name);
+    if let Ok(state) = sdme::State::read_from(&state_path) {
+        if let Some(app) = state.get("OCI_APP") {
+            if !app.is_empty() {
+                return Ok(app.to_string());
+            }
+        }
+        // For kube containers, use the first container name.
+        if let Some(containers) = state.get("KUBE_CONTAINERS") {
+            if let Some(first) = containers.split(',').next() {
+                if !first.is_empty() {
+                    return Ok(first.to_string());
+                }
+            }
+        }
+        // Fall back to auto-detection from rootfs.
+        if let Some(rootfs_name) = state.get("ROOTFS") {
+            if !rootfs_name.is_empty() {
+                let rootfs_path = datadir.join("fs").join(rootfs_name);
+                if let Some(app) = containers::detect_oci_app_name(&rootfs_path) {
+                    return Ok(app);
+                }
+            }
+        }
+    }
+    bail!("cannot determine OCI app name for container '{name}'; no OCI_APP in state file and no /oci/apps/ in rootfs")
+}
+
 /// Validate `--pod` constraints before creating a container.
 ///
 /// Checks that:
@@ -965,11 +998,23 @@ fn validate_oci_pod_args(
         None => bail!("--oci-pod requires an OCI app rootfs (use -r/--fs)"),
     };
     let rootfs_path = datadir.join("fs").join(rootfs_name);
-    let service_path = rootfs_path.join("etc/systemd/system/sdme-oci-app.service");
-    if !service_path.exists() {
+    // Check for any sdme-oci-*.service file.
+    let has_oci_service = rootfs_path
+        .join("etc/systemd/system")
+        .read_dir()
+        .ok()
+        .and_then(|entries| {
+            entries.filter_map(|e| e.ok()).find(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("sdme-oci-") && name.ends_with(".service")
+            })
+        })
+        .is_some();
+    if !has_oci_service {
         bail!(
             "--oci-pod requires an OCI app rootfs; \
-             '{rootfs_name}' does not contain sdme-oci-app.service"
+             '{rootfs_name}' does not contain an sdme-oci-*.service unit"
         );
     }
 
@@ -1129,6 +1174,12 @@ fn main() -> Result<()> {
             let oci_volumes =
                 read_oci_volumes_for_rootfs(&cfg.datadir, fs.as_deref(), no_oci_volumes)?;
 
+            // Detect OCI app name before moving fs into opts.
+            let oci_app_name = fs.as_deref().and_then(|rootfs_name| {
+                let rootfs_path = cfg.datadir.join("fs").join(rootfs_name);
+                containers::detect_oci_app_name(&rootfs_path)
+            });
+
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,
@@ -1144,6 +1195,15 @@ fn main() -> Result<()> {
                 oci_envs,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
+
+            // Store OCI_APP in state for exec --oci and logs --oci.
+            if let Some(ref app_name) = oci_app_name {
+                let state_path = cfg.datadir.join("state").join(&name);
+                let mut state = sdme::State::read_from(&state_path)?;
+                state.set("OCI_APP", app_name);
+                state.write_to(&state_path)?;
+            }
+
             eprintln!("creating '{name}'");
             if enable {
                 systemd::enable(&cfg.datadir, &name, cli.verbose)?;
@@ -1154,7 +1214,8 @@ fn main() -> Result<()> {
         Command::Exec { name, oci, command } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
             let status = if oci {
-                containers::exec_oci(&cfg.datadir, &name, &command, cli.verbose)?
+                let app_name = resolve_oci_app_name(&cfg.datadir, &name)?;
+                containers::exec_oci(&cfg.datadir, &name, &app_name, &command, cli.verbose)?
             } else {
                 containers::exec(
                     &cfg.datadir,
@@ -1262,10 +1323,11 @@ fn main() -> Result<()> {
         Command::Logs { name, oci, args } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
             if oci {
+                let app_name = resolve_oci_app_name(&cfg.datadir, &name)?;
                 let mut command = vec![
                     "/usr/bin/journalctl".to_string(),
                     "-u".to_string(),
-                    "sdme-oci-app.service".to_string(),
+                    format!("sdme-oci-{app_name}.service"),
                 ];
                 command.extend(args);
                 let status = containers::exec(
@@ -1347,6 +1409,12 @@ fn main() -> Result<()> {
             let oci_volumes =
                 read_oci_volumes_for_rootfs(&cfg.datadir, fs.as_deref(), no_oci_volumes)?;
 
+            // Detect OCI app name before moving fs into opts.
+            let oci_app_name = fs.as_deref().and_then(|rootfs_name| {
+                let rootfs_path = cfg.datadir.join("fs").join(rootfs_name);
+                containers::detect_oci_app_name(&rootfs_path)
+            });
+
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,
@@ -1363,6 +1431,15 @@ fn main() -> Result<()> {
             };
             let is_host_rootfs = opts.rootfs.is_none();
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
+
+            // Store OCI_APP in state for exec --oci and logs --oci.
+            if let Some(ref app_name) = oci_app_name {
+                let state_path = cfg.datadir.join("state").join(&name);
+                let mut state = sdme::State::read_from(&state_path)?;
+                state.set("OCI_APP", app_name);
+                state.write_to(&state_path)?;
+            }
+
             eprintln!("creating '{name}'");
 
             if enable {
@@ -1796,7 +1873,7 @@ mod tests {
     use sdme::network::NetworkConfig;
     use std::fs;
 
-    /// Create a temp rootfs dir with an oci/ports file.
+    /// Create a temp rootfs dir with an oci/apps/app/ports file.
     fn make_rootfs_with_ports(name: &str, ports_content: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "sdme-test-autowire-{}-{:?}-{name}",
@@ -1804,8 +1881,8 @@ mod tests {
             std::thread::current().id()
         ));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("oci")).unwrap();
-        fs::write(dir.join("oci/ports"), ports_content).unwrap();
+        fs::create_dir_all(dir.join("oci/apps/app")).unwrap();
+        fs::write(dir.join("oci/apps/app/ports"), ports_content).unwrap();
         dir
     }
 

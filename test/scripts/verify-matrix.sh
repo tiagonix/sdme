@@ -181,6 +181,15 @@ fs_exists() {
     sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$1"
 }
 
+# Derive OCI service name from image reference.
+# e.g. "docker.io/nginxinc/nginx-unprivileged" → "sdme-oci-nginx-unprivileged.service"
+oci_service_name() {
+    local image="${1%%:*}"                    # strip :tag
+    local last="${image##*/}"                 # last path component
+    local name="${last//_/-}"                 # underscores → hyphens
+    echo "sdme-oci-${name}.service"
+}
+
 # -- Phase 1: Import base OS rootfs --------------------------------------------
 
 phase1_import() {
@@ -401,8 +410,10 @@ phase3_apps() {
             sleep "$wait_secs"
 
             # Service active check
+            local svc_name
+            svc_name=$(oci_service_name "$image")
             if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" \
-                    /usr/bin/systemctl is-active sdme-oci-app.service 2>&1); then
+                    /usr/bin/systemctl is-active "$svc_name" 2>&1); then
                 record "app/$app-on-$distro/service" PASS
             else
                 record "app/$app-on-$distro/service" FAIL "$output"
@@ -417,7 +428,7 @@ phase3_apps() {
 
             # Status
             if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" \
-                    /usr/bin/systemctl status sdme-oci-app.service --no-pager 2>&1); then
+                    /usr/bin/systemctl status "$svc_name" --no-pager 2>&1); then
                 record "app/$app-on-$distro/status" PASS
             else
                 record "app/$app-on-$distro/status" FAIL "$output"
@@ -547,8 +558,10 @@ phase3c_hardened_apps() {
             sleep "$wait_secs"
 
             # Service active check
+            local svc_name
+            svc_name=$(oci_service_name "${APP_IMAGES[$app]}")
             if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" \
-                    /usr/bin/systemctl is-active sdme-oci-app.service 2>&1); then
+                    /usr/bin/systemctl is-active "$svc_name" 2>&1); then
                 record "hardened-app/$app-on-$distro/service" PASS
             else
                 record "hardened-app/$app-on-$distro/service" FAIL "$output"

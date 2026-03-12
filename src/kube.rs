@@ -12,7 +12,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::copy::make_removable;
 use crate::import::registry::{ImageReference, OciContainerConfig};
-use crate::import::{resolve_oci_user, shell_join};
+use crate::import::shell_join;
 use crate::{check_interrupted, validate_name, State};
 
 // --- YAML types ---
@@ -570,7 +570,8 @@ pub fn kube_delete(datadir: &Path, name: &str, force: bool, verbose: bool) -> Re
 
 /// Set up a single container app inside the combined rootfs.
 ///
-/// Creates the service unit, env file, deploys devfd shim and drop_privs binary.
+/// Builds the K8s command/args overrides, merges env vars, constructs volume
+/// bind paths, then delegates to `setup_oci_app()` for the common logic.
 fn setup_kube_container(
     staging_dir: &Path,
     app_dir: &Path,
@@ -612,67 +613,11 @@ fn setup_kube_container(
     let working_dir = config.working_dir.as_deref().unwrap_or("/");
     let user = config.user.as_deref().unwrap_or("root");
 
-    // Ensure essential runtime directories.
-    for (dir, mode) in [
-        ("tmp", 0o1777),
-        ("run", 0o755),
-        ("var/run", 0o755),
-        ("var/tmp", 0o1777),
-    ] {
-        use std::os::unix::fs::DirBuilderExt;
-        let path = app_root.join(dir);
-        if !path.exists() {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
-            fs::DirBuilder::new()
-                .mode(mode)
-                .create(&path)
-                .with_context(|| format!("failed to create {}", path.display()))?;
-        }
-    }
-
-    // Deploy devfd shim.
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => crate::drop_privs::Arch::X86_64,
-        "aarch64" => crate::drop_privs::Arch::Aarch64,
-        other => bail!("unsupported architecture: {other}"),
-    };
-    let shim_bytes = crate::devfd_shim::generate(arch);
-    let shim_path = app_root.join(".sdme-devfd-shim.so");
-    fs::write(&shim_path, &shim_bytes)
-        .with_context(|| format!("failed to write {}", shim_path.display()))?;
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o444))
-        .with_context(|| format!("failed to set permissions on {}", shim_path.display()))?;
-
-    // Deploy drop_privs if non-root user.
-    let resolved_user = resolve_oci_user(&app_root, user)?;
-    if let Some(ref ru) = resolved_user {
-        let elf_bytes = crate::drop_privs::generate(arch);
-        let drop_privs_path = app_root.join(".sdme-drop-privs");
-        fs::write(&drop_privs_path, &elf_bytes)
-            .with_context(|| format!("failed to write {}", drop_privs_path.display()))?;
-        fs::set_permissions(&drop_privs_path, fs::Permissions::from_mode(0o111)).with_context(
-            || format!("failed to set permissions on {}", drop_privs_path.display()),
-        )?;
-        if verbose {
-            eprintln!(
-                "wrote drop_privs binary for uid={} gid={}: {}",
-                ru.uid,
-                ru.gid,
-                drop_privs_path.display()
-            );
-        }
-    }
-
-    // Write env file: combine OCI image env + K8s env overrides.
+    // Merge env: OCI image env + K8s env overrides (by key).
     let mut env_lines: Vec<String> = Vec::new();
     if let Some(ref image_env) = config.env {
         env_lines.extend(image_env.iter().cloned());
     }
-    // K8s env vars override image env vars (by key).
     let mut seen_keys: HashMap<String, usize> = HashMap::new();
     for (i, line) in env_lines.iter().enumerate() {
         if let Some(key) = line.split('=').next() {
@@ -685,32 +630,6 @@ fn setup_kube_container(
             env_lines[idx] = line;
         } else {
             env_lines.push(line);
-        }
-    }
-    if !env_lines.is_empty() {
-        let env_path = app_dir.join("env");
-        let content = env_lines.join("\n") + "\n";
-        fs::write(&env_path, &content)
-            .with_context(|| format!("failed to write {}", env_path.display()))?;
-    }
-
-    // Write ports file.
-    if let Some(ref ports) = config.exposed_ports {
-        if !ports.is_empty() {
-            let mut keys: Vec<&str> = ports.keys().map(|s| s.as_str()).collect();
-            keys.sort();
-            let content = keys.join("\n") + "\n";
-            fs::write(app_dir.join("ports"), &content).context("failed to write ports file")?;
-        }
-    }
-
-    // Write volumes file.
-    if let Some(ref vols) = config.volumes {
-        if !vols.is_empty() {
-            let mut keys: Vec<&str> = vols.keys().map(|s| s.as_str()).collect();
-            keys.sort();
-            let content = keys.join("\n") + "\n";
-            fs::write(app_dir.join("volumes"), &content).context("failed to write volumes file")?;
         }
     }
 
@@ -729,77 +648,22 @@ fn setup_kube_container(
             bind_paths.push(format!("BindPaths={vol_src} {vol_dst}"));
         }
     }
-    let bind_paths_section = if bind_paths.is_empty() {
-        String::new()
-    } else {
-        bind_paths.join("\n") + "\n"
-    };
 
-    // Build the [Service] section.
-    let service_section = if let Some(ref ru) = resolved_user {
-        let drop_privs_exec = format!(
-            "/.sdme-drop-privs {} {} {} {}",
-            ru.uid, ru.gid, working_dir, exec_start
-        );
-        format!(
-            "\
-RootDirectory=/oci/apps/{name}/root
-MountAPIVFS=yes
-Environment=LD_PRELOAD=/.sdme-devfd-shim.so
-EnvironmentFile=-/oci/apps/{name}/env
-ExecStart={drop_privs_exec}
-{bind_paths_section}",
-            name = kc.name
-        )
-    } else {
-        format!(
-            "\
-RootDirectory=/oci/apps/{name}/root
-MountAPIVFS=yes
-Environment=LD_PRELOAD=/.sdme-devfd-shim.so
-ExecStart={exec_start}
-WorkingDirectory={working_dir}
-EnvironmentFile=-/oci/apps/{name}/env
-User={user}
-{bind_paths_section}",
-            name = kc.name
-        )
-    };
-
-    let service_name = format!("sdme-oci-{}.service", kc.name);
-    let unit_content = format!(
-        r#"# Generated by sdme kube from image: {image}
-[Unit]
-Description=sdme kube container: {name} ({image})
-After=network.target
-
-[Service]
-Type=exec
-{service_section}Restart={restart_policy}
-
-[Install]
-WantedBy=multi-user.target
-"#,
-        image = kc.image,
-        name = kc.name,
-    );
-
-    let unit_dir = staging_dir.join("etc/systemd/system");
-    let unit_path = unit_dir.join(&service_name);
-    fs::write(&unit_path, &unit_content)
-        .with_context(|| format!("failed to write {}", unit_path.display()))?;
-
-    // Enable via symlink.
-    let wants_dir = unit_dir.join("multi-user.target.wants");
-    let symlink_path = wants_dir.join(&service_name);
-    std::os::unix::fs::symlink(format!("../{service_name}"), &symlink_path)
-        .with_context(|| format!("failed to create symlink {}", symlink_path.display()))?;
-
-    if verbose {
-        eprintln!("wrote unit file: {}", unit_path.display());
-    }
-
-    Ok(())
+    crate::import::setup_oci_app(&crate::import::OciAppSetup {
+        name: &kc.name,
+        staging_dir,
+        app_dir,
+        app_root: &app_root,
+        exec_start: &exec_start,
+        working_dir,
+        user,
+        env_lines,
+        config,
+        image_ref: &kc.image,
+        restart_policy: Some(restart_policy),
+        bind_paths,
+        verbose,
+    })
 }
 
 #[cfg(test)]

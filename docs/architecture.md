@@ -432,7 +432,7 @@ image** or an **application image** based on the image config:
 | Classification    | Criteria                                          | Result                                      |
 |-------------------|---------------------------------------------------|---------------------------------------------|
 | Base OS image     | No entrypoint, shell default command, no ports    | Extracted as a first-class sdme rootfs       |
-| Application image | Has entrypoint, non-shell command, or exposed ports | Placed under `/oci/root` inside a base rootfs |
+| Application image | Has entrypoint, non-shell command, or exposed ports | Placed under `/oci/apps/{name}/root` inside a base rootfs |
 
 Application images require a base rootfs specified with `--base-fs`:
 
@@ -461,7 +461,12 @@ sdme rootfs.
 
 **Application import** produces what sdme calls a *capsule*: a copy of
 a base OS rootfs with the OCI application rootfs placed under
-`/oci/root` and a generated systemd service unit that chroots into it.
+`/oci/apps/{name}/root` and a generated systemd service unit
+(`sdme-oci-{name}.service`) that chroots into it. The app name is
+derived from the last path component of the registry repository
+(underscores replaced with hyphens) for registry images, or the rootfs
+name for non-registry imports. Stored as `OCI_APP={name}` in the
+container state file at create time.
 
 ```
   +------------------------------------------------------+
@@ -475,8 +480,8 @@ a base OS rootfs with the OCI application rootfs placed under
   |      |  systemd . D-Bus . journald             |     |
   |      |                                         |     |
   |      |  +-----------------------------------+  |     |
-  |      |  |  sdme-oci-app.service             |  |     |
-  |      |  |  RootDirectory=/oci/root          |  |     |
+  |      |  |  sdme-oci-{name}.service           |  |     |
+  |      |  |  RootDirectory=/oci/apps/{name}/root |  |  |
   |      |  |                                   |  |     |
   |      |  |  +-----------------------------+  |  |     |
   |      |  |  |     OCI process             |  |  |     |
@@ -484,22 +489,23 @@ a base OS rootfs with the OCI application rootfs placed under
   |      |  |  +-----------------------------+  |  |     |
   |      |  +-----------------------------------+  |     |
   |      |                                         |     |
-  |      |  /oci/env     -- environment vars       |     |
-  |      |  /oci/ports   -- exposed ports          |     |
-  |      |  /oci/volumes -- declared volumes       |     |
+  |      |  /oci/apps/{name}/env     -- env vars    |     |
+  |      |  /oci/apps/{name}/ports   -- ports      |     |
+  |      |  /oci/apps/{name}/volumes -- volumes    |     |
   |      +-----------------------------------------+     |
   +------------------------------------------------------+
 ```
 
-The generated `sdme-oci-app.service` unit uses
-`RootDirectory=/oci/root` to chroot the process, `MountAPIVFS=yes` to
-provide `/proc`, `/sys`, `/dev`, and `EnvironmentFile=-/oci/env` to
+The generated `sdme-oci-{name}.service` unit uses
+`RootDirectory=/oci/apps/{name}/root` to chroot the process,
+`MountAPIVFS=yes` to provide `/proc`, `/sys`, `/dev`, and
+`EnvironmentFile=-/oci/apps/{name}/env` to
 load the image's environment variables. The unit is enabled via symlink
 in `multi-user.target.wants/` so it starts automatically when the
 container boots.
 
 The capsule model means OCI applications get the full systemd
-operational model for free: `journalctl -u sdme-oci-app` for logs,
+operational model for free: `journalctl -u sdme-oci-{name}` for logs,
 `systemctl restart` for restarts, cgroup resource limits from the host.
 The application doesn't know or care that it's inside an nspawn
 container; it sees a chroot with API filesystems, exactly what it
@@ -561,21 +567,21 @@ containers (both root and non-root users). Full details in
 ### OCI plumbing: ports and volumes
 
 OCI images declare exposed ports and volumes in their image config.
-sdme reads these from `/oci/ports` and `/oci/volumes` in the rootfs
+sdme reads these from `/oci/apps/{name}/ports` and `/oci/apps/{name}/volumes` in the rootfs
 and auto-wires them at container creation time.
 
 **Port forwarding.** When the container uses a private network namespace
 (`--private-network`, `--hardened`, or `--strict`), sdme reads
-`/oci/ports` and adds `--port` rules mapping each declared port to the
+`/oci/apps/{name}/ports` and adds `--port` rules mapping each declared port to the
 same host port. User `--port` flags take priority; matching ports are
 skipped. On host-network containers, no forwarding is needed (services
 bind directly to the host), so sdme prints an informational message
 instead. Suppressed with `--no-oci-ports`.
 
-**Volume mounts.** For each volume declared in `/oci/volumes`, sdme
+**Volume mounts.** For each volume declared in `/oci/apps/{name}/volumes`, sdme
 creates a host-side directory at
 `{datadir}/volumes/{container}/{volume-name}` and adds a bind mount
-mapping it to `/oci/root{volume-path}` inside the container. Volume
+mapping it to `/oci/apps/{name}/root{volume-path}` inside the container. Volume
 data survives container removal (sdme prints the path but does not
 delete it). User `--bind` flags take priority: if the user binds to the
 same container path, the auto-mount is skipped. Suppressed with
@@ -583,28 +589,28 @@ same container path, the auto-mount is skipped. Suppressed with
 
 **Remaining caveat.** User-specified bind mounts (`-b`) and environment
 variables (`-e`) on the container operate at the nspawn level, not
-inside the `RootDirectory=/oci/root` chroot where the OCI application
+inside the `RootDirectory=/oci/apps/{name}/root` chroot where the OCI application
 runs. OCI-declared volumes and ports are handled correctly because sdme
-maps volumes into the `/oci/root` subtree and ports operate at the
+maps volumes into the `/oci/apps/{name}/root` subtree and ports operate at the
 network namespace level.
 
 ### Environment variables
 
-OCI image environment variables are stored in `/oci/env` inside the
-rootfs (loaded via `EnvironmentFile=-/oci/env` in the generated unit).
+OCI image environment variables are stored in `/oci/apps/{name}/env` inside the
+rootfs (loaded via `EnvironmentFile=-/oci/apps/{name}/env` in the generated unit).
 Runtime-only variables (e.g. `MYSQL_ROOT_PASSWORD`) must be added
 manually before first boot:
 
 ```bash
-echo 'MYSQL_ROOT_PASSWORD=secret' | sudo tee -a /var/lib/sdme/fs/mysql/oci/env
+echo 'MYSQL_ROOT_PASSWORD=secret' | sudo tee -a /var/lib/sdme/fs/mysql/oci/apps/mysql/env
 ```
 
 ### Limitations
 
 - **One OCI service per container.** Each rootfs generates a single
-  `sdme-oci-app.service`.
+  `sdme-oci-{name}.service`.
 - **Environment variables need manual setup.** Runtime-only variables
-  must be added to `/oci/env` before first boot.
+  must be added to `/oci/apps/{name}/env` before first boot.
 - **No health checks.** OCI HEALTHCHECK directives are ignored.
 - **No restart policy mapping.** OCI restart policies don't map to
   systemd; the generated unit uses systemd defaults.
@@ -742,12 +748,12 @@ container still references the pod via `POD` or `OCI_POD` keys
 
 **`--oci-pod=<name>`** on `sdme create` or `sdme new`:
 
-- Requires an OCI app rootfs (`sdme-oci-app.service` must exist in the
+- Requires an OCI app rootfs (an `sdme-oci-{name}.service` unit must exist in the
   rootfs).
 - Stores `OCI_POD=<name>` in the container's state file.
 - At create time, writes a systemd drop-in inside the overlayfs upper
   layer at
-  `upper/etc/systemd/system/sdme-oci-app.service.d/oci-pod-netns.conf`
+  `upper/etc/systemd/system/sdme-oci-{name}.service.d/oci-pod-netns.conf`
   with `NetworkNamespacePath=/run/sdme/oci-pod-netns`.
 - At start time, the nspawn drop-in includes
   `--bind-ro=/run/sdme/pods/<name>/netns:/run/sdme/oci-pod-netns`,

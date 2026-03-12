@@ -289,9 +289,13 @@ fn do_create(
     // supplied one targeting the same container path.
     let mut binds = opts.binds.clone();
     if !opts.oci_volumes.is_empty() {
+        let oci_app = detect_oci_app_name(rootfs);
         let vol_base = volumes_dir(datadir, name);
         for vol_path in &opts.oci_volumes {
-            let container_path = format!("/oci/root{vol_path}");
+            let container_path = match oci_app {
+                Some(ref app_name) => format!("/oci/apps/{app_name}/root{vol_path}"),
+                None => format!("/oci/root{vol_path}"),
+            };
             // Skip if user already binds to this container path.
             // Bind format is "host:container:mode".
             let already_bound = binds
@@ -328,10 +332,13 @@ fn do_create(
         state.set("OCI_POD", pod.as_str());
 
         // Write a systemd drop-in inside the overlayfs upper layer so the
-        // sdme-oci-app.service runs in the pod's network namespace.
+        // OCI app service runs in the pod's network namespace.
         // At start time, the pod's netns is bind-mounted into the container
         // at /run/sdme/oci-pod-netns via --bind-ro=.
-        let dropin_dir = container_dir.join("upper/etc/systemd/system/sdme-oci-app.service.d");
+        let oci_app_name = detect_oci_app_name(rootfs).unwrap_or_else(|| "app".to_string());
+        let dropin_dir = container_dir.join(format!(
+            "upper/etc/systemd/system/sdme-oci-{oci_app_name}.service.d"
+        ));
         fs::create_dir_all(&dropin_dir)
             .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
         let dropin_path = dropin_dir.join("oci-pod-netns.conf");
@@ -350,13 +357,20 @@ fn do_create(
     }
 
     // Write OCI env vars to the overlayfs upper layer. This copies the
-    // lower layer's /oci/env (if it exists) and appends the user-supplied
+    // lower layer's env file (if it exists) and appends the user-supplied
     // vars, so each container gets its own env file independent of the
     // shared rootfs.
     if !opts.oci_envs.is_empty() {
-        let lower_env = rootfs.join("oci/env");
+        let oci_app_for_env = detect_oci_app_name(rootfs);
+        let lower_env = match oci_app_for_env {
+            Some(ref app_name) => rootfs.join(format!("oci/apps/{app_name}/env")),
+            None => rootfs.join("oci/env"),
+        };
         if lower_env.exists() {
-            let upper_oci = container_dir.join("upper/oci");
+            let upper_oci = match oci_app_for_env {
+                Some(ref app_name) => container_dir.join(format!("upper/oci/apps/{app_name}")),
+                None => container_dir.join("upper/oci"),
+            };
             fs::create_dir_all(&upper_oci)
                 .with_context(|| format!("failed to create {}", upper_oci.display()))?;
             let upper_env = upper_oci.join("env");
@@ -376,7 +390,7 @@ fn do_create(
                 );
             }
         } else {
-            bail!("--oci-env requires an OCI app rootfs (no /oci/env found in rootfs)");
+            bail!("--oci-env requires an OCI app rootfs (no env file found in rootfs)");
         }
     }
 
@@ -475,13 +489,35 @@ pub fn resolve_rootfs(datadir: &Path, rootfs: Option<&str>) -> Result<PathBuf> {
     }
 }
 
-/// Read `/oci/ports` from a rootfs and return port forwarding rules.
+/// Detect the OCI app name from a rootfs by scanning `/oci/apps/`.
 ///
-/// Each line in the file is `PORT/PROTO` (e.g. `80/tcp`). Returns
-/// `"PROTO:PORT:PORT"` entries suitable for systemd-nspawn `--port=`.
-/// Returns an empty vec if the file doesn't exist or is empty.
+/// Returns `None` if no `/oci/apps/` directory exists or it's empty.
+/// For single-app rootfs, returns the one app name. For kube rootfs
+/// with multiple apps, returns the first entry found.
+pub fn detect_oci_app_name(rootfs: &Path) -> Option<String> {
+    let apps_dir = rootfs.join("oci/apps");
+    let entries = fs::read_dir(&apps_dir).ok()?;
+    for entry in entries {
+        let entry = entry.ok()?;
+        if entry.file_type().ok()?.is_dir() {
+            return Some(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// Read OCI ports from a rootfs and return port forwarding rules.
+///
+/// Scans `/oci/apps/{name}/ports` for the OCI app. Each line in the
+/// file is `PORT/PROTO` (e.g. `80/tcp`). Returns `"PROTO:PORT:PORT"`
+/// entries suitable for systemd-nspawn `--port=`.
+/// Returns an empty vec if no OCI app or ports file exists.
 pub fn read_oci_ports(rootfs: &Path) -> Vec<String> {
-    let ports_path = rootfs.join("oci/ports");
+    let app_name = match detect_oci_app_name(rootfs) {
+        Some(name) => name,
+        None => return Vec::new(),
+    };
+    let ports_path = rootfs.join(format!("oci/apps/{app_name}/ports"));
     let content = match fs::read_to_string(&ports_path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -513,12 +549,17 @@ pub fn read_oci_ports(rootfs: &Path) -> Vec<String> {
     result
 }
 
-/// Read `/oci/volumes` from a rootfs and return volume paths.
+/// Read OCI volumes from a rootfs and return volume paths.
 ///
-/// Each line in the file is an absolute path (e.g. `/var/lib/mysql`).
-/// Returns an empty vec if the file doesn't exist or is empty.
+/// Scans `/oci/apps/{name}/volumes` for the OCI app. Each line in the
+/// file is an absolute path (e.g. `/var/lib/mysql`).
+/// Returns an empty vec if no OCI app or volumes file exists.
 pub fn read_oci_volumes(rootfs: &Path) -> Vec<String> {
-    let volumes_path = rootfs.join("oci/volumes");
+    let app_name = match detect_oci_app_name(rootfs) {
+        Some(name) => name,
+        None => return Vec::new(),
+    };
+    let volumes_path = rootfs.join(format!("oci/apps/{app_name}/volumes"));
     let content = match fs::read_to_string(&volumes_path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -920,26 +961,22 @@ pub fn exec(
     machinectl_shell(datadir, name, command, join_as_sudo_user, verbose)
 }
 
-/// Run a command inside a container's OCI app root (/oci/root) using
-/// `systemd-run --machine=` with `RootDirectory=/oci/root`. This avoids
-/// requiring `chroot` to be installed inside the container.
+/// Run a command inside a container's OCI app root using
+/// `systemd-run --machine=` with `RootDirectory=/oci/apps/{name}/root`.
+/// The app name is read from `OCI_APP` in the state file, or auto-detected
+/// from the rootfs.
 pub fn exec_oci(
     datadir: &Path,
     name: &str,
+    app_name: &str,
     command: &[String],
     verbose: bool,
 ) -> Result<ExitStatus> {
     ensure_running(datadir, name)?;
 
+    let root_dir = format!("--property=RootDirectory=/oci/apps/{app_name}/root");
     let mut cmd = std::process::Command::new("systemd-run");
-    cmd.args([
-        "--machine",
-        name,
-        "--pipe",
-        "--quiet",
-        "--property=RootDirectory=/oci/root",
-        "--",
-    ]);
+    cmd.args(["--machine", name, "--pipe", "--quiet", &root_dir, "--"]);
     cmd.args(command);
 
     if verbose {
@@ -1599,8 +1636,8 @@ mod tests {
     fn test_read_oci_ports_empty_file() {
         let tmp = tmp();
         let rootfs = tmp.path().join("fs/myroot");
-        fs::create_dir_all(rootfs.join("oci")).unwrap();
-        fs::write(rootfs.join("oci/ports"), "").unwrap();
+        fs::create_dir_all(rootfs.join("oci/apps/app")).unwrap();
+        fs::write(rootfs.join("oci/apps/app/ports"), "").unwrap();
         assert!(read_oci_ports(&rootfs).is_empty());
     }
 
@@ -1608,8 +1645,8 @@ mod tests {
     fn test_read_oci_ports_valid() {
         let tmp = tmp();
         let rootfs = tmp.path().join("fs/myroot");
-        fs::create_dir_all(rootfs.join("oci")).unwrap();
-        fs::write(rootfs.join("oci/ports"), "80/tcp\n3306/tcp\n").unwrap();
+        fs::create_dir_all(rootfs.join("oci/apps/app")).unwrap();
+        fs::write(rootfs.join("oci/apps/app/ports"), "80/tcp\n3306/tcp\n").unwrap();
         let ports = read_oci_ports(&rootfs);
         assert_eq!(ports, vec!["tcp:80:80", "tcp:3306:3306"]);
     }
@@ -1618,9 +1655,9 @@ mod tests {
     fn test_read_oci_ports_skips_invalid() {
         let tmp = tmp();
         let rootfs = tmp.path().join("fs/myroot");
-        fs::create_dir_all(rootfs.join("oci")).unwrap();
+        fs::create_dir_all(rootfs.join("oci/apps/app")).unwrap();
         fs::write(
-            rootfs.join("oci/ports"),
+            rootfs.join("oci/apps/app/ports"),
             "80/tcp\nbadline\n0/tcp\n443/tcp\n",
         )
         .unwrap();
@@ -1632,8 +1669,8 @@ mod tests {
     fn test_read_oci_ports_udp() {
         let tmp = tmp();
         let rootfs = tmp.path().join("fs/myroot");
-        fs::create_dir_all(rootfs.join("oci")).unwrap();
-        fs::write(rootfs.join("oci/ports"), "53/udp\n").unwrap();
+        fs::create_dir_all(rootfs.join("oci/apps/app")).unwrap();
+        fs::write(rootfs.join("oci/apps/app/ports"), "53/udp\n").unwrap();
         let ports = read_oci_ports(&rootfs);
         assert_eq!(ports, vec!["udp:53:53"]);
     }
@@ -1651,8 +1688,8 @@ mod tests {
     fn test_read_oci_volumes_empty_file() {
         let tmp = tmp();
         let rootfs = tmp.path().join("fs/myroot");
-        fs::create_dir_all(rootfs.join("oci")).unwrap();
-        fs::write(rootfs.join("oci/volumes"), "").unwrap();
+        fs::create_dir_all(rootfs.join("oci/apps/app")).unwrap();
+        fs::write(rootfs.join("oci/apps/app/volumes"), "").unwrap();
         assert!(read_oci_volumes(&rootfs).is_empty());
     }
 
@@ -1660,8 +1697,12 @@ mod tests {
     fn test_read_oci_volumes_valid() {
         let tmp = tmp();
         let rootfs = tmp.path().join("fs/myroot");
-        fs::create_dir_all(rootfs.join("oci")).unwrap();
-        fs::write(rootfs.join("oci/volumes"), "/var/lib/mysql\n/data\n").unwrap();
+        fs::create_dir_all(rootfs.join("oci/apps/app")).unwrap();
+        fs::write(
+            rootfs.join("oci/apps/app/volumes"),
+            "/var/lib/mysql\n/data\n",
+        )
+        .unwrap();
         let vols = read_oci_volumes(&rootfs);
         assert_eq!(vols, vec!["/var/lib/mysql", "/data"]);
     }
@@ -1670,9 +1711,9 @@ mod tests {
     fn test_read_oci_volumes_skips_invalid() {
         let tmp = tmp();
         let rootfs = tmp.path().join("fs/myroot");
-        fs::create_dir_all(rootfs.join("oci")).unwrap();
+        fs::create_dir_all(rootfs.join("oci/apps/app")).unwrap();
         fs::write(
-            rootfs.join("oci/volumes"),
+            rootfs.join("oci/apps/app/volumes"),
             "/var/lib/mysql\nrelative/path\n/ok/../bad\n/good\n",
         )
         .unwrap();
@@ -1704,10 +1745,14 @@ mod tests {
     fn test_create_with_oci_volumes() {
         let _lock = UMASK_LOCK.lock().unwrap();
         let tmp = tmp();
-        // Create a rootfs with oci/volumes
+        // Create a rootfs with oci/apps/app/volumes
         let rootfs_dir = tmp.path().join("fs/myoci");
-        fs::create_dir_all(rootfs_dir.join("oci")).unwrap();
-        fs::write(rootfs_dir.join("oci/volumes"), "/var/lib/mysql\n/data\n").unwrap();
+        fs::create_dir_all(rootfs_dir.join("oci/apps/app")).unwrap();
+        fs::write(
+            rootfs_dir.join("oci/apps/app/volumes"),
+            "/var/lib/mysql\n/data\n",
+        )
+        .unwrap();
 
         let opts = CreateOptions {
             name: Some("voltest".to_string()),
@@ -1724,8 +1769,8 @@ mod tests {
 
         // Check bind entries were added
         let binds_str = state.get("BINDS").expect("BINDS should be set");
-        assert!(binds_str.contains("/oci/root/var/lib/mysql:rw"));
-        assert!(binds_str.contains("/oci/root/data:rw"));
+        assert!(binds_str.contains("/oci/apps/app/root/var/lib/mysql:rw"));
+        assert!(binds_str.contains("/oci/apps/app/root/data:rw"));
 
         // Check volume directories were created
         let vol_base = tmp.path().join("volumes/voltest");
@@ -1737,10 +1782,10 @@ mod tests {
     fn test_create_oci_env_merge() {
         let _lock = UMASK_LOCK.lock().unwrap();
         let tmp = tmp();
-        // Create a rootfs with oci/env containing an existing var.
+        // Create a rootfs with oci/apps/app/env containing an existing var.
         let rootfs_dir = tmp.path().join("fs/envoci");
-        fs::create_dir_all(rootfs_dir.join("oci")).unwrap();
-        fs::write(rootfs_dir.join("oci/env"), "EXISTING=value\n").unwrap();
+        fs::create_dir_all(rootfs_dir.join("oci/apps/app")).unwrap();
+        fs::write(rootfs_dir.join("oci/apps/app/env"), "EXISTING=value\n").unwrap();
 
         let opts = CreateOptions {
             name: Some("envtest".to_string()),
@@ -1751,8 +1796,8 @@ mod tests {
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "envtest");
 
-        // Verify upper/oci/env has both original and new vars.
-        let upper_env = tmp.path().join("containers/envtest/upper/oci/env");
+        // Verify upper/oci/apps/app/env has both original and new vars.
+        let upper_env = tmp.path().join("containers/envtest/upper/oci/apps/app/env");
         let content = fs::read_to_string(&upper_env).unwrap();
         assert!(content.contains("EXISTING=value"));
         assert!(content.contains("NEW_VAR=hello"));

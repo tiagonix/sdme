@@ -226,7 +226,7 @@ phase2_test_oci() {
         # -- Patch volumes file --
         # nginx-unprivileged declares 8080/tcp but no volumes.
         # Append the nginx document root so the volume pipeline is exercised.
-        local volumes_file="$DATADIR/fs/$app_fs/oci/volumes"
+        local volumes_file="$DATADIR/fs/$app_fs/oci/apps/nginx-unprivileged/volumes"
         echo "$VOLUME_PATH" >> "$volumes_file"
         log "  Appended $VOLUME_PATH to $volumes_file"
 
@@ -318,9 +318,9 @@ HTMLEOF
         # Wait for networkd DHCP + nginx readiness
         sleep 5
 
-        # -- Check sdme-oci-app.service --
+        # -- Check sdme-oci-nginx-unprivileged.service --
         if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" \
-                /usr/bin/systemctl is-active sdme-oci-app.service 2>&1); then
+                /usr/bin/systemctl is-active sdme-oci-nginx-unprivileged.service 2>&1); then
             record "$distro/service" PASS
         else
             record "$distro/service" FAIL "$output"

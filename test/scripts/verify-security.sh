@@ -732,10 +732,10 @@ else
                 sleep 3
 
                 if output=$(timeout "$TIMEOUT_TEST" "$SDME" exec "$ct_name" \
-                        /usr/bin/systemctl is-active sdme-oci-app.service 2>&1); then
-                    ok "nginx userns OCI: sdme-oci-app.service active"
+                        /usr/bin/systemctl is-active sdme-oci-nginx.service 2>&1); then
+                    ok "nginx userns OCI: sdme-oci-nginx.service active"
                 else
-                    fail "nginx userns OCI: sdme-oci-app.service not active: $output"
+                    fail "nginx userns OCI: sdme-oci-nginx.service not active: $output"
                 fi
             fi
 
