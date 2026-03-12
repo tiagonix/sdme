@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# verify-wordpress-pod.sh - end-to-end verification of WordPress + MySQL + Nginx
+# verify-gitea-pod.sh - end-to-end verification of Gitea + MySQL + Nginx
 # Run as root. Requires a base-fs imported (e.g. ubuntu).
 #
-# Deploys a WordPress + MySQL + Nginx stack as a single kube pod and verifies:
+# Deploys a Gitea + MySQL + Nginx stack as a single kube pod and verifies:
 #   - MySQL accepts connections
-#   - WordPress installs and serves pages
-#   - Nginx reverse-proxies to WordPress
-#   - XML-RPC post creation and REST API read-back through Nginx
+#   - Gitea starts and serves its API
+#   - Nginx reverse-proxies to Gitea
+#   - REST API token creation, repo creation, and read-back through Nginx
 
 SDME="${SDME:-sdme}"
 BASE_FS="${BASE_FS:-ubuntu}"
@@ -16,15 +16,16 @@ DATADIR="/var/lib/sdme"
 KEEP=0
 REPORT_DIR="."
 
-POD_NAME="wp-pod"
-YAML_FILE="test/kube/wordpress-stack.yaml"
+POD_NAME="gitea-pod"
+YAML_FILE="test/kube/gitea-stack.yaml"
 
 # Timeouts (seconds)
 TIMEOUT_CREATE=600
 TIMEOUT_BOOT=120
 TIMEOUT_MYSQL=90
-TIMEOUT_WORDPRESS=60
+TIMEOUT_GITEA=90
 TIMEOUT_NGINX=30
+TIMEOUT_ADMIN=60
 
 # Result tracking
 declare -A RESULTS
@@ -40,7 +41,7 @@ usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-End-to-end verification of WordPress + MySQL + Nginx kube pod.
+End-to-end verification of Gitea + MySQL + Nginx kube pod.
 Must be run as root.
 
 Options:
@@ -147,10 +148,10 @@ test_setup_nginx_config() {
 
     cat > "$conf_dir/default.conf" <<'NGINXEOF'
 server {
-    listen 8080;
+    listen 8888;
     server_name _;
     location / {
-        proxy_pass http://127.0.0.1:80;
+        proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -180,23 +181,20 @@ test_setup_validate_script() {
 
     cat > "$script_dir/validate.py" <<'PYEOF'
 #!/usr/bin/env python3
-"""WordPress validation: install, create post via XML-RPC, read via REST API."""
+"""Gitea validation: create API token, create repo, read repo through Nginx."""
 
 import http.client
 import json
 import sys
-import urllib.parse
-import xml.etree.ElementTree as ET
+import base64
 
 TEST_MARKER = sys.argv[1] if len(sys.argv) > 1 else "sdme-test"
 
-WP_HOST = "127.0.0.1"
-WP_PORT = 80
-NGINX_PORT = 8080
-WP_USER = "admin"
-WP_PASS = "adminpass123!"
-WP_EMAIL = "admin@test.local"
-WP_TITLE = "sdme test site"
+GITEA_HOST = "127.0.0.1"
+GITEA_PORT = 3000
+NGINX_PORT = 8888
+ADMIN_USER = "admin"
+ADMIN_PASS = "adminpass123!"
 
 
 def result(name, passed, msg=""):
@@ -205,140 +203,97 @@ def result(name, passed, msg=""):
     return passed
 
 
-def wp_install():
-    """Install WordPress via the web installer."""
-    conn = http.client.HTTPConnection(WP_HOST, WP_PORT, timeout=30)
-    params = urllib.parse.urlencode({
-        "weblog_title": WP_TITLE,
-        "user_name": WP_USER,
-        "admin_password": WP_PASS,
-        "admin_password2": WP_PASS,
-        "admin_email": WP_EMAIL,
-        "blog_public": "0",
-        "Submit": "Install WordPress",
-    })
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    conn.request("POST", "/wp-admin/install.php?step=2", body=params, headers=headers)
+def api_request(host, port, method, path, body=None, headers=None):
+    """Make an HTTP request and return (status, parsed_json_or_None, raw_body)."""
+    conn = http.client.HTTPConnection(host, port, timeout=30)
+    hdrs = headers or {}
+    if body is not None and "Content-Type" not in hdrs:
+        hdrs["Content-Type"] = "application/json"
+    conn.request(method, path, body=body, headers=hdrs)
     resp = conn.getresponse()
-    body = resp.read().decode("utf-8", errors="replace")
+    raw = resp.read().decode("utf-8", errors="replace")
     conn.close()
-
-    ok = resp.status == 200 and ("Success" in body or "Already" in body or "already installed" in body.lower())
-    return result("validate/wp-install", ok, f"status={resp.status}")
-
-
-def xmlrpc_create_post(marker):
-    """Create a post via XML-RPC through Nginx."""
-    import base64
-    auth = base64.b64encode(f"{WP_USER}:{WP_PASS}".encode()).decode()
-
-    post_title = f"Test Post {marker}"
-    post_content = f"This is a test post created by sdme verification ({marker})."
-
-    xml_body = f"""<?xml version="1.0"?>
-<methodCall>
-  <methodName>wp.newPost</methodName>
-  <params>
-    <param><value><int>1</int></value></param>
-    <param><value><string>{WP_USER}</string></value></param>
-    <param><value><string>{WP_PASS}</string></value></param>
-    <param><value><struct>
-      <member>
-        <name>post_title</name>
-        <value><string>{post_title}</string></value>
-      </member>
-      <member>
-        <name>post_content</name>
-        <value><string>{post_content}</string></value>
-      </member>
-      <member>
-        <name>post_status</name>
-        <value><string>publish</string></value>
-      </member>
-    </struct></value></param>
-  </params>
-</methodCall>"""
-
-    conn = http.client.HTTPConnection(WP_HOST, NGINX_PORT, timeout=30)
-    headers = {
-        "Content-Type": "text/xml",
-        "Authorization": f"Basic {auth}",
-    }
-    conn.request("POST", "/xmlrpc.php", body=xml_body, headers=headers)
-    resp = conn.getresponse()
-    body = resp.read().decode("utf-8", errors="replace")
-    conn.close()
-
     try:
-        root = ET.fromstring(body)
-        value = root.find(".//value/string")
-        if value is not None:
-            post_id = value.text
-            return result("validate/xmlrpc-create-post", True, f"post_id={post_id}"), post_id
-        # Check for int response (some WP versions return int post ID)
-        value = root.find(".//value/int")
-        if value is not None:
-            post_id = value.text
-            return result("validate/xmlrpc-create-post", True, f"post_id={post_id}"), post_id
-        # Check for fault
-        fault = root.find(".//fault")
-        if fault is not None:
-            fault_str = ET.tostring(fault, encoding="unicode")
-            return result("validate/xmlrpc-create-post", False, f"fault: {fault_str[:200]}"), None
-    except ET.ParseError as e:
-        return result("validate/xmlrpc-create-post", False, f"xml parse error: {e}"), None
-
-    return result("validate/xmlrpc-create-post", False, f"unexpected response: {body[:200]}"), None
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        data = None
+    return resp.status, data, raw
 
 
-def rest_api_read(marker):
-    """Read posts via REST API through Nginx."""
-    conn = http.client.HTTPConnection(WP_HOST, NGINX_PORT, timeout=30)
-    conn.request("GET", "/wp-json/wp/v2/posts")
-    resp = conn.getresponse()
-    body = resp.read().decode("utf-8", errors="replace")
-    conn.close()
+def create_token():
+    """Create an API token via Basic auth."""
+    auth = base64.b64encode(f"{ADMIN_USER}:{ADMIN_PASS}".encode()).decode()
+    headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
+    body = json.dumps({"name": f"test-{TEST_MARKER}", "scopes": ["all"]})
 
-    if resp.status != 200:
-        result("validate/rest-api-read-post", False, f"status={resp.status}")
-        return result("validate/post-title-match", False, "skipped: REST API failed")
+    status, data, raw = api_request(GITEA_HOST, GITEA_PORT, "POST",
+                                    f"/api/v1/users/{ADMIN_USER}/tokens",
+                                    body=body, headers=headers)
 
-    try:
-        posts = json.loads(body)
-    except json.JSONDecodeError as e:
-        result("validate/rest-api-read-post", False, f"json error: {e}")
-        return result("validate/post-title-match", False, "skipped: JSON parse failed")
+    if status not in (200, 201) or data is None:
+        return result("validate/create-token", False, f"status={status} body={raw[:200]}"), None
 
-    if not isinstance(posts, list) or len(posts) == 0:
-        result("validate/rest-api-read-post", False, "no posts returned")
-        return result("validate/post-title-match", False, "skipped: no posts")
+    # Gitea changed the token field name across versions: check both
+    token = data.get("sha1") or data.get("token") or data.get("plain_text")
+    if not token:
+        return result("validate/create-token", False, f"no token in response: {raw[:200]}"), None
 
-    result("validate/rest-api-read-post", True, f"found {len(posts)} post(s)")
+    return result("validate/create-token", True, f"token={token[:8]}..."), token
 
-    # Check if any post title contains the marker
-    for post in posts:
-        title = post.get("title", {}).get("rendered", "")
-        if marker in title:
-            return result("validate/post-title-match", True, f"title={title}")
 
-    titles = [p.get("title", {}).get("rendered", "") for p in posts]
-    return result("validate/post-title-match", False, f"marker '{marker}' not in titles: {titles}")
+def create_repo(token):
+    """Create a test repository."""
+    headers = {"Authorization": f"token {token}", "Content-Type": "application/json"}
+    repo_name = f"test-repo-{TEST_MARKER}"
+    body = json.dumps({"name": repo_name, "auto_init": True})
+
+    status, data, raw = api_request(GITEA_HOST, GITEA_PORT, "POST",
+                                    "/api/v1/user/repos",
+                                    body=body, headers=headers)
+
+    if status not in (200, 201) or data is None:
+        return result("validate/create-repo", False, f"status={status} body={raw[:200]}"), None
+
+    return result("validate/create-repo", True, f"repo={data.get('full_name', '?')}"), repo_name
+
+
+def read_repo_through_nginx(token, repo_name):
+    """Read the repo back through the Nginx reverse proxy."""
+    headers = {"Authorization": f"token {token}"}
+
+    status, data, raw = api_request(GITEA_HOST, NGINX_PORT, "GET",
+                                    f"/api/v1/repos/{ADMIN_USER}/{repo_name}",
+                                    headers=headers)
+
+    if status != 200 or data is None:
+        result("validate/read-repo", False, f"status={status} body={raw[:200]}")
+        return result("validate/repo-name-match", False, "skipped: read failed")
+
+    result("validate/read-repo", True)
+
+    actual_name = data.get("name", "")
+    if actual_name == repo_name:
+        return result("validate/repo-name-match", True, f"name={actual_name}")
+    else:
+        return result("validate/repo-name-match", False,
+                       f"expected={repo_name} actual={actual_name}")
 
 
 def main():
-    if not wp_install():
-        result("validate/xmlrpc-create-post", False, "skipped: install failed")
-        result("validate/rest-api-read-post", False, "skipped: install failed")
-        result("validate/post-title-match", False, "skipped: install failed")
+    ok, token = create_token()
+    if not ok or token is None:
+        result("validate/create-repo", False, "skipped: token creation failed")
+        result("validate/read-repo", False, "skipped: token creation failed")
+        result("validate/repo-name-match", False, "skipped: token creation failed")
         return 1
 
-    ok, post_id = xmlrpc_create_post(TEST_MARKER)
-    if not ok:
-        result("validate/rest-api-read-post", False, "skipped: post creation failed")
-        result("validate/post-title-match", False, "skipped: post creation failed")
+    ok, repo_name = create_repo(token)
+    if not ok or repo_name is None:
+        result("validate/read-repo", False, "skipped: repo creation failed")
+        result("validate/repo-name-match", False, "skipped: repo creation failed")
         return 1
 
-    rest_api_read(TEST_MARKER)
+    read_repo_through_nginx(token, repo_name)
     return 0
 
 
@@ -412,8 +367,8 @@ sys.exit(1)" 2>/dev/null; then
     fi
 }
 
-test_ready_wordpress() {
-    local test_name="ready/wordpress"
+test_ready_gitea() {
+    local test_name="ready/gitea"
     if [[ $POD_RUNNING -eq 0 ]]; then
         record "$test_name" SKIP "pod not running"
         return
@@ -423,17 +378,17 @@ test_ready_wordpress() {
         return
     fi
 
-    echo "--- $test_name: waiting for WordPress (up to ${TIMEOUT_WORDPRESS}s) ---"
+    echo "--- $test_name: waiting for Gitea (up to ${TIMEOUT_GITEA}s) ---"
     if "$SDME" exec "$POD_NAME" -- /usr/bin/python3 -c "
 import socket,sys,time
-end=time.time()+${TIMEOUT_WORDPRESS}
+end=time.time()+${TIMEOUT_GITEA}
 while time.time()<end:
- try: s=socket.create_connection(('127.0.0.1',80),2); s.close(); sys.exit(0)
+ try: s=socket.create_connection(('127.0.0.1',3000),2); s.close(); sys.exit(0)
  except: time.sleep(3)
 sys.exit(1)" 2>/dev/null; then
         record "$test_name" PASS
     else
-        record "$test_name" FAIL "port 80 not listening after ${TIMEOUT_WORDPRESS}s"
+        record "$test_name" FAIL "port 3000 not listening after ${TIMEOUT_GITEA}s"
     fi
 }
 
@@ -449,7 +404,7 @@ test_ready_nginx() {
 import socket,sys,time
 end=time.time()+${TIMEOUT_NGINX}
 while time.time()<end:
- try: s=socket.create_connection(('127.0.0.1',8080),2); s.close(); sys.exit(0)
+ try: s=socket.create_connection(('127.0.0.1',8888),2); s.close(); sys.exit(0)
  except: time.sleep(3)
 sys.exit(1)" 2>/dev/null; then
         record "$test_name" PASS
@@ -458,24 +413,58 @@ sys.exit(1)" 2>/dev/null; then
     fi
 }
 
-# --- Phase 5: Validate WordPress through Nginx --------------------------------
+# --- Phase 5: Create admin user -----------------------------------------------
 
-test_validate_wordpress() {
+test_setup_admin_user() {
+    local test_name="setup/admin-user"
     if [[ $POD_RUNNING -eq 0 ]]; then
-        for t in validate/wp-install validate/xmlrpc-create-post validate/rest-api-read-post validate/post-title-match; do
+        record "$test_name" SKIP "pod not running"
+        return
+    fi
+    if [[ "$(result_status "ready/gitea")" != "PASS" ]]; then
+        record "$test_name" SKIP "gitea not ready"
+        return
+    fi
+
+    echo "--- $test_name: creating Gitea admin user (up to ${TIMEOUT_ADMIN}s) ---"
+    local deadline=$((SECONDS + TIMEOUT_ADMIN))
+    local output rc
+
+    while [[ $SECONDS -lt $deadline ]]; do
+        output=$("$SDME" exec "$POD_NAME" --oci-app gitea -- \
+            /bin/su -s /bin/bash -c \
+            "/usr/local/bin/gitea admin user create --admin --username admin --password 'adminpass123!' --email admin@test.local" \
+            git 2>&1)
+        rc=$?
+        if [[ $rc -eq 0 ]] || [[ "$output" == *"already exists"* ]]; then
+            record "$test_name" PASS
+            return
+        fi
+        echo "    retrying admin user creation in 5s... (rc=$rc)"
+        sleep 5
+    done
+
+    record "$test_name" FAIL "could not create admin user after ${TIMEOUT_ADMIN}s: $output"
+}
+
+# --- Phase 6: Validate Gitea through Nginx ------------------------------------
+
+test_validate_gitea() {
+    if [[ $POD_RUNNING -eq 0 ]]; then
+        for t in validate/create-token validate/create-repo validate/read-repo validate/repo-name-match; do
             record "$t" SKIP "pod not running"
         done
         return
     fi
-    if [[ "$(result_status "ready/wordpress")" != "PASS" || "$(result_status "ready/nginx")" != "PASS" ]]; then
-        for t in validate/wp-install validate/xmlrpc-create-post validate/rest-api-read-post validate/post-title-match; do
+    if [[ "$(result_status "setup/admin-user")" != "PASS" || "$(result_status "ready/nginx")" != "PASS" ]]; then
+        for t in validate/create-token validate/create-repo validate/read-repo validate/repo-name-match; do
             record "$t" SKIP "services not ready"
         done
         return
     fi
 
     local test_marker="sdme-$(date +%s)"
-    echo "--- validate: running WordPress validation (marker=$test_marker) ---"
+    echo "--- validate: running Gitea validation (marker=$test_marker) ---"
 
     local output
     output=$("$SDME" exec "$POD_NAME" -- /usr/bin/python3 /opt/sdme-test/validate.py "$test_marker" 2>&1)
@@ -498,7 +487,7 @@ test_validate_wordpress() {
 
     if [[ $found_results -eq 0 ]]; then
         echo "    no RESULT lines found in output"
-        for t in validate/wp-install validate/xmlrpc-create-post validate/rest-api-read-post validate/post-title-match; do
+        for t in validate/create-token validate/create-repo validate/read-repo validate/repo-name-match; do
             if [[ -z "${RESULTS[$t]+x}" ]]; then
                 record "$t" FAIL "no output from validation script (rc=$rc)"
             fi
@@ -511,12 +500,12 @@ test_validate_wordpress() {
 generate_report() {
     local ts
     ts=$(date +%Y%m%d-%H%M%S)
-    local report="$REPORT_DIR/verify-wordpress-pod-$ts.md"
+    local report="$REPORT_DIR/verify-gitea-pod-$ts.md"
 
     mkdir -p "$REPORT_DIR"
 
     {
-        echo "# sdme WordPress Pod Verification Report"
+        echo "# sdme Gitea Pod Verification Report"
         echo ""
         echo "## System Info"
         echo ""
@@ -549,10 +538,11 @@ generate_report() {
         echo "|------|--------|"
         for test_name in \
             create/kube setup/nginx-config setup/validate-script \
-            start/pod service/mysql service/wordpress service/nginx \
-            ready/mysql ready/wordpress ready/nginx \
-            validate/wp-install validate/xmlrpc-create-post \
-            validate/rest-api-read-post validate/post-title-match; do
+            start/pod service/mysql service/gitea service/nginx \
+            ready/mysql ready/gitea ready/nginx \
+            setup/admin-user \
+            validate/create-token validate/create-repo \
+            validate/read-repo validate/repo-name-match; do
             if [[ -n "${RESULTS[$test_name]+x}" ]]; then
                 echo "| $test_name | $(result_status "$test_name") |"
             fi
@@ -605,7 +595,7 @@ main() {
         exit 1
     fi
 
-    echo "=== sdme WordPress pod verification ==="
+    echo "=== sdme Gitea pod verification ==="
     echo "base-fs: $BASE_FS"
     echo "pod:     $POD_NAME"
     echo ""
@@ -622,22 +612,25 @@ main() {
     # Phase 4: Start and check services
     test_start_pod
     test_service_active "mysql" "service/mysql"
-    test_service_active "wordpress" "service/wordpress"
+    test_service_active "gitea" "service/gitea"
     test_service_active "nginx-unprivileged" "service/nginx"
 
     # Readiness checks
     test_ready_mysql
-    test_ready_wordpress
+    test_ready_gitea
     test_ready_nginx
 
-    # Phase 5: Validate WordPress
-    test_validate_wordpress
+    # Phase 5: Create admin user
+    test_setup_admin_user
+
+    # Phase 6: Validate Gitea
+    test_validate_gitea
 
     echo ""
     echo "=== Results ==="
     echo "Total: $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped"
 
-    # Phase 6: Report
+    # Phase 7: Report
     generate_report
 
     [[ $FAIL_COUNT -eq 0 ]]

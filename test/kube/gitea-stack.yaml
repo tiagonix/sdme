@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gitea-pod
+spec:
+  containers:
+  - name: mysql
+    image: docker.io/library/mysql:8.0
+    env:
+    - name: MYSQL_ROOT_PASSWORD
+      value: "testpass"
+    - name: MYSQL_DATABASE
+      value: "gitea"
+  - name: gitea
+    image: docker.io/gitea/gitea:latest
+    env:
+    - name: GITEA__database__DB_TYPE
+      value: "mysql"
+    - name: GITEA__database__HOST
+      value: "127.0.0.1:3306"
+    - name: GITEA__database__NAME
+      value: "gitea"
+    - name: GITEA__database__USER
+      value: "root"
+    - name: GITEA__database__PASSWD
+      value: "testpass"
+    - name: GITEA__security__INSTALL_LOCK
+      value: "true"
+    - name: GITEA__server__HTTP_PORT
+      value: "3000"
+  - name: nginx-unprivileged
+    image: quay.io/nginx/nginx-unprivileged
