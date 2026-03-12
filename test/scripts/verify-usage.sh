@@ -189,8 +189,8 @@ test_host_clone() {
         record "host/ps" FAIL "$output"
     fi
 
-    # sdme exec <name> -- ls /
-    if output=$(timeout "$TIMEOUT_TEST" $SDME exec "$ct" -- ls / 2>&1); then
+    # sdme exec <name> -- /bin/ls /
+    if output=$(timeout "$TIMEOUT_TEST" $SDME exec "$ct" -- /bin/ls / 2>&1); then
         record "host/exec" PASS
     else
         record "host/exec" FAIL "$output"
@@ -410,7 +410,7 @@ test_oci_apps() {
 
             # Verify the env var took effect: pg_isready should succeed
             if output=$(timeout "$TIMEOUT_TEST" $SDME exec --oci "$pg_ct" \
-                    /bin/su - postgres -c 'pg_isready' 2>&1); then
+                    /bin/sh -c 'pg_isready -h 127.0.0.1 -p 5432' 2>&1); then
                 record "oci/pg-env" PASS
             else
                 record "oci/pg-env" FAIL "$output"
@@ -702,9 +702,9 @@ test_binds_env() {
     # Start and verify the bind mount and env var
     if output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct" -t 120 2>&1); then
         local file_content env_val
-        file_content=$(timeout "$TIMEOUT_TEST" $SDME exec "$ct" -- cat /data/file.txt 2>&1) || true
-        env_val=$(timeout "$TIMEOUT_TEST" $SDME exec "$ct" -- printenv MY_VAR 2>&1) || true
-        if [[ "$file_content" == *"test-data"* ]] && [[ "$env_val" == *"hello"* ]]; then
+        file_content=$(timeout "$TIMEOUT_TEST" $SDME exec "$ct" -- /bin/cat /data/file.txt 2>&1) || true
+        env_val=$(timeout "$TIMEOUT_TEST" $SDME exec "$ct" -- /bin/cat /proc/1/environ 2>&1) || true
+        if [[ "$file_content" == *"test-data"* ]] && [[ "$env_val" == *"MY_VAR=hello"* ]]; then
             record "binds/verify" PASS
         else
             record "binds/verify" FAIL "file='$file_content' env='$env_val'"

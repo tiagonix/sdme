@@ -426,6 +426,7 @@ profile sdme-default flags=(attach_disconnected,mediate_deleted) {
 
   # Allow most filesystem operations inside the container's overlayfs.
   # The container has its own mount namespace so these are scoped.
+  / r,
   /** rwlkix,
 
   # Allow mount/umount inside the container's mount namespace.
@@ -477,6 +478,11 @@ profile sdme-default flags=(attach_disconnected,mediate_deleted) {
 
   # Allow dbus communication.
   dbus,
+
+  # Allow user namespace creation and transitions.
+  # Required for --userns / --hardened / --strict containers
+  # (systemd-nspawn uses user namespaces for UID/GID mapping).
+  userns,
 
   # Capabilities: allow the set that nspawn grants.
   # Individual capabilities are further restricted by the bounding set

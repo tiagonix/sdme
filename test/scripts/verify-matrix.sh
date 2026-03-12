@@ -224,6 +224,9 @@ phase2_boot() {
         local output
         if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$fs_name" "$ct_name" 2>&1); then
             record "boot/$distro/create" FAIL "$output"
+            record "boot/$distro/systemd" SKIP "create failed"
+            record "boot/$distro/journalctl" SKIP "create failed"
+            record "boot/$distro/systemctl" SKIP "create failed"
             continue
         fi
         record "boot/$distro/create" PASS
@@ -231,6 +234,8 @@ phase2_boot() {
         # Start
         if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$ct_name" -t 120 2>&1); then
             record "boot/$distro/systemd" FAIL "start failed: $output"
+            record "boot/$distro/journalctl" SKIP "start failed"
+            record "boot/$distro/systemctl" SKIP "start failed"
             sdme rm -f "$ct_name" 2>/dev/null || true
             continue
         fi
@@ -279,7 +284,7 @@ app_verify() {
             ;;
         postgresql)
             timeout 10 sdme exec --oci "$ct_name" \
-                /bin/su - postgres -c 'pg_isready' 2>&1
+                /bin/sh -c 'pg_isready -h 127.0.0.1 -p 5432' 2>&1
             ;;
         redis)
             local reply
@@ -425,6 +430,7 @@ phase3b_hardened_boot() {
         local output
         if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$fs_name" --hardened "$ct_name" 2>&1); then
             record "hardened-boot/$distro/create" FAIL "$output"
+            record "hardened-boot/$distro/systemd" SKIP "create failed"
             continue
         fi
         record "hardened-boot/$distro/create" PASS
