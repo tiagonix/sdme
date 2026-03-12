@@ -386,6 +386,7 @@ pub fn kube_create(
     datadir: &Path,
     yaml_content: &str,
     base_fs: &str,
+    docker_credentials: Option<(&str, &str)>,
     verbose: bool,
 ) -> Result<String> {
     validate_name(base_fs)?;
@@ -460,6 +461,7 @@ pub fn kube_create(
             &kc.image_ref,
             &app_root,
             &rootfs_dir,
+            docker_credentials,
             verbose,
         )
         .with_context(|| format!("failed to pull image for container '{}'", kc.name))?;

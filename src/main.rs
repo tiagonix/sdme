@@ -792,6 +792,14 @@ fn parse_security(args: SecurityArgs, cfg: &config::Config) -> Result<(SecurityC
     Ok((sec, hardened))
 }
 
+/// Extract Docker Hub credentials from config, if both user and token are set.
+fn docker_credentials(cfg: &config::Config) -> Option<(String, String)> {
+    if cfg.docker_user.is_empty() || cfg.docker_token.is_empty() {
+        return None;
+    }
+    Some((cfg.docker_user.clone(), cfg.docker_token.clone()))
+}
+
 /// Parse the comma-separated `host_rootfs_opaque_dirs` config value into a Vec.
 fn parse_opaque_dirs_config(s: &str) -> Vec<String> {
     if s.is_empty() {
@@ -1160,6 +1168,12 @@ fn main() -> Result<()> {
                             sdme::validate_name(&value)?;
                         }
                         cfg.default_base_fs = value;
+                    }
+                    "docker_user" => {
+                        cfg.docker_user = value;
+                    }
+                    "docker_token" => {
+                        cfg.docker_token = value;
                     }
                     _ => bail!("unknown config key: {key}"),
                 }
@@ -1754,7 +1768,10 @@ fn main() -> Result<()> {
                 let base_fs = effective_base_fs
                     .as_deref()
                     .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
-                let name = kube::kube_create(&cfg.datadir, &yaml_content, base_fs, cli.verbose)?;
+                let docker_creds = docker_credentials(&cfg);
+                let docker_creds_ref =
+                    docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
+                let name = kube::kube_create(&cfg.datadir, &yaml_content, base_fs, docker_creds_ref, cli.verbose)?;
                 eprintln!("starting '{name}'");
                 let boot_result = (|| -> Result<()> {
                     systemd::start(&cfg.datadir, &name, cli.verbose)?;
@@ -1799,7 +1816,10 @@ fn main() -> Result<()> {
                 let base_fs = effective_base_fs
                     .as_deref()
                     .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
-                let name = kube::kube_create(&cfg.datadir, &yaml_content, base_fs, cli.verbose)?;
+                let docker_creds = docker_credentials(&cfg);
+                let docker_creds_ref =
+                    docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
+                let name = kube::kube_create(&cfg.datadir, &yaml_content, base_fs, docker_creds_ref, cli.verbose)?;
                 println!("{name}");
             }
             KubeCommand::Delete { name, force } => {
@@ -1828,6 +1848,9 @@ fn main() -> Result<()> {
                 if effective_base_fs.is_some() && oci_mode == OciMode::Base {
                     bail!("--base-fs cannot be used with --oci-mode=base");
                 }
+                let docker_creds = docker_credentials(&cfg);
+                let docker_creds_ref =
+                    docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
                 rootfs::import(
                     &cfg.datadir,
                     &ImportOptions {
@@ -1839,6 +1862,7 @@ fn main() -> Result<()> {
                         install_packages,
                         oci_mode,
                         base_fs: effective_base_fs.as_deref(),
+                        docker_credentials: docker_creds_ref,
                     },
                 )?;
                 println!("{name}");

@@ -1,7 +1,12 @@
 //! OCI registry image pull support.
 //!
 //! Pulls container images directly from OCI-compatible registries using the
-//! OCI Distribution Spec. Supports anonymous bearer token authentication.
+//! OCI Distribution Spec. Supports anonymous and authenticated bearer token
+//! authentication.
+//!
+//! Docker Hub credentials can be configured via `sdme config`:
+//! - `sdme config set docker_user <USERNAME>`
+//! - `sdme config set docker_token <TOKEN>`
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -170,13 +175,29 @@ fn build_noerror_agent() -> Result<ureq::Agent> {
     Ok(config.build().into())
 }
 
-/// Obtain a bearer token for pulling from a registry (anonymous auth).
+/// Docker Hub registry hostnames that credentials apply to.
+const DOCKER_HUB_REGISTRIES: &[&str] = &[
+    "registry-1.docker.io",
+    "docker.io",
+    "index.docker.io",
+];
+
+/// Check if a registry hostname is Docker Hub.
+fn is_docker_hub(registry: &str) -> bool {
+    DOCKER_HUB_REGISTRIES.iter().any(|&r| r == registry)
+}
+
+/// Obtain a bearer token for pulling from a registry.
 ///
 /// Probes `GET /v2/` with a single request:
 /// - 200 → no auth needed, returns `None`.
 /// - 401 → parses `WWW-Authenticate: Bearer realm="...",service="..."`,
 ///   requests a token from the realm, returns it.
 /// - Other → error.
+///
+/// When `docker_credentials` is `Some((user, token))` and the registry is
+/// Docker Hub, the token request includes HTTP Basic authentication, which
+/// increases rate limits and grants access to private repositories.
 ///
 /// Note: tokens have a TTL (typically 300-600s). For images with many large
 /// layers on slow connections, the token may expire mid-pull, causing a 401
@@ -186,6 +207,7 @@ fn obtain_token(
     agent: &ureq::Agent,
     registry: &str,
     repository: &str,
+    docker_credentials: Option<(&str, &str)>,
     verbose: bool,
 ) -> Result<Option<String>> {
     let v2_url = format!("https://{registry}/v2/");
@@ -232,12 +254,25 @@ fn obtain_token(
         format!("{realm}?service={service}&scope=repository:{repository}:pull")
     };
 
+    // Only use credentials for Docker Hub registries.
+    let use_credentials = docker_credentials.filter(|_| is_docker_hub(registry));
     if verbose {
-        eprintln!("requesting token from {token_url}");
+        if use_credentials.is_some() {
+            eprintln!("requesting token from {token_url} (with docker credentials)");
+        } else {
+            eprintln!("requesting token from {token_url}");
+        }
     }
 
-    let token_body = agent
-        .get(&token_url)
+    let mut request = agent.get(&token_url);
+    if let Some((user, pass)) = use_credentials {
+        request = request.header(
+            "Authorization",
+            &format!("Basic {}", base64_encode(&format!("{user}:{pass}"))),
+        );
+    }
+
+    let token_body = request
         .call()
         .with_context(|| format!("failed to request auth token from {token_url}"))?
         .into_body()
@@ -261,6 +296,39 @@ fn obtain_token(
     }
 
     Ok(Some(token))
+}
+
+/// Base64-encode a string (standard alphabet, with padding).
+fn base64_encode(input: &str) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
+
+        if chunk.len() > 1 {
+            out.push(ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+
+    out
 }
 
 // --- Manifest resolution ---
@@ -445,14 +513,29 @@ fn fetch_manifest(
         request = request.header("Authorization", &format!("Bearer {token}"));
     }
 
-    let body_str = request
-        .call()
-        .with_context(|| format!("failed to fetch manifest from {url}"))?
-        .into_body()
-        .into_with_config()
-        .limit(1_048_576)
-        .read_to_string()
-        .with_context(|| format!("failed to read manifest body from {url}"))?;
+    let body_str = match request.call() {
+        Ok(resp) => resp
+            .into_body()
+            .into_with_config()
+            .limit(1_048_576)
+            .read_to_string()
+            .with_context(|| format!("failed to read manifest body from {url}"))?,
+        Err(ureq::Error::StatusCode(429)) => {
+            if is_docker_hub(registry) {
+                bail!(
+                    "Docker Hub rate limit exceeded for {url}\n\
+                     hint: authenticate with a Docker Hub token to increase rate limits:\n  \
+                     sdme config set docker_user <USERNAME>\n  \
+                     sdme config set docker_token <TOKEN>"
+                );
+            }
+            bail!("rate limit exceeded (HTTP 429) for {url}");
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e)
+                .context(format!("failed to fetch manifest from {url}")));
+        }
+    };
 
     let body: serde_json::Value = serde_json::from_str(&body_str)
         .with_context(|| format!("failed to parse manifest from {url}"))?;
@@ -551,14 +634,26 @@ fn download_blob(
         request = request.header("Authorization", &format!("Bearer {token}"));
     }
 
-    let mut reader = request
-        .call()
-        .with_context(|| {
-            format!(
+    let mut reader = match request.call() {
+        Ok(resp) => resp,
+        Err(ureq::Error::StatusCode(429)) => {
+            if is_docker_hub(registry) {
+                bail!(
+                    "Docker Hub rate limit exceeded downloading blob {digest}\n\
+                     hint: authenticate with a Docker Hub token to increase rate limits:\n  \
+                     sdme config set docker_user <USERNAME>\n  \
+                     sdme config set docker_token <TOKEN>"
+                );
+            }
+            bail!("rate limit exceeded (HTTP 429) downloading blob {digest}");
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!(
                 "failed to download blob {digest} from {registry} \
                  (if this is a 401 error, the auth token may have expired)"
-            )
-        })?
+            )));
+        }
+    }
         .into_body()
         .into_reader();
 
@@ -611,12 +706,19 @@ pub(crate) fn import_registry_image(
     image: &ImageReference,
     staging_dir: &Path,
     rootfs_dir: &Path,
+    docker_credentials: Option<(&str, &str)>,
     verbose: bool,
 ) -> Result<Option<OciContainerConfig>> {
     eprintln!("pulling {image}");
 
     let agent = build_http_agent(verbose)?;
-    let token = obtain_token(&agent, &image.registry, &image.repository, verbose)?;
+    let token = obtain_token(
+        &agent,
+        &image.registry,
+        &image.repository,
+        docker_credentials,
+        verbose,
+    )?;
     let token_ref = token.as_deref();
 
     let manifest = resolve_manifest(
@@ -947,6 +1049,27 @@ mod tests {
     }
 
     #[test]
+    fn test_base64_encode() {
+        assert_eq!(base64_encode(""), "");
+        assert_eq!(base64_encode("f"), "Zg==");
+        assert_eq!(base64_encode("fo"), "Zm8=");
+        assert_eq!(base64_encode("foo"), "Zm9v");
+        assert_eq!(base64_encode("foob"), "Zm9vYg==");
+        assert_eq!(base64_encode("fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode("foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode("user:token123"), "dXNlcjp0b2tlbjEyMw==");
+    }
+
+    #[test]
+    fn test_is_docker_hub() {
+        assert!(is_docker_hub("registry-1.docker.io"));
+        assert!(is_docker_hub("docker.io"));
+        assert!(is_docker_hub("index.docker.io"));
+        assert!(!is_docker_hub("quay.io"));
+        assert!(!is_docker_hub("ghcr.io"));
+    }
+
+    #[test]
     #[ignore] // Requires network access.
     fn test_pull_small_image() {
         use crate::import::tests::INTERRUPT_LOCK;
@@ -968,7 +1091,7 @@ mod tests {
         fs::create_dir_all(&rootfs_dir).unwrap();
 
         let image = ImageReference::parse("quay.io/centos-bootc/centos-bootc:stream10").unwrap();
-        import_registry_image(&image, &dest, &rootfs_dir, true).unwrap();
+        import_registry_image(&image, &dest, &rootfs_dir, None, true).unwrap();
 
         // Basic sanity checks.
         assert!(dest.is_dir());

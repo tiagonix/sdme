@@ -34,6 +34,14 @@ pub struct Config {
     /// Default base rootfs for OCI application images.
     #[serde(default)]
     pub default_base_fs: String,
+
+    /// Docker Hub username for authenticated pulls.
+    #[serde(default)]
+    pub docker_user: String,
+
+    /// Docker Hub personal access token for authenticated pulls.
+    #[serde(default)]
+    pub docker_token: String,
 }
 
 fn default_interactive() -> bool {
@@ -70,6 +78,8 @@ impl Default for Config {
             host_rootfs_opaque_dirs: default_host_rootfs_opaque_dirs(),
             hardened_drop_caps: default_hardened_drop_caps(),
             default_base_fs: String::new(),
+            docker_user: String::new(),
+            docker_token: String::new(),
         }
     }
 }
@@ -85,6 +95,18 @@ impl Config {
         println!("host_rootfs_opaque_dirs = {}", self.host_rootfs_opaque_dirs);
         println!("hardened_drop_caps = {}", self.hardened_drop_caps);
         println!("default_base_fs = {}", self.default_base_fs);
+        println!("docker_user = {}", self.docker_user);
+        let docker_token_display = if self.docker_token.is_empty() {
+            String::new()
+        } else {
+            let len = self.docker_token.len();
+            if len <= 8 {
+                "*".repeat(len)
+            } else {
+                format!("{}…{}", &self.docker_token[..4], &self.docker_token[len - 4..])
+            }
+        };
+        println!("docker_token = {docker_token_display}");
     }
 }
 

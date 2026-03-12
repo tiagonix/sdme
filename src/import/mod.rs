@@ -115,6 +115,8 @@ pub struct ImportOptions<'a> {
     pub install_packages: InstallPackages,
     pub oci_mode: OciMode,
     pub base_fs: Option<&'a str>,
+    /// Docker Hub credentials `(user, token)` for authenticated pulls.
+    pub docker_credentials: Option<(&'a str, &'a str)>,
 }
 
 // --- Source detection ---
@@ -1494,6 +1496,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         install_packages,
         oci_mode,
         base_fs,
+        docker_credentials,
     } = *opts;
 
     validate_name(name)?;
@@ -1535,7 +1538,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         SourceKind::RawImage(ref path) => img::import_raw(path, &staging_dir, verbose),
         SourceKind::Url(ref url) => import_url(url, &staging_dir, &rootfs_dir, name, verbose),
         SourceKind::RegistryImage(ref img) => {
-            match registry::import_registry_image(img, &staging_dir, &rootfs_dir, verbose) {
+            match registry::import_registry_image(img, &staging_dir, &rootfs_dir, docker_credentials, verbose) {
                 Ok(config) => {
                     oci_config = config;
                     Ok(())
@@ -1875,6 +1878,7 @@ pub(crate) mod tests {
                 install_packages: InstallPackages::No,
                 oci_mode: OciMode::Auto,
                 base_fs: None,
+                docker_credentials: None,
             },
         )
     }
@@ -3493,6 +3497,7 @@ pub(crate) mod tests {
                 install_packages: InstallPackages::No,
                 oci_mode: OciMode::Auto,
                 base_fs: None,
+                docker_credentials: None,
             },
         )
         .unwrap();
