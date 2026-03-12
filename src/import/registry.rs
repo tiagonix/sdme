@@ -176,11 +176,7 @@ fn build_noerror_agent() -> Result<ureq::Agent> {
 }
 
 /// Docker Hub registry hostnames that credentials apply to.
-const DOCKER_HUB_REGISTRIES: &[&str] = &[
-    "registry-1.docker.io",
-    "docker.io",
-    "index.docker.io",
-];
+const DOCKER_HUB_REGISTRIES: &[&str] = &["registry-1.docker.io", "docker.io", "index.docker.io"];
 
 /// Check if a registry hostname is Docker Hub.
 fn is_docker_hub(registry: &str) -> bool {
@@ -300,8 +296,7 @@ fn obtain_token(
 
 /// Base64-encode a string (standard alphabet, with padding).
 fn base64_encode(input: &str) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let bytes = input.as_bytes();
     let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
@@ -532,8 +527,9 @@ fn fetch_manifest(
             bail!("rate limit exceeded (HTTP 429) for {url}");
         }
         Err(e) => {
-            return Err(anyhow::Error::new(e)
-                .context(format!("failed to fetch manifest from {url}")));
+            return Err(
+                anyhow::Error::new(e).context(format!("failed to fetch manifest from {url}"))
+            );
         }
     };
 
@@ -654,8 +650,8 @@ fn download_blob(
             )));
         }
     }
-        .into_body()
-        .into_reader();
+    .into_body()
+    .into_reader();
 
     let mut file =
         File::create(dest).with_context(|| format!("failed to create {}", dest.display()))?;

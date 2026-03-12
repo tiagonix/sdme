@@ -166,10 +166,82 @@ pub(crate) struct Volume {
     pub(crate) empty_dir: Option<serde_yml::Value>,
     #[serde(default)]
     pub(crate) host_path: Option<HostPathVolume>,
+    #[serde(default)]
+    pub(crate) secret: Option<SecretVolume>,
 }
 
 #[derive(serde::Deserialize, Debug)]
 pub(crate) struct HostPathVolume {
+    pub(crate) path: String,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretVolume {
+    pub(crate) secret_name: String,
+    #[serde(default)]
+    pub(crate) items: Vec<SecretKeyToPath>,
+    #[serde(
+        default = "default_secret_mode",
+        deserialize_with = "deserialize_file_mode"
+    )]
+    pub(crate) default_mode: u32,
+}
+
+fn default_secret_mode() -> u32 {
+    0o644
+}
+
+/// Deserialize a file mode from either a YAML integer or an octal string.
+///
+/// YAML 1.2 (used by serde_yml) treats `0400` as a string, not an octal
+/// integer like YAML 1.1. Kubernetes YAML files commonly use this syntax
+/// for `defaultMode`, so we accept both forms.
+fn deserialize_file_mode<'de, D>(deserializer: D) -> std::result::Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+
+    struct FileModeVisitor;
+
+    impl<'de> Visitor<'de> for FileModeVisitor {
+        type Value = u32;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an integer or octal string (e.g. 0644, \"0400\")")
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<u32, E> {
+            u32::try_from(v).map_err(|_| E::custom(format!("file mode out of range: {v}")))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> std::result::Result<u32, E> {
+            u32::try_from(v).map_err(|_| E::custom(format!("file mode out of range: {v}")))
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<u32, E> {
+            // Parse octal strings like "0400", "0644".
+            let v = v.trim();
+            if let Some(octal) = v.strip_prefix('0') {
+                if octal.is_empty() {
+                    return Ok(0);
+                }
+                u32::from_str_radix(octal, 8)
+                    .map_err(|_| E::custom(format!("invalid octal file mode: {v}")))
+            } else {
+                v.parse::<u32>()
+                    .map_err(|_| E::custom(format!("invalid file mode: {v}")))
+            }
+        }
+    }
+
+    deserializer.deserialize_any(FileModeVisitor)
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub(crate) struct SecretKeyToPath {
+    pub(crate) key: String,
     pub(crate) path: String,
 }
 
@@ -224,6 +296,11 @@ pub(crate) struct KubeVolumeMount {
 pub(crate) enum KubeVolumeKind {
     EmptyDir,
     HostPath(String),
+    Secret {
+        secret_name: String,
+        items: Vec<(String, String)>,
+        default_mode: u32,
+    },
 }
 
 #[derive(Debug)]
@@ -647,15 +724,44 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
         .map(|v| {
             let kind = if let Some(ref hp) = v.host_path {
                 KubeVolumeKind::HostPath(hp.path.clone())
+            } else if let Some(ref sec) = v.secret {
+                validate_name(&sec.secret_name)
+                    .with_context(|| format!("volume '{}': invalid secret name", v.name))?;
+                let items: Vec<(String, String)> = sec
+                    .items
+                    .iter()
+                    .map(|item| {
+                        if item.path.contains("..") {
+                            bail!(
+                                "volume '{}': secret item path must not contain '..': {}",
+                                v.name,
+                                item.path
+                            );
+                        }
+                        if item.path.starts_with('/') {
+                            bail!(
+                                "volume '{}': secret item path must not start with '/': {}",
+                                v.name,
+                                item.path
+                            );
+                        }
+                        Ok((item.key.clone(), item.path.clone()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                KubeVolumeKind::Secret {
+                    secret_name: sec.secret_name.clone(),
+                    items,
+                    default_mode: sec.default_mode,
+                }
             } else {
                 KubeVolumeKind::EmptyDir
             };
-            KubeVolume {
+            Ok(KubeVolume {
                 name: v.name.clone(),
                 kind,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     // Collect nspawn --bind= arguments for hostPath volumes only.
     // emptyDir volumes live inside the rootfs at /oci/volumes/{name} and are
@@ -666,7 +772,7 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
             KubeVolumeKind::HostPath(path) => {
                 Some((path.clone(), format!("/oci/volumes/{}", v.name)))
             }
-            KubeVolumeKind::EmptyDir => None,
+            KubeVolumeKind::EmptyDir | KubeVolumeKind::Secret { .. } => None,
         })
         .collect();
 
@@ -774,6 +880,60 @@ pub fn kube_create(
             let vol_path = volumes_dir.join(&vol.name);
             fs::create_dir_all(&vol_path)
                 .with_context(|| format!("failed to create volume dir {}", vol_path.display()))?;
+        }
+    }
+
+    // Populate secret volumes.
+    for vol in &plan.volumes {
+        if let KubeVolumeKind::Secret {
+            ref secret_name,
+            ref items,
+            default_mode,
+        } = vol.kind
+        {
+            let vol_path = volumes_dir.join(&vol.name);
+            fs::create_dir_all(&vol_path)
+                .with_context(|| format!("failed to create volume dir {}", vol_path.display()))?;
+
+            let secret_data = crate::kube_secret::read_secret_data(datadir, secret_name)
+                .with_context(|| {
+                    format!(
+                        "volume '{}': failed to read secret '{secret_name}'",
+                        vol.name
+                    )
+                })?;
+
+            if items.is_empty() {
+                // Copy all keys.
+                for (key, contents) in &secret_data {
+                    let file_path = vol_path.join(key);
+                    fs::write(&file_path, contents)
+                        .with_context(|| format!("failed to write {}", file_path.display()))?;
+                    set_file_mode(&file_path, default_mode)?;
+                }
+            } else {
+                // Copy only projected keys.
+                let data_map: HashMap<&str, &[u8]> = secret_data
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_slice()))
+                    .collect();
+                for (key, path) in items {
+                    let contents = data_map.get(key.as_str()).with_context(|| {
+                        format!(
+                            "volume '{}': secret '{secret_name}' has no key '{key}'",
+                            vol.name
+                        )
+                    })?;
+                    let file_path = vol_path.join(path);
+                    if let Some(parent) = file_path.parent() {
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("failed to create {}", parent.display()))?;
+                    }
+                    fs::write(&file_path, contents)
+                        .with_context(|| format!("failed to write {}", file_path.display()))?;
+                    set_file_mode(&file_path, default_mode)?;
+                }
+            }
         }
     }
 
@@ -1148,6 +1308,13 @@ fn setup_kube_container(
         requires_units,
         readiness_exec: kc.readiness_exec.clone(),
     })
+}
+
+/// Set file permissions to the given mode.
+fn set_file_mode(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .with_context(|| format!("failed to set permissions on {}", path.display()))
 }
 
 #[cfg(test)]
@@ -2300,5 +2467,187 @@ spec:
         );
         // drop_privs binary should be deployed.
         assert!(app_root.join(".sdme-drop-privs").is_file());
+    }
+
+    // --- Secret volumes ---
+
+    #[test]
+    fn test_parse_secret_volume() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secret-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    volumeMounts:
+    - name: my-secret
+      mountPath: /etc/secrets
+  volumes:
+  - name: my-secret
+    secret:
+      secretName: db-creds
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        assert!(spec.volumes[0].secret.is_some());
+        let secret = spec.volumes[0].secret.as_ref().unwrap();
+        assert_eq!(secret.secret_name, "db-creds");
+        assert!(secret.items.is_empty());
+        assert_eq!(secret.default_mode, 0o644);
+
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert!(matches!(
+            plan.volumes[0].kind,
+            KubeVolumeKind::Secret { .. }
+        ));
+        // Secret volumes should not generate host binds.
+        assert!(plan.host_binds.is_empty());
+    }
+
+    #[test]
+    fn test_parse_secret_volume_with_items() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secret-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    volumeMounts:
+    - name: my-secret
+      mountPath: /etc/secrets
+  volumes:
+  - name: my-secret
+    secret:
+      secretName: db-creds
+      items:
+      - key: username
+        path: user.txt
+      - key: password
+        path: pass.txt
+      defaultMode: 256
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        if let KubeVolumeKind::Secret {
+            ref items,
+            default_mode,
+            ..
+        } = plan.volumes[0].kind
+        {
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0], ("username".to_string(), "user.txt".to_string()));
+            assert_eq!(items[1], ("password".to_string(), "pass.txt".to_string()));
+            assert_eq!(default_mode, 256); // 0o400
+        } else {
+            panic!("expected Secret volume kind");
+        }
+    }
+
+    #[test]
+    fn test_secret_volume_invalid_name() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secret-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+  volumes:
+  - name: my-secret
+    secret:
+      secretName: INVALID
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid secret name")
+                || err.to_string().contains("lowercase"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_secret_volume_item_path_traversal() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secret-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+  volumes:
+  - name: my-secret
+    secret:
+      secretName: db-creds
+      items:
+      - key: username
+        path: ../etc/passwd
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(err.to_string().contains(".."), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_secret_volume_item_path_absolute() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secret-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+  volumes:
+  - name: my-secret
+    secret:
+      secretName: db-creds
+      items:
+      - key: username
+        path: /etc/passwd
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(
+            err.to_string().contains("must not start with '/'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_secret_volume_octal_string_mode() {
+        // YAML 1.2 treats `0400` as a string; verify the custom deserializer
+        // handles it by parsing it as octal.
+        let yaml = "
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secret-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    volumeMounts:
+    - name: my-secret
+      mountPath: /etc/secrets
+  volumes:
+  - name: my-secret
+    secret:
+      secretName: db-creds
+      defaultMode: \"0400\"
+";
+        let (_name, spec) = parse_yaml(yaml).unwrap();
+        let secret = spec.volumes[0].secret.as_ref().unwrap();
+        assert_eq!(secret.default_mode, 0o400); // 256 decimal
     }
 }

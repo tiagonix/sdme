@@ -6,8 +6,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    config, confirm, containers, kube, pod, rootfs, security, system_check, systemd, BindConfig,
-    EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
+    config, confirm, containers, kube, kube_secret, pod, rootfs, security, system_check, systemd,
+    BindConfig, EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
 };
 
 #[derive(Parser)]
@@ -598,6 +598,34 @@ enum KubeCommand {
         /// Force deletion even if not a kube pod
         #[arg(short, long)]
         force: bool,
+    },
+    /// Manage secrets for kube pods
+    #[command(subcommand)]
+    Secret(KubeSecretCommand),
+}
+
+#[derive(Subcommand)]
+enum KubeSecretCommand {
+    /// Create a secret from literal values or files
+    Create {
+        /// Secret name
+        name: String,
+
+        /// Set a literal key=value pair (repeatable)
+        #[arg(long = "from-literal", value_name = "KEY=VALUE")]
+        from_literal: Vec<String>,
+
+        /// Set a key from a file key=path (repeatable)
+        #[arg(long = "from-file", value_name = "KEY=PATH")]
+        from_file: Vec<String>,
+    },
+    /// List secrets
+    Ls,
+    /// Remove one or more secrets
+    Rm {
+        /// Secret names
+        #[arg(required = true)]
+        names: Vec<String>,
     },
 }
 
@@ -1769,9 +1797,14 @@ fn main() -> Result<()> {
                     .as_deref()
                     .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
                 let docker_creds = docker_credentials(&cfg);
-                let docker_creds_ref =
-                    docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
-                let name = kube::kube_create(&cfg.datadir, &yaml_content, base_fs, docker_creds_ref, cli.verbose)?;
+                let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
+                let name = kube::kube_create(
+                    &cfg.datadir,
+                    &yaml_content,
+                    base_fs,
+                    docker_creds_ref,
+                    cli.verbose,
+                )?;
                 eprintln!("starting '{name}'");
                 let boot_result = (|| -> Result<()> {
                     systemd::start(&cfg.datadir, &name, cli.verbose)?;
@@ -1817,15 +1850,68 @@ fn main() -> Result<()> {
                     .as_deref()
                     .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
                 let docker_creds = docker_credentials(&cfg);
-                let docker_creds_ref =
-                    docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
-                let name = kube::kube_create(&cfg.datadir, &yaml_content, base_fs, docker_creds_ref, cli.verbose)?;
+                let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
+                let name = kube::kube_create(
+                    &cfg.datadir,
+                    &yaml_content,
+                    base_fs,
+                    docker_creds_ref,
+                    cli.verbose,
+                )?;
                 println!("{name}");
             }
             KubeCommand::Delete { name, force } => {
                 kube::kube_delete(&cfg.datadir, &name, force, cli.verbose)?;
                 println!("{name}");
             }
+            KubeCommand::Secret(cmd) => match cmd {
+                KubeSecretCommand::Create {
+                    name,
+                    from_literal,
+                    from_file,
+                } => {
+                    let literals: Vec<(String, String)> = from_literal
+                        .iter()
+                        .map(|s| {
+                            s.split_once('=')
+                                .map(|(k, v)| (k.to_string(), v.to_string()))
+                                .context(format!(
+                                    "invalid --from-literal format: {s} (expected KEY=VALUE)"
+                                ))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let files: Vec<(String, String)> = from_file
+                        .iter()
+                        .map(|s| {
+                            s.split_once('=')
+                                .map(|(k, v)| (k.to_string(), v.to_string()))
+                                .context(format!(
+                                    "invalid --from-file format: {s} (expected KEY=PATH)"
+                                ))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    kube_secret::create(&cfg.datadir, &name, &literals, &files)?;
+                    println!("{name}");
+                }
+                KubeSecretCommand::Ls => {
+                    let secrets = kube_secret::list(&cfg.datadir)?;
+                    if secrets.is_empty() {
+                        eprintln!("no secrets");
+                        return Ok(());
+                    }
+                    let name_w = secrets.iter().map(|s| s.name.len()).max().unwrap().max(4);
+                    println!("{:<name_w$}  {:>5}  {}", "NAME", "KEYS", "CREATED");
+                    for s in &secrets {
+                        println!("{:<name_w$}  {:>5}  {}", s.name, s.keys, s.created);
+                    }
+                }
+                KubeSecretCommand::Rm { names } => {
+                    kube_secret::remove(&cfg.datadir, &names)?;
+                    for name in &names {
+                        println!("{name}");
+                    }
+                }
+            },
         },
         Command::Fs(cmd) => match cmd {
             RootfsCommand::Import {
@@ -1849,8 +1935,7 @@ fn main() -> Result<()> {
                     bail!("--base-fs cannot be used with --oci-mode=base");
                 }
                 let docker_creds = docker_credentials(&cfg);
-                let docker_creds_ref =
-                    docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
+                let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
                 rootfs::import(
                     &cfg.datadir,
                     &ImportOptions {

@@ -103,7 +103,11 @@ impl Config {
             if len <= 8 {
                 "*".repeat(len)
             } else {
-                format!("{}…{}", &self.docker_token[..4], &self.docker_token[len - 4..])
+                format!(
+                    "{}…{}",
+                    &self.docker_token[..4],
+                    &self.docker_token[len - 4..]
+                )
             }
         };
         println!("docker_token = {docker_token_display}");
