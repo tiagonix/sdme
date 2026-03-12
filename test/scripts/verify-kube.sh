@@ -122,14 +122,21 @@ YAML
         return
     fi
 
-    # Wait for nginx to be ready.
-    sleep 3
-
     echo "--- $test_name: checking nginx service inside container ---"
-    if "$SDME" exec "$pod_name" -- systemctl is-active sdme-oci-nginx.service 2>&1 | grep -q active; then
+    local ok=0 output
+    for i in $(seq 1 10); do
+        sleep 3
+        output=$("$SDME" exec "$pod_name" -- /usr/bin/systemctl is-active sdme-oci-nginx.service 2>&1 || true)
+        if echo "$output" | grep -q '^active'; then
+            ok=1
+            break
+        fi
+    done
+    if [[ $ok -eq 1 ]]; then
         record "$test_name" PASS
     else
-        echo "nginx service not active"
+        echo "nginx service not active after retries"
+        "$SDME" exec "$pod_name" -- /usr/bin/systemctl status sdme-oci-nginx.service 2>&1 || true
         record "$test_name" FAIL
     fi
 
@@ -175,7 +182,7 @@ YAML
 
     echo "--- $test_name: checking marker file ---"
     local marker
-    marker=$("$SDME" exec "$pod_name" -- cat /oci/apps/app/root/tmp/marker 2>/dev/null || echo "")
+    marker=$("$SDME" exec "$pod_name" -- /usr/bin/cat /oci/apps/app/root/tmp/marker 2>/dev/null || echo "")
     if [[ "$marker" == *"hello-from-kube"* ]]; then
         record "$test_name" PASS
     else
@@ -242,7 +249,75 @@ YAML
     record "$test_name" PASS
 }
 
-# --- Test 4: sdme ps shows kube metadata ---
+# --- Test 4: Shared emptyDir volume between containers ---
+test_shared_volume() {
+    local test_name="shared-emptydir-volume"
+    local pod_name="vfy-kube-vol"
+    local yaml_file
+    yaml_file=$(mktemp /tmp/kube-test-XXXXXX.yaml)
+
+    cat > "$yaml_file" <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vfy-kube-vol
+spec:
+  containers:
+  - name: writer
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c", "echo shared-data > /shared/marker && sleep infinity"]
+    volumeMounts:
+    - name: shared
+      mountPath: /shared
+  - name: reader
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]
+    volumeMounts:
+    - name: shared
+      mountPath: /shared
+  volumes:
+  - name: shared
+    emptyDir: {}
+YAML
+
+    echo "--- $test_name: creating pod ---"
+    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1; then
+        record "$test_name" FAIL
+        rm -f "$yaml_file"
+        return
+    fi
+    rm -f "$yaml_file"
+
+    echo "--- $test_name: starting pod ---"
+    if ! timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -v 2>&1; then
+        record "$test_name" FAIL
+        cleanup_container "$pod_name"
+        return
+    fi
+
+    echo "--- $test_name: waiting for writer to create marker ---"
+    local ok=0 marker
+    for i in $(seq 1 10); do
+        sleep 3
+        marker=$("$SDME" exec "$pod_name" -- /usr/bin/cat /oci/apps/reader/root/shared/marker 2>/dev/null || echo "")
+        if [[ "$marker" == *"shared-data"* ]]; then
+            ok=1
+            break
+        fi
+    done
+
+    if [[ $ok -eq 1 ]]; then
+        record "$test_name" PASS
+    else
+        echo "marker file not found or wrong content via reader: '$marker'"
+        "$SDME" exec "$pod_name" -- /bin/ls -la /oci/volumes/shared/ 2>&1 || true
+        record "$test_name" FAIL
+    fi
+
+    cleanup_container "$pod_name"
+}
+
+# --- Test 5: sdme ps shows kube metadata ---
 test_ps_kube_column() {
     local test_name="ps-kube-column"
     local pod_name="vfy-kube-ps"
@@ -309,6 +384,7 @@ main() {
     test_single_container
     test_command_override
     test_kube_delete
+    test_shared_volume
     test_ps_kube_column
 
     echo ""

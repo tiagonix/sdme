@@ -180,6 +180,9 @@ enum Command {
         /// Run command inside the OCI app root (/oci/root)
         #[arg(long)]
         oci: bool,
+        /// Target a specific OCI app by name (implies --oci)
+        #[arg(long)]
+        oci_app: Option<String>,
         /// Command to run inside the container
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
@@ -210,6 +213,9 @@ enum Command {
         /// Show logs for the OCI app service instead of the container unit
         #[arg(long)]
         oci: bool,
+        /// Target a specific OCI app by name (implies --oci)
+        #[arg(long)]
+        oci_app: Option<String>,
         /// Extra arguments passed to journalctl (e.g. -f, -n 100)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -896,23 +902,59 @@ fn read_oci_volumes_for_rootfs(
 
 /// Resolve the OCI app name for a container.
 ///
-/// Checks the state file for `OCI_APP` or `KUBE_CONTAINERS` keys first,
+/// If `explicit` is provided, validates it against known apps and returns it.
+/// Otherwise checks the state file for `OCI_APP` or `KUBE_CONTAINERS` keys,
 /// then falls back to auto-detecting from the rootfs.
-fn resolve_oci_app_name(datadir: &std::path::Path, name: &str) -> Result<String> {
+///
+/// For kube containers with multiple apps and no explicit selection, returns
+/// an error listing available container names.
+fn resolve_oci_app_name(
+    datadir: &std::path::Path,
+    name: &str,
+    explicit: Option<&str>,
+) -> Result<String> {
     let state_path = datadir.join("state").join(name);
     if let Ok(state) = sdme::State::read_from(&state_path) {
+        // If an explicit app name was given, validate it.
+        if let Some(app) = explicit {
+            if let Some(kube_containers) = state.get("KUBE_CONTAINERS") {
+                let names: Vec<&str> = kube_containers.split(',').collect();
+                if names.contains(&app) {
+                    return Ok(app.to_string());
+                }
+                bail!(
+                    "container '{app}' not found in kube pod '{name}'; available: {}",
+                    kube_containers
+                );
+            }
+            // For non-kube OCI containers, validate against OCI_APP.
+            if let Some(oci_app) = state.get("OCI_APP") {
+                if !oci_app.is_empty() && oci_app == app {
+                    return Ok(app.to_string());
+                }
+            }
+            // Fall back: trust the explicit name (it may exist in rootfs).
+            return Ok(app.to_string());
+        }
+
         if let Some(app) = state.get("OCI_APP") {
             if !app.is_empty() {
                 return Ok(app.to_string());
             }
         }
-        // For kube containers, use the first container name.
-        if let Some(containers) = state.get("KUBE_CONTAINERS") {
-            if let Some(first) = containers.split(',').next() {
-                if !first.is_empty() {
-                    return Ok(first.to_string());
-                }
+        // For kube containers, require --oci-app when multiple containers exist.
+        if let Some(kube_containers) = state.get("KUBE_CONTAINERS") {
+            let names: Vec<&str> = kube_containers
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .collect();
+            if names.len() == 1 {
+                return Ok(names[0].to_string());
             }
+            bail!(
+                "kube pod '{name}' has multiple containers: {}; use --oci-app to select one",
+                kube_containers
+            );
         }
         // Fall back to auto-detection from rootfs.
         if let Some(rootfs_name) = state.get("ROOTFS") {
@@ -1211,10 +1253,15 @@ fn main() -> Result<()> {
             }
             println!("{name}");
         }
-        Command::Exec { name, oci, command } => {
+        Command::Exec {
+            name,
+            oci,
+            oci_app,
+            command,
+        } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
-            let status = if oci {
-                let app_name = resolve_oci_app_name(&cfg.datadir, &name)?;
+            let status = if oci || oci_app.is_some() {
+                let app_name = resolve_oci_app_name(&cfg.datadir, &name, oci_app.as_deref())?;
                 containers::exec_oci(&cfg.datadir, &name, &app_name, &command, cli.verbose)?
             } else {
                 containers::exec(
@@ -1320,10 +1367,15 @@ fn main() -> Result<()> {
             )?;
             std::process::exit(status.code().unwrap_or(1));
         }
-        Command::Logs { name, oci, args } => {
+        Command::Logs {
+            name,
+            oci,
+            oci_app,
+            args,
+        } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
-            if oci {
-                let app_name = resolve_oci_app_name(&cfg.datadir, &name)?;
+            if oci || oci_app.is_some() {
+                let app_name = resolve_oci_app_name(&cfg.datadir, &name, oci_app.as_deref())?;
                 let mut command = vec![
                     "/usr/bin/journalctl".to_string(),
                     "-u".to_string(),
@@ -1683,6 +1735,10 @@ fn main() -> Result<()> {
                 file,
                 base_fs,
                 timeout,
+                // TODO: wire security flags into kube_create():
+                // - call parse_security(security, &cfg) to get (sec, hardened)
+                // - if hardened, force private_network = true
+                // - pass SecurityConfig into kube_create() and through to CreateOptions
                 security: _,
             } => {
                 system_check::check_systemd_version(252)?;
@@ -1724,6 +1780,10 @@ fn main() -> Result<()> {
             KubeCommand::Create {
                 file,
                 base_fs,
+                // TODO: wire security flags into kube_create():
+                // - call parse_security(security, &cfg) to get (sec, hardened)
+                // - if hardened, force private_network = true
+                // - pass SecurityConfig into kube_create() and through to CreateOptions
                 security: _,
             } => {
                 system_check::check_systemd_version(252)?;

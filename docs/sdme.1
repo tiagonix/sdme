@@ -521,6 +521,73 @@ or
 keys) unless
 .B \-f
 is given.
+.SS sdme kube apply \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-t \fIseconds\fR] [\-\-] [\fIcommand\fR...]
+Create, start, and enter a container from a Kubernetes Pod YAML file.
+Equivalent to
+.B kube create
+followed by
+.B start
+and
+.BR join .
+.PP
+The YAML file must be a v1 Pod or apps/v1 Deployment manifest.
+The
+.B \-\-base\-fs
+flag specifies a previously imported rootfs (with systemd) to use as the
+base layer.
+Defaults to the
+.B default_base_fs
+config value.
+Use
+.B \-t
+to override the boot timeout.
+An optional command overrides the default login shell.
+.PP
+If boot fails or is interrupted (Ctrl+C), the just\-created container is
+automatically removed.
+.SS sdme kube create \-f \fIfile\fR [\-\-base\-fs \fIname\fR]
+Create a container from a Kubernetes Pod YAML file without starting it.
+.PP
+Parses the YAML, pulls each container's OCI image from the registry, builds
+a combined rootfs under
+.IR kube\-{podname} ,
+and creates an sdme container.
+Each pod container becomes a separate systemd service
+.RI ( sdme\-oci\-{name}.service )
+chrooted into its own rootfs under
+.IR /oci/apps/{name}/root .
+.PP
+Volumes are supported in two forms:
+.RS
+.TP
+.B emptyDir
+Creates a shared directory at
+.IR /oci/volumes/{name}
+inside the rootfs.
+A generated oneshot service
+.RI ( sdme\-kube\-volumes.service )
+bind\-mounts each volume into the appropriate app root directories before
+app services start.
+Read\-only volume mounts are remounted read\-only after the initial bind.
+.TP
+.B hostPath
+Bind\-mounted into the container at the nspawn level via
+.BR \-\-bind= .
+.RE
+.PP
+Ports declared across all containers are aggregated; if any ports are
+declared,
+.B \-\-private\-network
+is enabled automatically.
+.PP
+The restart policy maps to systemd's
+.B Restart=
+directive: Always=always, OnFailure=on\-failure, Never=no.
+.SS sdme kube delete [\-\-force] \fIname\fR
+Stop and remove a kube pod container, then remove its rootfs.
+Refuses to delete non\-kube containers unless
+.B \-\-force
+is given.
 .SS sdme config get
 Show current configuration values.
 .SS sdme config apparmor\-profile
@@ -708,6 +775,8 @@ user namespace isolation
 .RB ( USERNS ),
 OCI volumes
 .RB ( OCI_VOLUMES ),
+kube pod metadata
+.RB ( KUBE ", " KUBE_CONTAINERS ", " KUBE_YAML_HASH ),
 and security hardening
 .RB ( DROP_CAPS ", " ADD_CAPS ", " NO_NEW_PRIVS ", " READ_ONLY ", " SYSCALL_FILTER ", " APPARMOR_PROFILE ).
 .TP
@@ -945,6 +1014,23 @@ sdme pod new my\-pod
 sdme new \-\-pod=my\-pod \-r ubuntu db
 sdme new \-\-pod=my\-pod \-r ubuntu app
 # db and app can communicate via localhost
+.fi
+.RE
+.PP
+Create and start a Kubernetes pod from a YAML file:
+.PP
+.RS
+.nf
+sdme fs import ubuntu docker.io/ubuntu:24.04
+sdme kube apply \-f my\-pod.yaml \-\-base\-fs ubuntu
+.fi
+.RE
+.PP
+Delete a Kubernetes pod (stops container, removes rootfs):
+.PP
+.RS
+.nf
+sdme kube delete my\-pod
 .fi
 .RE
 .PP

@@ -101,8 +101,9 @@ spec:
 1. **Parse & Validate** — reads the YAML, validates container names, volume references, etc.
 2. **Pull Images** — downloads each container's OCI image from the registry
 3. **Build Combined Rootfs** — copies the base rootfs, then places each container's OCI rootfs under `/oci/apps/{name}/root` with a generated systemd service unit
-4. **Create Container** — creates an sdme container using the combined rootfs
-5. **Start & Boot** — boots the container; all container services start automatically
+4. **Generate Volume Mounts** — if the pod has volume mounts, generates a `sdme-kube-volumes.service` oneshot unit that bind-mounts `/oci/volumes/{name}` into each app's root directory; app services depend on this unit via `After=`/`Requires=`
+5. **Create Container** — creates an sdme container using the combined rootfs (hostPath volumes become nspawn `--bind=` mounts; emptyDir volumes live inside the rootfs)
+6. **Start & Boot** — boots the container; the volume mount service runs first, then all app services start
 
 ### Filesystem Layout
 
@@ -121,6 +122,15 @@ spec:
 │       └── volumes
 └── volumes/
     └── cache-vol/          # emptyDir shared volume
+
+/etc/systemd/system/
+├── sdme-oci-nginx.service
+├── sdme-oci-redis.service
+├── sdme-kube-volumes.service    # oneshot: bind-mounts volumes
+└── multi-user.target.wants/
+    ├── sdme-oci-nginx.service -> ...
+    ├── sdme-oci-redis.service -> ...
+    └── sdme-kube-volumes.service -> ...
 ```
 
 ### Generated Service Units
@@ -129,8 +139,10 @@ Each container gets a systemd service `sdme-oci-{name}.service`:
 
 ```ini
 [Unit]
-Description=sdme kube container: nginx (docker.io/nginx:latest)
+Description=OCI app: nginx (docker.io/nginx:latest)
 After=network.target
+After=sdme-kube-volumes.service
+Requires=sdme-kube-volumes.service
 
 [Service]
 Type=exec
@@ -145,6 +157,32 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 ```
+
+The `After=`/`Requires=` lines are only present when the pod has volume
+mounts.
+
+When shared volumes exist, a `sdme-kube-volumes.service` oneshot unit is
+also generated:
+
+```ini
+[Unit]
+Description=Kube volume mounts
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/mount --bind /oci/volumes/shared-data /oci/apps/nginx/root/usr/share/nginx/html
+ExecStart=/bin/mount --bind /oci/volumes/shared-data /oci/apps/content-gen/root/data
+
+[Install]
+WantedBy=multi-user.target
+```
+
+This runs `mount --bind` in the container's PID 1 mount namespace before
+app services start, so all services see the same shared directories.
+Read-only mounts get an additional `remount,ro,bind` line.
 
 ## CLI Reference
 

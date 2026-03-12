@@ -49,11 +49,11 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme create` | Create a new container (overlayfs dirs + state file). Security flags: `--strict`, `--hardened`, `--drop-capability`, `--capability`, `--no-new-privileges`, `--read-only`, `--system-call-filter`, `--apparmor-profile`. OCI flags: `--no-oci-ports`, `--no-oci-volumes`, `--oci-env KEY=VALUE` (sets env vars for the OCI app service via the `/oci/apps/{name}/env` file, separate from `-e` which sets nspawn env vars) |
 | `sdme start` | Start one or more containers (installs/updates template unit, starts via D-Bus). Supports `--all` to start all stopped containers |
 | `sdme join` | Enter a running container (`machinectl shell`). `--start` starts the container first if stopped |
-| `sdme exec` | Run a one-off command in a running container (`machinectl shell`). `--oci` runs the command inside `/oci/apps/{name}/root` via `systemd-run --property=RootDirectory=/oci/apps/{name}/root` |
+| `sdme exec` | Run a one-off command in a running container (`machinectl shell`). `--oci` runs the command inside `/oci/apps/{name}/root` via `systemd-run --property=RootDirectory=/oci/apps/{name}/root`. `--oci-app NAME` targets a specific app by name (implies `--oci`; required for multi-container kube pods) |
 | `sdme stop` | Graceful shutdown via `SIGRTMIN+4` (default), `--term` for terminate, `--kill` for force-kill |
 | `sdme rm` | Remove containers (stops if running, deletes state + files) |
-| `sdme ps` | List containers with status, health, OS, pod/OCI-pod/userns/binds (if any) |
-| `sdme logs` | View container logs (exec's `journalctl`). `--oci` shows the OCI app service logs (`journalctl -u sdme-oci-{name}.service` inside the container) |
+| `sdme ps` | List containers with status, health, OS, pod/OCI-pod/kube/userns/binds (if any) |
+| `sdme logs` | View container logs (exec's `journalctl`). `--oci` shows the OCI app service logs (`journalctl -u sdme-oci-{name}.service` inside the container). `--oci-app NAME` targets a specific app by name (implies `--oci`; required for multi-container kube pods) |
 | `sdme fs import` | Import a rootfs from a directory, tarball, URL, OCI image, or QCOW2 disk image |
 | `sdme fs ls` | List imported root filesystems |
 | `sdme fs rm` | Remove imported root filesystems |
@@ -63,6 +63,9 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme pod new` | Create a new pod (shared network namespace) |
 | `sdme pod ls` | List pods |
 | `sdme pod rm` | Remove pods |
+| `sdme kube apply` | Create, start, and enter a container from a Kubernetes Pod YAML (`-f file`, `--base-fs` required) |
+| `sdme kube create` | Create a container from a Kubernetes Pod YAML (no start) |
+| `sdme kube delete` | Stop and remove a kube container and its rootfs (`--force` allows non-kube containers) |
 | `sdme enable` | Enable containers to auto-start on boot |
 | `sdme disable` | Disable container auto-start |
 | `sdme config apparmor-profile` | Print the default AppArmor profile for sdme containers |
@@ -91,6 +94,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `src/mounts.rs` | Bind mount (`BindConfig`) and environment variable (`EnvConfig`) configuration |
 | `src/network.rs` | Network configuration validation and state serialization |
 | `src/security.rs` | Security hardening: `SecurityConfig` (capabilities, seccomp, no-new-privileges, read-only, AppArmor), state file roundtrip, nspawn arg generation, validation |
+| `src/kube.rs` | Kubernetes Pod YAML parsing (v1 Pod, apps/v1 Deployment), multi-container orchestration, service unit generation, kube delete |
 | `src/pod.rs` | Pod (shared network namespace) lifecycle: create, list, remove, runtime netns management |
 | `src/drop_privs/` | Privilege dropping via minimal static ELF binaries (x86_64 and aarch64 machine code emitters, ELF header construction) |
 
@@ -109,6 +113,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 - `serde_json`: JSON parsing (OCI image manifests)
 - `ureq`: HTTP client for URL downloads and OCI registry pulling (blocking, rustls TLS)
 - `sha2`: SHA-256 hashing (OCI digest verification)
+- `serde_yml`: YAML parsing (Kubernetes Pod manifests)
 - `clap_complete`: shell completion generation (Bash, Fish, Zsh)
 
 ### External Dependencies
@@ -144,6 +149,7 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
 - **Security hardening**: Three tiers of security: (1) Individual flags: `--drop-capability` / `--capability` (add/drop Linux capabilities, validated against `KNOWN_CAPS`, accepts with/without `CAP_` prefix), `--no-new-privileges` (blocks privilege escalation via setuid/file capabilities), `--read-only` (mounts rootfs read-only), `--system-call-filter` (seccomp filters, `@group` or `~@group` syntax), `--apparmor-profile` (applied as `AppArmorProfile=` in the systemd unit drop-in, not as an nspawn flag). (2) `--hardened`: enables user namespace isolation, private network, `--no-new-privileges`, and drops capabilities from the `hardened_drop_caps` config key (default: `CAP_SYS_PTRACE,CAP_NET_RAW,CAP_SYS_RAWIO,CAP_SYS_BOOT`). (3) `--strict`: implies `--hardened` plus Docker-equivalent cap drops (retains only Docker's ~14 caps + `CAP_SYS_ADMIN` for systemd), seccomp filters (`~@cpu-emulation,~@debug,~@obsolete,~@raw-io`), and the `sdme-default` AppArmor profile. Constants in `security.rs`: `HARDENED_DROP_CAPS`, `STRICT_DROP_CAPS`, `STRICT_SYSCALL_FILTERS`, `STRICT_APPARMOR_PROFILE`, `APPARMOR_PROFILE` (the profile text). All security options are stored in the state file (`DROP_CAPS`, `ADD_CAPS`, `NO_NEW_PRIVS`, `READ_ONLY`, `SYSCALL_FILTER`, `APPARMOR_PROFILE`) and read back at start time. Managed by `SecurityConfig` in `src/security.rs`. `sdme config apparmor-profile` dumps the default AppArmor profile to stdout for installation.
 - **Interrupt handling**: a global `INTERRUPTED` flag (`src/lib.rs`) set by a POSIX `SIGINT` handler (installed without `SA_RESTART`). Import loops, boot-wait loops, and build operations check it for clean Ctrl+C cancellation. Second Ctrl+C force-kills the process. Cleanup paths (e.g. container removal after boot failure in `sdme new`) call `reset_interrupt()` to clear the flag and re-install the handler, ensuring cleanup code that also checks `check_interrupted()` is not short-circuited by a prior Ctrl+C.
 - **Build COPY restrictions**: `sdme fs build` COPY writes to the overlayfs upper layer while stopped. Destinations under tmpfs-mounted dirs (`/tmp`, `/run`, `/dev/shm`) or opaque dirs are rejected. Validation in `check_shadowed_dest()` (`src/build.rs`); errors include config file path and line number.
+- **Kubernetes Pod YAML**: `sdme kube` accepts `kind: Pod` (v1) and `kind: Deployment` (apps/v1; extracts pod template). Multi-container pods run as a single nspawn container with one systemd service (`sdme-oci-{name}.service`) per app container; all containers share the network namespace and can communicate via localhost. Rootfs is named `kube-{podname}` and built atomically via a staging directory. K8s command/args semantics: `command` overrides Docker ENTRYPOINT, `args` overrides Docker CMD. Volumes: emptyDir (directories at `/oci/volumes/{name}` inside the rootfs, bind-mounted into each app's root by a generated `sdme-kube-volumes.service` oneshot unit) and hostPath (nspawn `--bind=` mounts to `/oci/volumes/{name}`); no configMap/secret support. The volume mount service runs `mount --bind` in the container's PID 1 mount namespace before app services start (app units have `After=`/`Requires=sdme-kube-volumes.service`); read-only mounts get an additional `remount,ro,bind`. Ports are aggregated across all containers; `--private-network` is enabled when any ports are declared. Restart policy mapping: Always=always, OnFailure=on-failure, Never=no. State keys: `KUBE=yes`, `KUBE_CONTAINERS={csv}`, `KUBE_YAML_HASH={sha256}`. `kube delete` removes both the container and its kube rootfs. `sdme ps` shows a `kube:{container_names}` column for kube containers. For multi-container kube pods, `exec --oci` and `logs --oci` require `--oci-app NAME` to select which container to target; single-container pods auto-select the only app.
 - **Boot failure cleanup**: `sdme new` removes the just-created container on boot failure, join failure, or Ctrl+C. `sdme start` stops the container on boot failure or Ctrl+C (preserving it on disk for debugging). Both reset the interrupt flag before cleanup so that the stop/remove operations (which internally call `check_interrupted()`) can complete.
 - **Input sanitization**: sdme runs as root and handles untrusted input; hardening measures:
   - OCI tar paths: `..` rejected, leading `/` stripped (`sanitize_tar_path()` in `import/oci.rs`).
