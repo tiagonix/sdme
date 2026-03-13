@@ -42,6 +42,14 @@ pub struct Config {
     /// Docker Hub personal access token for authenticated pulls.
     #[serde(default)]
     pub docker_token: String,
+
+    /// OCI blob cache directory (empty = {datadir}/cache/oci).
+    #[serde(default)]
+    pub oci_cache_dir: String,
+
+    /// Maximum OCI blob cache size (e.g. "10G"). "0" disables the cache.
+    #[serde(default = "default_oci_cache_max_size")]
+    pub oci_cache_max_size: String,
 }
 
 fn default_interactive() -> bool {
@@ -68,6 +76,10 @@ fn default_hardened_drop_caps() -> String {
     crate::security::HARDENED_DROP_CAPS.join(",")
 }
 
+fn default_oci_cache_max_size() -> String {
+    "10G".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -80,6 +92,8 @@ impl Default for Config {
             default_base_fs: String::new(),
             docker_user: String::new(),
             docker_token: String::new(),
+            oci_cache_dir: String::new(),
+            oci_cache_max_size: default_oci_cache_max_size(),
         }
     }
 }
@@ -111,6 +125,8 @@ impl Config {
             }
         };
         println!("docker_token = {docker_token_display}");
+        println!("oci_cache_dir = {}", self.oci_cache_dir);
+        println!("oci_cache_max_size = {}", self.oci_cache_max_size);
     }
 }
 

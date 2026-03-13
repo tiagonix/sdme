@@ -611,6 +611,7 @@ fn resolve_manifest(
 // --- Layer download + extraction ---
 
 /// Download a blob to a file while verifying its SHA-256 digest.
+/// If a cache is provided and the blob is already cached, copies from cache instead.
 fn download_blob(
     agent: &ureq::Agent,
     registry: &str,
@@ -618,8 +619,15 @@ fn download_blob(
     digest: &str,
     dest: &Path,
     token: Option<&str>,
+    cache: &crate::oci::cache::BlobCache,
     verbose: bool,
 ) -> Result<()> {
+    // Check cache first.
+    if let Some(cached_path) = cache.get(digest, verbose) {
+        fs::copy(&cached_path, dest)
+            .with_context(|| format!("failed to copy cached blob to {}", dest.display()))?;
+        return Ok(());
+    }
     let url = format!("https://{registry}/v2/{repository}/blobs/{digest}");
     if verbose {
         eprintln!("downloading blob: {digest}");
@@ -690,6 +698,13 @@ fn download_blob(
         bail!("digest mismatch for blob: expected {digest}, got {computed}");
     }
 
+    // Store in cache (best-effort).
+    if let Err(e) = cache.put(digest, dest, verbose) {
+        if verbose {
+            eprintln!("cache: failed to store {digest}: {e:#}");
+        }
+    }
+
     Ok(())
 }
 
@@ -703,6 +718,7 @@ pub(crate) fn import_registry_image(
     staging_dir: &Path,
     rootfs_dir: &Path,
     docker_credentials: Option<(&str, &str)>,
+    cache: &crate::oci::cache::BlobCache,
     verbose: bool,
 ) -> Result<Option<OciContainerConfig>> {
     eprintln!("pulling {image}");
@@ -807,6 +823,7 @@ pub(crate) fn import_registry_image(
                 &layer.digest,
                 &temp_path,
                 token_ref,
+                cache,
                 verbose,
             )?;
 
@@ -1087,7 +1104,9 @@ mod tests {
         fs::create_dir_all(&rootfs_dir).unwrap();
 
         let image = ImageReference::parse("quay.io/centos-bootc/centos-bootc:stream10").unwrap();
-        import_registry_image(&image, &dest, &rootfs_dir, None, true).unwrap();
+        let cfg = crate::config::Config::default();
+        let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
+        import_registry_image(&image, &dest, &rootfs_dir, None, &cache, true).unwrap();
 
         // Basic sanity checks.
         assert!(dest.is_dir());

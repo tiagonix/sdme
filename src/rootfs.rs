@@ -274,6 +274,11 @@ mod tests {
 
     /// Helper to import a rootfs in tests, bypassing systemd checks.
     fn test_import(datadir: &Path, source: &str, name: &str) -> Result<()> {
+        let cfg = crate::config::Config {
+            oci_cache_max_size: "0".to_string(),
+            ..crate::config::Config::default()
+        };
+        let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
         import(
             datadir,
             &ImportOptions {
@@ -286,6 +291,7 @@ mod tests {
                 oci_mode: OciMode::Auto,
                 base_fs: None,
                 docker_credentials: None,
+                cache: &cache,
             },
         )
     }

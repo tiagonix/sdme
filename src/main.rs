@@ -6,8 +6,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    config, confirm, containers, kube, pod, rootfs, security, system_check, systemd, BindConfig,
-    EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
+    config, confirm, containers, kube, oci, pod, rootfs, security, system_check, systemd,
+    BindConfig, EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
 };
 
 #[derive(Parser)]
@@ -383,6 +383,7 @@ enum Command {
     /// Manage Kubernetes-compatible pods (experimental)
     #[command(name = "kube", subcommand)]
     Kube(KubeCommand),
+
 }
 
 #[derive(Subcommand)]
@@ -494,6 +495,9 @@ EXAMPLE:
         #[arg(short, long)]
         force: bool,
     },
+    /// Manage the OCI blob cache
+    #[command(subcommand)]
+    Cache(CacheCommand),
 }
 
 #[derive(Subcommand)]
@@ -670,6 +674,20 @@ enum KubeConfigmapCommand {
         /// ConfigMap names
         #[arg(required = true)]
         names: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCommand {
+    /// Show cache location, size, and blob count
+    Info,
+    /// List cached blobs
+    Ls,
+    /// Clean up the cache
+    Clean {
+        /// Remove all cached blobs
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -1197,6 +1215,8 @@ fn main() -> Result<()> {
     let interactive =
         cfg.interactive && !cli.verbose && unsafe { libc::isatty(libc::STDIN_FILENO) != 0 };
 
+    let blob_cache = oci::cache::BlobCache::from_config(&cfg)?;
+
     match cli.command {
         Command::Config(cmd) => match cmd {
             ConfigCommand::Get => {
@@ -1267,6 +1287,21 @@ fn main() -> Result<()> {
                     }
                     "docker_token" => {
                         cfg.docker_token = value;
+                    }
+                    "oci_cache_dir" => {
+                        if !value.is_empty() {
+                            let path = PathBuf::from(&value);
+                            if !path.is_absolute() {
+                                bail!("oci_cache_dir must be an absolute path: {value}");
+                            }
+                        }
+                        cfg.oci_cache_dir = value;
+                    }
+                    "oci_cache_max_size" => {
+                        sdme::parse_size(&value).with_context(|| {
+                            format!("invalid oci_cache_max_size: {value}")
+                        })?;
+                        cfg.oci_cache_max_size = value;
                     }
                     _ => bail!("unknown config key: {key}"),
                 }
@@ -1872,6 +1907,7 @@ fn main() -> Result<()> {
                     &yaml_content,
                     base_fs,
                     docker_creds_ref,
+                    &blob_cache,
                     pod.as_deref(),
                     oci_pod.as_deref(),
                     cli.verbose,
@@ -1931,6 +1967,7 @@ fn main() -> Result<()> {
                     &yaml_content,
                     base_fs,
                     docker_creds_ref,
+                    &blob_cache,
                     pod.as_deref(),
                     oci_pod.as_deref(),
                     cli.verbose,
@@ -2078,6 +2115,7 @@ fn main() -> Result<()> {
                         oci_mode,
                         base_fs: effective_base_fs.as_deref(),
                         docker_credentials: docker_creds_ref,
+                        cache: &blob_cache,
                     },
                 )?;
                 println!("{name}");
@@ -2160,6 +2198,59 @@ fn main() -> Result<()> {
                 )?;
                 println!("{name}");
             }
+            RootfsCommand::Cache(cmd) => match cmd {
+                CacheCommand::Info => {
+                    let info = blob_cache.info()?;
+                    println!("directory = {}", info.dir.display());
+                    println!("blobs = {}", info.blob_count);
+                    println!(
+                        "size = {} ({})",
+                        oci::cache::format_size(info.total_size),
+                        info.total_size
+                    );
+                    println!(
+                        "max_size = {} ({})",
+                        oci::cache::format_size(info.max_size),
+                        info.max_size
+                    );
+                    if !blob_cache.is_enabled() {
+                        println!("status = disabled");
+                    }
+                }
+                CacheCommand::Ls => {
+                    let entries = blob_cache.list()?;
+                    if entries.is_empty() {
+                        eprintln!("no cached blobs");
+                    } else {
+                        let digest_w = 19; // "sha256:" + 12 hex chars
+                        println!(
+                            "{:<digest_w$}  {:>10}  {}",
+                            "DIGEST", "SIZE", "LAST ACCESS"
+                        );
+                        for entry in &entries {
+                            let short = if entry.digest.len() > 19 {
+                                &entry.digest[..19]
+                            } else {
+                                &entry.digest
+                            };
+                            println!(
+                                "{:<digest_w$}  {:>10}  {}",
+                                short,
+                                oci::cache::format_size(entry.size),
+                                entry.last_access
+                            );
+                        }
+                    }
+                }
+                CacheCommand::Clean { all } => {
+                    let freed = blob_cache.clean(all, cli.verbose)?;
+                    if freed > 0 {
+                        eprintln!("freed {}", oci::cache::format_size(freed));
+                    } else {
+                        eprintln!("nothing to clean");
+                    }
+                }
+            },
         },
     }
 

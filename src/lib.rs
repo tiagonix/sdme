@@ -10,6 +10,7 @@ pub mod kube;
 pub mod mounts;
 pub mod names;
 pub mod network;
+pub mod oci;
 pub mod pod;
 pub mod rootfs;
 pub mod security;
@@ -420,6 +421,41 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Parse a human-readable size string (e.g. "10G", "512M") into bytes.
+///
+/// Accepts an integer followed by an optional suffix:
+/// - No suffix or `B` → bytes
+/// - `K` → kibibytes (1024)
+/// - `M` → mebibytes (1024²)
+/// - `G` → gibibytes (1024³)
+/// - `T` → tebibytes (1024⁴)
+///
+/// Returns 0 for the input `"0"`.
+pub fn parse_size(s: &str) -> Result<u64> {
+    if s.is_empty() {
+        bail!("size value cannot be empty");
+    }
+    let (num_str, suffix) = if s.ends_with(|c: char| c.is_ascii_alphabetic()) {
+        let (n, s) = s.split_at(s.len() - 1);
+        (n, s)
+    } else {
+        (s, "")
+    };
+    let num: u64 = num_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid size value '{s}': expected <number>[B|K|M|G|T]"))?;
+    let multiplier: u64 = match suffix {
+        "" | "B" => 1,
+        "K" => 1024,
+        "M" => 1024 * 1024,
+        "G" => 1024 * 1024 * 1024,
+        "T" => 1024 * 1024 * 1024 * 1024,
+        _ => bail!("invalid size suffix '{suffix}': expected B, K, M, G, or T"),
+    };
+    num.checked_mul(multiplier)
+        .with_context(|| format!("size value overflows: {s}"))
+}
+
 pub fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("container name cannot be empty");
@@ -468,6 +504,46 @@ mod tests {
         std::env::set_var("SUDO_USER", "root");
         assert!(sudo_user().is_none());
         std::env::remove_var("SUDO_USER");
+    }
+
+    // --- parse_size tests ---
+
+    #[test]
+    fn test_parse_size_bytes() {
+        assert_eq!(parse_size("0").unwrap(), 0);
+        assert_eq!(parse_size("1024").unwrap(), 1024);
+        assert_eq!(parse_size("100B").unwrap(), 100);
+    }
+
+    #[test]
+    fn test_parse_size_kilo() {
+        assert_eq!(parse_size("1K").unwrap(), 1024);
+        assert_eq!(parse_size("10K").unwrap(), 10240);
+    }
+
+    #[test]
+    fn test_parse_size_mega() {
+        assert_eq!(parse_size("1M").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size("512M").unwrap(), 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_size_giga() {
+        assert_eq!(parse_size("1G").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_size("10G").unwrap(), 10 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_size_tera() {
+        assert_eq!(parse_size("1T").unwrap(), 1024u64 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_size_invalid() {
+        assert!(parse_size("").is_err());
+        assert!(parse_size("abc").is_err());
+        assert!(parse_size("10X").is_err());
+        assert!(parse_size("M").is_err());
     }
 
     // --- ResourceLimits tests ---

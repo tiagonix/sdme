@@ -117,6 +117,8 @@ pub struct ImportOptions<'a> {
     pub base_fs: Option<&'a str>,
     /// Docker Hub credentials `(user, token)` for authenticated pulls.
     pub docker_credentials: Option<(&'a str, &'a str)>,
+    /// OCI blob cache for registry downloads.
+    pub cache: &'a crate::oci::cache::BlobCache,
 }
 
 // --- Source detection ---
@@ -1611,6 +1613,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         oci_mode,
         base_fs,
         docker_credentials,
+        cache,
     } = *opts;
 
     validate_name(name)?;
@@ -1657,6 +1660,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                 &staging_dir,
                 &rootfs_dir,
                 docker_credentials,
+                cache,
                 verbose,
             ) {
                 Ok(config) => {
@@ -1987,6 +1991,11 @@ pub(crate) mod tests {
         // Acquire the interrupt lock to prevent concurrent InterruptGuard
         // tests from poisoning check_interrupted() calls inside run().
         let _lock = INTERRUPT_LOCK.lock().unwrap();
+        let cfg = crate::config::Config {
+            oci_cache_max_size: "0".to_string(),
+            ..crate::config::Config::default()
+        };
+        let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
         run(
             datadir,
             &ImportOptions {
@@ -1999,6 +2008,7 @@ pub(crate) mod tests {
                 oci_mode: OciMode::Auto,
                 base_fs: None,
                 docker_credentials: None,
+                cache: &cache,
             },
         )
     }
@@ -3607,6 +3617,11 @@ pub(crate) mod tests {
         // Import through run(): this goes through the OCI tarball path,
         // not the registry path, so oci_config won't be set. The import
         // should succeed and extract the layer contents.
+        let cfg = crate::config::Config {
+            oci_cache_max_size: "0".to_string(),
+            ..crate::config::Config::default()
+        };
+        let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
         run(
             tmp.path(),
             &ImportOptions {
@@ -3619,6 +3634,7 @@ pub(crate) mod tests {
                 oci_mode: OciMode::Auto,
                 base_fs: None,
                 docker_credentials: None,
+                cache: &cache,
             },
         )
         .unwrap();

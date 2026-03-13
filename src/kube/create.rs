@@ -20,6 +20,7 @@ pub fn kube_create(
     yaml_content: &str,
     base_fs: &str,
     docker_credentials: Option<(&str, &str)>,
+    cache: &crate::oci::cache::BlobCache,
     pod: Option<&str>,
     oci_pod: Option<&str>,
     verbose: bool,
@@ -263,6 +264,7 @@ pub fn kube_create(
                 &app_root,
                 &rootfs_dir,
                 docker_credentials,
+                cache,
                 verbose,
             )
             .with_context(|| format!("failed to pull image for container '{}'", kc.name))?
