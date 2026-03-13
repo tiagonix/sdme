@@ -171,16 +171,34 @@ from `test/scripts/nix/container.nix`.
 Eight-level progression from basic lifecycle to a full multi-service stack.
 All require a base-fs imported (e.g. `ubuntu`). Run in order:
 
-| Script | Level | Tests | What it covers |
-|--------|-------|-------|----------------|
-| `verify-kube-L1-basic.sh` | L1 | ~6 | YAML validation, single-container pod, command override, kube delete, shared emptyDir, ps metadata |
-| `verify-kube-L2-spec.sh` | L2 | ~12 | Pod spec features: terminationGracePeriodSeconds, securityContext, initContainers, workingDir, resources, readinessProbe |
-| `verify-kube-L2-security.sh` | L2 | ~17 | Container securityContext: capabilities add/drop (including ALL), allowPrivilegeEscalation, readOnlyRootFilesystem, seccompProfile, appArmorProfile, per-container runAsUser/runAsGroup |
-| `verify-kube-L3-volumes.sh` | L3 | ~39 | Volumes: secret + configMap create/ls/rm, all-keys mount, projected items, defaultMode, env valueFrom, envFrom (configMapRef, secretRef with prefix), read-only mounts, missing-resource errors, PVC persistence |
-| `verify-kube-L3-secrets.sh` | L3 | ~16 | Secret volumes: create/ls/rm lifecycle, all-keys mount, projected items, defaultMode permissions, runtime access, missing-secret errors |
-| `verify-kube-L4-networking.sh` | L4 | ~6 | Inter-container localhost networking: nginx + busybox, HTTP fetch across containers |
-| `verify-kube-L5-redis.sh` | L5 | ~6 | Real service data round-trip: redis PING/PONG, SET/GET via raw protocol |
-| `verify-kube-L6-gitea.sh` | L6 | ~15 | Full 3-container app stack: Gitea + MySQL + Nginx with API validation |
+| Script                         | Level | Tests |
+|--------------------------------|-------|-------|
+| `verify-kube-L1-basic.sh`     | L1    | ~6    |
+| `verify-kube-L2-spec.sh`      | L2    | ~12   |
+| `verify-kube-L2-security.sh`  | L2    | ~17   |
+| `verify-kube-L3-volumes.sh`   | L3    | ~39   |
+| `verify-kube-L3-secrets.sh`   | L3    | ~16   |
+| `verify-kube-L4-networking.sh`| L4    | ~6    |
+| `verify-kube-L5-redis.sh`     | L5    | ~6    |
+| `verify-kube-L6-gitea.sh`     | L6    | ~15   |
+
+- **L1-basic**: YAML validation, single-container pod, command
+  override, kube delete, shared emptyDir, ps metadata.
+- **L2-spec**: terminationGracePeriodSeconds, securityContext,
+  initContainers, workingDir, resources, readinessProbe.
+- **L2-security**: capabilities add/drop (including ALL),
+  allowPrivilegeEscalation, readOnlyRootFilesystem,
+  seccompProfile, appArmorProfile, per-container runAsUser.
+- **L3-volumes**: secret + configMap create/ls/rm, all-keys
+  mount, projected items, defaultMode, env valueFrom, envFrom,
+  read-only mounts, missing-resource errors, PVC persistence.
+- **L3-secrets**: create/ls/rm lifecycle, all-keys mount,
+  projected items, defaultMode, runtime access, missing errors.
+- **L4-networking**: inter-container localhost networking,
+  nginx + busybox, HTTP fetch across containers.
+- **L5-redis**: redis PING/PONG, SET/GET via raw protocol.
+- **L6-gitea**: 3-container app stack (Gitea + MySQL + Nginx)
+  with API validation.
 
 ```bash
 sudo ./test/scripts/verify-kube-L1-basic.sh --base-fs ubuntu

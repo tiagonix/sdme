@@ -429,10 +429,14 @@ destination directory.
 When importing an OCI image, sdme classifies it as either a **base OS
 image** or an **application image** based on the image config:
 
-| Classification    | Criteria                                          | Result                                      |
-|-------------------|---------------------------------------------------|---------------------------------------------|
-| Base OS image     | No entrypoint, shell default command, no ports    | Extracted as a first-class sdme rootfs       |
-| Application image | Has entrypoint, non-shell command, or exposed ports | Placed under `/oci/apps/{name}/root` inside a base rootfs |
+| Classification    | Criteria                              |
+|-------------------|---------------------------------------|
+| Base OS image     | No entrypoint, shell default, no ports |
+| Application image | Has entrypoint, non-shell cmd, or ports |
+
+- **Base OS image**: extracted as a first-class sdme rootfs.
+- **Application image**: placed under `/oci/apps/{name}/root`
+  inside a base rootfs.
 
 Application images require a base rootfs specified with `--base-fs`:
 
@@ -469,31 +473,31 @@ name for non-registry imports. Stored as `OCI_APP={name}` in the
 container state file at create time.
 
 ```
-  +------------------------------------------------------+
-  |                     HOST SYSTEM                      |
-  |         kernel . systemd . D-Bus . machined          |
-  |                        |                             |
-  |           sdme@name.service (nspawn)                 |
-  |      +------------------+----------------------+     |
-  |      |          CAPSULE (container)            |     |
-  |      |                                         |     |
-  |      |  systemd . D-Bus . journald             |     |
-  |      |                                         |     |
-  |      |  +-----------------------------------+  |     |
-  |      |  |  sdme-oci-{name}.service           |  |     |
-  |      |  |  RootDirectory=/oci/apps/{name}/root |  |  |
-  |      |  |                                   |  |     |
-  |      |  |  +-----------------------------+  |  |     |
-  |      |  |  |     OCI process             |  |  |     |
-  |      |  |  |   (nginx, mysql, ...)       |  |  |     |
-  |      |  |  +-----------------------------+  |  |     |
-  |      |  +-----------------------------------+  |     |
-  |      |                                         |     |
-  |      |  /oci/apps/{name}/env     (env vars)    |     |
-  |      |  /oci/apps/{name}/ports   (ports)      |     |
-  |      |  /oci/apps/{name}/volumes (volumes)    |     |
-  |      +-----------------------------------------+     |
-  +------------------------------------------------------+
+  +------------------------------------------------------------+
+  |                       HOST SYSTEM                          |
+  |           kernel . systemd . D-Bus . machined              |
+  |                          |                                 |
+  |             sdme@name.service (nspawn)                     |
+  |      +----------------------------------------------+      |
+  |      |           CAPSULE (container)                |      |
+  |      |                                              |      |
+  |      |  systemd . D-Bus . journald                  |      |
+  |      |                                              |      |
+  |      |  +----------------------------------------+  |      |
+  |      |  |  sdme-oci-{name}.service               |  |      |
+  |      |  |  RootDirectory=/oci/apps/{name}/root   |  |      |
+  |      |  |                                        |  |      |
+  |      |  |  +----------------------------------+  |  |      |
+  |      |  |  |      OCI process                 |  |  |      |
+  |      |  |  |    (nginx, mysql, ...)           |  |  |      |
+  |      |  |  +----------------------------------+  |  |      |
+  |      |  +----------------------------------------+  |      |
+  |      |                                              |      |
+  |      |  /oci/apps/{name}/env      (env vars)        |      |
+  |      |  /oci/apps/{name}/ports    (ports)           |      |
+  |      |  /oci/apps/{name}/volumes  (volumes)         |      |
+  |      +----------------------------------------------+      |
+  +------------------------------------------------------------+
 ```
 
 The generated `sdme-oci-{name}.service` unit uses
@@ -594,7 +598,7 @@ against `etc/passwd` and `etc/group` inside the OCI rootfs:
 
 | Format            | Behavior                                            |
 |-------------------|-----------------------------------------------------|
-| `""`, `"root"`    | Root; isolate with uid=0 gid=0 (namespace isolation only) |
+| `""`, `"root"`    | Root; uid=0 gid=0 (namespace isolation only)        |
 | `"name"`          | Resolved via `etc/passwd` in OCI rootfs             |
 | `"uid"`           | Used directly; primary GID from passwd if found     |
 | `"name:group"`    | User from `etc/passwd`, group from `etc/group`      |
@@ -816,16 +820,16 @@ fixed 4-byte instructions.
 
 **Module layout:**
 
-| File                         | Purpose                                           |
-|------------------------------|---------------------------------------------------|
-| `src/elf.rs`                 | Shared `Arch` enum + ET_EXEC ELF builder          |
-| `src/isolate/mod.rs`        | Public API: `generate(Arch) -> Vec<u8>`           |
-| `src/isolate/x86_64.rs`     | x86_64 machine code emitter (PID/IPC ns + privs)  |
-| `src/isolate/aarch64.rs`    | AArch64 machine code emitter (PID/IPC ns + privs) |
-| `src/devfd_shim/mod.rs`     | Public API: `generate(Arch) -> Vec<u8>`           |
-| `src/devfd_shim/elf.rs`     | ET_DYN ELF builder with SysV hash table           |
-| `src/devfd_shim/x86_64.rs`  | x86_64 machine code emitter                       |
-| `src/devfd_shim/aarch64.rs` | AArch64 machine code emitter                      |
+| File                         | Purpose                             |
+|------------------------------|-------------------------------------|
+| `src/elf.rs`                 | Shared `Arch` enum + ELF builder    |
+| `src/isolate/mod.rs`         | Public API: `generate(Arch)`        |
+| `src/isolate/x86_64.rs`     | x86_64 emitter (PID/IPC ns + privs) |
+| `src/isolate/aarch64.rs`    | AArch64 emitter (PID/IPC ns + privs)|
+| `src/devfd_shim/mod.rs`     | Public API: `generate(Arch)`        |
+| `src/devfd_shim/elf.rs`     | ET_DYN ELF builder (SysV hash)      |
+| `src/devfd_shim/x86_64.rs`  | x86_64 emitter                      |
+| `src/devfd_shim/aarch64.rs` | AArch64 emitter                     |
 
 Both architecture modules use the same pattern: an `Asm` struct that emits
 machine code bytes, a label system for forward references, and a fixup pass
@@ -1075,59 +1079,62 @@ usage examples and CLI reference, see
 
 ### Supported Pod spec fields
 
-| Field | Description |
-|-------|-------------|
-| `containers[].image` | OCI image reference (pulled from registry) |
-| `containers[].name` | Container name (becomes service name) |
-| `containers[].command` | Override ENTRYPOINT |
-| `containers[].args` | Override CMD |
-| `containers[].env` | Per-container environment variables |
-| `containers[].env[].valueFrom` | Resolve from secretKeyRef or configMapKeyRef |
-| `containers[].ports` | Aggregated port forwarding (on private network) |
-| `containers[].volumeMounts` | Bind volumes into the container's rootfs |
-| `containers[].workingDir` | Override working directory |
-| `containers[].imagePullPolicy` | Always, IfNotPresent, or Never |
-| `containers[].resources` | MemoryMax, MemoryLow, CPUQuota, CPUWeight |
-| `containers[].readinessProbe` | Exec-based readiness check (ExecStartPre) |
-| `containers[].livenessProbe` | Exec-based (parsed; not yet enforced at runtime) |
-| `initContainers[]` | Run-to-completion containers before app containers |
-| `volumes` (emptyDir) | Shared directory between containers |
-| `volumes` (hostPath) | Mount host directory into the pod |
-| `volumes` (secret) | Populate from sdme kube secret (supports items, defaultMode) |
-| `volumes` (configMap) | Populate from sdme kube configmap (supports items, defaultMode) |
-| `volumes` (persistentVolumeClaim) | Host dir at {datadir}/volumes/{claimName} |
-| `restartPolicy` | Maps to systemd Restart= (Always/OnFailure/Never) |
-| `terminationGracePeriodSeconds` | Shutdown timeout for the container |
-| `securityContext.runAsUser` | Pod-level UID for all containers |
-| `securityContext.runAsGroup` | Pod-level GID for all containers |
-| `securityContext.runAsNonRoot` | Validates runAsUser is set and non-zero |
+| Field                            | Description                        |
+|----------------------------------|------------------------------------|
+| `containers[].image`             | OCI image reference                |
+| `containers[].name`              | Container name (service name)      |
+| `containers[].command`           | Override ENTRYPOINT                |
+| `containers[].args`              | Override CMD                       |
+| `containers[].env`               | Per-container env vars             |
+| `containers[].env[].valueFrom`   | secretKeyRef or configMapKeyRef    |
+| `containers[].ports`             | Port forwarding (private network)  |
+| `containers[].volumeMounts`      | Bind volumes into app rootfs       |
+| `containers[].workingDir`        | Override working directory         |
+| `containers[].imagePullPolicy`   | Always, IfNotPresent, or Never     |
+| `containers[].resources`         | Memory/CPU limits and weights      |
+| `containers[].readinessProbe`    | Exec-based (ExecStartPre)          |
+| `containers[].livenessProbe`     | Exec-based (parsed, not enforced)  |
+| `initContainers[]`               | Run-to-completion before app start |
+| `volumes` (emptyDir)             | Shared directory between apps      |
+| `volumes` (hostPath)             | Mount host directory into the pod  |
+| `volumes` (secret)               | From sdme kube secret              |
+| `volumes` (configMap)            | From sdme kube configmap           |
+| `volumes` (persistentVolumeClaim)| Host dir at {datadir}/volumes/     |
+| `restartPolicy`                  | Maps to systemd Restart=           |
+| `terminationGracePeriodSeconds`  | Shutdown timeout                   |
+| `securityContext.runAsUser`       | Pod-level UID for all containers   |
+| `securityContext.runAsGroup`      | Pod-level GID for all containers   |
+| `securityContext.runAsNonRoot`    | Validates runAsUser is non-zero    |
+
+Secret and configMap volumes support `items` for projected key
+paths and `defaultMode` for file permissions.
 
 ### Filesystem layout
 
 ```
 /oci/
-├── apps/
-│   ├── nginx/
-│   │   ├── root/           # nginx OCI rootfs
-│   │   ├── env             # environment variables
-│   │   ├── ports           # exposed ports
-│   │   └── volumes         # declared volumes
-│   └── redis/
-│       ├── root/           # redis OCI rootfs
-│       ├── env
-│       ├── ports
-│       └── volumes
-└── volumes/
-    └── cache-vol/          # emptyDir shared volume
+|-- apps/
+|   |-- nginx/
+|   |   |-- root/           # nginx OCI rootfs
+|   |   |-- env             # environment variables
+|   |   |-- ports           # exposed ports
+|   |   +-- volumes         # declared volumes
+|   +-- redis/
+|       |-- root/           # redis OCI rootfs
+|       |-- env
+|       |-- ports
+|       +-- volumes
++-- volumes/
+    +-- cache-vol/          # emptyDir shared volume
 
 /etc/systemd/system/
-├── sdme-oci-nginx.service
-├── sdme-oci-redis.service
-├── sdme-kube-volumes.service    # oneshot: bind-mounts volumes
-└── multi-user.target.wants/
-    ├── sdme-oci-nginx.service -> ...
-    ├── sdme-oci-redis.service -> ...
-    └── sdme-kube-volumes.service -> ...
+|-- sdme-oci-nginx.service
+|-- sdme-oci-redis.service
+|-- sdme-kube-volumes.service    # oneshot: bind-mounts volumes
++-- multi-user.target.wants/
+    |-- sdme-oci-nginx.service -> ...
+    |-- sdme-oci-redis.service -> ...
+    +-- sdme-kube-volumes.service -> ...
 ```
 
 ### Generated service units
@@ -1213,11 +1220,11 @@ Kube pods are tracked with additional state fields:
 
 sdme exposes three cgroup-based resource controls:
 
-| Flag                     | systemd property | Example                                |
-|--------------------------|------------------|----------------------------------------|
-| `--memory <size>`        | `MemoryMax=`     | `--memory 2G`                          |
-| `--cpus <count>`         | `CPUQuota=`      | `--cpus 0.5` (50%), `--cpus 2` (200%) |
-| `--cpu-weight <1-10000>` | `CPUWeight=`     | `--cpu-weight 100`                     |
+| Flag                     | systemd property | Example             |
+|--------------------------|------------------|---------------------|
+| `--memory <size>`        | `MemoryMax=`     | `--memory 2G`       |
+| `--cpus <count>`         | `CPUQuota=`      | `--cpus 0.5` (50%) |
+| `--cpu-weight <1-10000>` | `CPUWeight=`     | `--cpu-weight 100`  |
 
 These flags are available on `sdme create`, `sdme new`, and `sdme set`.
 They are applied via a systemd drop-in file (`limits.conf`) installed
@@ -1257,19 +1264,33 @@ pipe-separated) and reconstituted into nspawn arguments on every start.
 
 sdme stores its settings in a TOML file at `~/.config/sdme/sdmerc`:
 
-| Setting                   | Default                              | Description                                                            |
-|---------------------------|--------------------------------------|------------------------------------------------------------------------|
-| `interactive`             | `true`                               | Enable interactive prompts                                             |
-| `datadir`                 | `/var/lib/sdme`                      | Root directory for all container and rootfs data                       |
-| `boot_timeout`            | `60`                                 | Seconds to wait for container boot before giving up                    |
-| `join_as_sudo_user`       | `true`                               | Join host-rootfs containers as `$SUDO_USER` instead of root            |
-| `host_rootfs_opaque_dirs` | `/etc/systemd/system,/var/log`       | Default opaque dirs for host-rootfs containers (empty string disables) |
-| `hardened_drop_caps`      | `CAP_SYS_PTRACE,CAP_NET_RAW,...`     | Comma-separated capabilities dropped by `--hardened`                   |
-| `default_base_fs`         | (empty)                              | Default base rootfs for OCI application images                         |
-| `docker_user`             | (empty)                              | Docker Hub username for authenticated pulls                            |
-| `docker_token`            | (empty)                              | Docker Hub personal access token for authenticated pulls               |
-| `oci_cache_dir`           | (empty = `{datadir}/cache/oci`)      | OCI blob cache directory                                               |
-| `oci_cache_max_size`      | `10G`                                | Maximum OCI blob cache size (`0` disables the cache)                   |
+| Setting                   | Default                          |
+|---------------------------|----------------------------------|
+| `interactive`             | `true`                           |
+| `datadir`                 | `/var/lib/sdme`                  |
+| `boot_timeout`            | `60`                             |
+| `join_as_sudo_user`       | `true`                           |
+| `host_rootfs_opaque_dirs` | `/etc/systemd/system,/var/log`   |
+| `hardened_drop_caps`      | `CAP_SYS_PTRACE,CAP_NET_RAW,...` |
+| `default_base_fs`         | (empty)                          |
+| `docker_user`             | (empty)                          |
+| `docker_token`            | (empty)                          |
+| `oci_cache_dir`           | (empty = `{datadir}/cache/oci`)  |
+| `oci_cache_max_size`      | `10G`                            |
+
+- `interactive`: enable interactive prompts.
+- `datadir`: root directory for all container and rootfs data.
+- `boot_timeout`: seconds to wait for container boot.
+- `join_as_sudo_user`: join host-rootfs containers as
+  `$SUDO_USER` instead of root.
+- `host_rootfs_opaque_dirs`: default opaque dirs for host-rootfs
+  containers (empty string disables).
+- `hardened_drop_caps`: capabilities dropped by `--hardened`.
+- `default_base_fs`: default base rootfs for OCI app images.
+- `docker_user`: Docker Hub username for authenticated pulls.
+- `docker_token`: Docker Hub personal access token.
+- `oci_cache_dir`: OCI blob cache directory.
+- `oci_cache_max_size`: max cache size (`0` disables).
 
 Settings are read with `sdme config get` and written with
 `sdme config set <key> <value>`.

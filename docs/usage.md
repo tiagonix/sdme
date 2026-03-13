@@ -233,14 +233,22 @@ you want from it, and each one gets its own overlayfs upper layer.
 sdme auto-detects the source type. Here are the six options and when to
 use each:
 
-| Source | Example | When to use |
-|--------|---------|-------------|
-| OCI registry | `docker.io/ubuntu:24.04` | Easiest path; any distro on Docker Hub or Quay |
-| OCI tarball | `image.oci.tar.xz` | Local OCI image exported as a tarball (detected by `oci-layout` file) |
-| Directory | `/tmp/ubuntu` | debootstrap, custom builds |
-| Tarball | `rootfs.tar.gz` | Pre-built archives (auto-detects gz/bz2/xz/zstd) |
-| URL | `https://...rootfs.tar.xz` | Remote tarballs, cloud image URLs |
-| QCOW2 | `cloud-image.qcow2` | Cloud images (requires `qemu-nbd`) |
+| Source       | Example                    |
+|--------------|----------------------------|
+| OCI registry | `docker.io/ubuntu:24.04`   |
+| OCI tarball  | `image.oci.tar.xz`        |
+| Directory    | `/tmp/ubuntu`              |
+| Tarball      | `rootfs.tar.gz`            |
+| URL          | `https://...rootfs.tar.xz` |
+| QCOW2        | `cloud-image.qcow2`       |
+
+- **OCI registry**: any distro on Docker Hub, Quay, or GHCR.
+- **OCI tarball**: local OCI image exported as a tarball
+  (detected by `oci-layout` file).
+- **Directory**: debootstrap output, custom builds.
+- **Tarball**: pre-built archives (auto-detects gz/bz2/xz/zstd).
+- **URL**: remote tarballs, cloud image URLs.
+- **QCOW2**: cloud disk images (requires `qemu-nbd`).
 
 The OCI registry path is what most people want. sdme speaks the OCI
 Distribution Spec natively, so no Docker or Podman is required:

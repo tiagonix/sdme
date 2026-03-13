@@ -169,18 +169,6 @@ entire current codebase was rewritten/reworked.
 | Mar 02 | +20      | -134    | -114   |
 | Mar 03 | +0       | -157    | -157   |
 
-### Largest Source Files
-
-| File                   | Lines | Purpose                    |
-|------------------------|-------|----------------------------|
-| src/import/mod.rs      | 3,317 | Rootfs import orchestration |
-| src/main.rs            | 1,646 | CLI + command dispatch      |
-| src/containers.rs      | 1,641 | Container lifecycle         |
-| src/systemd.rs         | 1,334 | D-Bus + unit management    |
-| src/import/registry.rs | 981   | OCI registry client         |
-| src/build.rs           | 987   | Rootfs build system         |
-| src/import/oci.rs      | 841   | OCI image extraction        |
-
 ## Test Coverage
 
 359 unique test functions across 24 test modules (every source file
