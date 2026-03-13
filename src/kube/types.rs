@@ -70,6 +70,8 @@ pub(crate) struct Container {
     pub(crate) liveness_probe: Option<Probe>,
     #[serde(default)]
     pub(crate) readiness_probe: Option<Probe>,
+    #[serde(default)]
+    pub(crate) security_context: Option<ContainerSecurityContext>,
 }
 
 #[derive(serde::Deserialize, Debug, Default)]
@@ -78,6 +80,48 @@ pub(crate) struct PodSecurityContext {
     pub(crate) run_as_user: Option<u32>,
     pub(crate) run_as_group: Option<u32>,
     pub(crate) run_as_non_root: Option<bool>,
+    pub(crate) seccomp_profile: Option<SeccompProfile>,
+    #[serde(alias = "appArmorProfile")]
+    pub(crate) apparmor_profile: Option<AppArmorProfile>,
+}
+
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ContainerSecurityContext {
+    pub(crate) run_as_user: Option<u32>,
+    pub(crate) run_as_group: Option<u32>,
+    pub(crate) run_as_non_root: Option<bool>,
+    pub(crate) capabilities: Option<Capabilities>,
+    pub(crate) allow_privilege_escalation: Option<bool>,
+    pub(crate) read_only_root_filesystem: Option<bool>,
+    pub(crate) seccomp_profile: Option<SeccompProfile>,
+    #[serde(alias = "appArmorProfile")]
+    pub(crate) apparmor_profile: Option<AppArmorProfile>,
+}
+
+#[derive(serde::Deserialize, Debug, Default)]
+pub(crate) struct Capabilities {
+    #[serde(default)]
+    pub(crate) add: Vec<String>,
+    #[serde(default)]
+    pub(crate) drop: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SeccompProfile {
+    #[serde(rename = "type")]
+    pub(crate) profile_type: String,
+    #[allow(dead_code)]
+    pub(crate) localhost_profile: Option<String>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AppArmorProfile {
+    #[serde(rename = "type")]
+    pub(crate) profile_type: String,
+    pub(crate) localhost_profile: Option<String>,
 }
 
 #[derive(serde::Deserialize, Debug, Default)]

@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 use super::types::*;
 use crate::import::shell_join;
 use crate::oci::registry::ImageReference;
+use crate::security;
 use crate::validate_name;
 
 // --- Parsed / validated plan ---
@@ -26,6 +27,10 @@ pub(crate) struct KubePlan {
     pub(crate) termination_grace_period: Option<u32>,
     pub(crate) run_as_user: Option<u32>,
     pub(crate) run_as_group: Option<u32>,
+    /// Pod-level seccomp profile type (validated).
+    pub(crate) seccomp_profile_type: Option<String>,
+    /// Pod-level AppArmor profile name (validated).
+    pub(crate) apparmor_profile: Option<String>,
 }
 
 #[derive(Debug)]
@@ -44,6 +49,22 @@ pub(crate) struct KubeContainer {
     /// Parsed but not yet enforced at runtime (future: watchdog integration).
     #[allow(dead_code)]
     pub(crate) liveness_probe: Option<Probe>,
+    /// Per-container user override (overrides pod-level).
+    pub(crate) run_as_user: Option<u32>,
+    /// Per-container group override (overrides pod-level).
+    pub(crate) run_as_group: Option<u32>,
+    /// Capabilities to add to the OCI bounding set.
+    pub(crate) add_caps: Vec<String>,
+    /// Capabilities to drop from the OCI bounding set ("ALL" drops everything).
+    pub(crate) drop_caps: Vec<String>,
+    /// If Some(true), allow privilege escalation (NoNewPrivileges=no).
+    pub(crate) allow_privilege_escalation: Option<bool>,
+    /// Make the app's root filesystem read-only.
+    pub(crate) read_only_root_filesystem: bool,
+    /// Seccomp SystemCallFilter lines.
+    pub(crate) syscall_filters: Vec<String>,
+    /// AppArmor profile name.
+    pub(crate) apparmor_profile: Option<String>,
 }
 
 #[derive(Debug)]
@@ -111,9 +132,27 @@ const KNOWN_CONTAINER_FIELDS: &[&str] = &[
     "resources",
     "livenessProbe",
     "readinessProbe",
+    "securityContext",
 ];
 
-const KNOWN_SECURITY_CONTEXT_FIELDS: &[&str] = &["runAsUser", "runAsGroup", "runAsNonRoot"];
+const KNOWN_SECURITY_CONTEXT_FIELDS: &[&str] = &[
+    "runAsUser",
+    "runAsGroup",
+    "runAsNonRoot",
+    "seccompProfile",
+    "appArmorProfile",
+];
+
+const KNOWN_CONTAINER_SECURITY_CONTEXT_FIELDS: &[&str] = &[
+    "runAsUser",
+    "runAsGroup",
+    "runAsNonRoot",
+    "capabilities",
+    "allowPrivilegeEscalation",
+    "readOnlyRootFilesystem",
+    "seccompProfile",
+    "appArmorProfile",
+];
 
 /// Walk raw YAML and warn about unrecognized fields.
 fn warn_unknown_fields(raw: &serde_yml::Value, path: &str, known: &[&str]) {
@@ -155,6 +194,17 @@ fn warn_pod_spec_unknown_fields(spec_value: &serde_yml::Value) {
                         &format!("spec.{list_key}[{cname}]"),
                         KNOWN_CONTAINER_FIELDS,
                     );
+                    // Check container-level securityContext fields.
+                    if let Some(csc) = c
+                        .as_mapping()
+                        .and_then(|m| m.get(serde_yml::Value::String("securityContext".into())))
+                    {
+                        warn_unknown_fields(
+                            csc,
+                            &format!("spec.{list_key}[{cname}].securityContext"),
+                            KNOWN_CONTAINER_SECURITY_CONTEXT_FIELDS,
+                        );
+                    }
                 }
             }
         }
@@ -306,6 +356,48 @@ fn build_readiness_exec(probe: &Probe) -> Result<String> {
     ))
 }
 
+/// Validate a K8s seccomp profile and return systemd syscall filter lines.
+fn validate_seccomp_profile(sp: &SeccompProfile, container_name: &str) -> Result<Vec<String>> {
+    match sp.profile_type.as_str() {
+        "RuntimeDefault" => Ok(security::STRICT_SYSCALL_FILTERS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()),
+        "Unconfined" => Ok(Vec::new()),
+        "Localhost" => bail!(
+            "container '{container_name}': seccompProfile type 'Localhost' is not supported \
+             (systemd SystemCallFilter cannot load custom seccomp BPF profiles)"
+        ),
+        other => bail!(
+            "container '{container_name}': unknown seccompProfile type: {other}"
+        ),
+    }
+}
+
+/// Validate a K8s AppArmor profile and return the profile name.
+fn validate_apparmor_k8s(ap: &AppArmorProfile, container_name: &str) -> Result<String> {
+    match ap.profile_type.as_str() {
+        "RuntimeDefault" => Ok(security::STRICT_APPARMOR_PROFILE.to_string()),
+        "Localhost" => {
+            let name = ap.localhost_profile.as_deref().unwrap_or("");
+            if name.is_empty() {
+                bail!(
+                    "container '{container_name}': appArmorProfile type 'Localhost' \
+                     requires localhostProfile to be set"
+                );
+            }
+            security::validate_apparmor_profile(name).with_context(|| {
+                format!("container '{container_name}': invalid appArmorProfile")
+            })?;
+            Ok(name.to_string())
+        }
+        "Unconfined" => Ok(String::new()),
+        other => bail!(
+            "container '{container_name}': unknown appArmorProfile type: {other}"
+        ),
+    }
+}
+
 /// Validate a container and build a KubeContainer plan entry.
 fn validate_container(c: Container) -> Result<KubeContainer> {
     let image_ref = ImageReference::parse(&c.image)
@@ -409,6 +501,83 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
         None
     };
 
+    // Validate container-level securityContext.
+    let (
+        c_run_as_user,
+        c_run_as_group,
+        add_caps,
+        drop_caps,
+        allow_privilege_escalation,
+        read_only_root_filesystem,
+        c_syscall_filters,
+        c_apparmor_profile,
+    ) = if let Some(ref sc) = c.security_context {
+        // runAsNonRoot consistency.
+        if sc.run_as_non_root == Some(true) && sc.run_as_user.is_none() {
+            bail!(
+                "container '{}': securityContext.runAsNonRoot is true but runAsUser is not set",
+                c.name
+            );
+        }
+        if sc.run_as_non_root == Some(true) && sc.run_as_user == Some(0) {
+            bail!(
+                "container '{}': securityContext.runAsNonRoot is true but runAsUser is 0 (root)",
+                c.name
+            );
+        }
+
+        // Validate capabilities.
+        let mut add = Vec::new();
+        let mut drop = Vec::new();
+        if let Some(ref caps) = sc.capabilities {
+            for cap in &caps.add {
+                let normalized = security::normalize_cap(cap);
+                security::validate_capability(&normalized).with_context(|| {
+                    format!("container '{}': capabilities.add", c.name)
+                })?;
+                add.push(normalized);
+            }
+            for cap in &caps.drop {
+                if cap.to_ascii_uppercase() == "ALL" {
+                    drop.push("ALL".to_string());
+                } else {
+                    let normalized = security::normalize_cap(cap);
+                    security::validate_capability(&normalized).with_context(|| {
+                        format!("container '{}': capabilities.drop", c.name)
+                    })?;
+                    drop.push(normalized);
+                }
+            }
+        }
+
+        // Validate seccomp profile.
+        let syscall_filters = if let Some(ref sp) = sc.seccomp_profile {
+            validate_seccomp_profile(sp, &c.name)?
+        } else {
+            Vec::new()
+        };
+
+        // Validate apparmor profile.
+        let apparmor = if let Some(ref ap) = sc.apparmor_profile {
+            Some(validate_apparmor_k8s(ap, &c.name)?)
+        } else {
+            None
+        };
+
+        (
+            sc.run_as_user,
+            sc.run_as_group,
+            add,
+            drop,
+            sc.allow_privilege_escalation,
+            sc.read_only_root_filesystem.unwrap_or(false),
+            syscall_filters,
+            apparmor,
+        )
+    } else {
+        (None, None, vec![], vec![], None, false, vec![], None)
+    };
+
     Ok(KubeContainer {
         name: c.name,
         image: c.image,
@@ -422,6 +591,14 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
         resource_lines,
         readiness_exec,
         liveness_probe: c.liveness_probe,
+        run_as_user: c_run_as_user,
+        run_as_group: c_run_as_group,
+        add_caps,
+        drop_caps,
+        allow_privilege_escalation,
+        read_only_root_filesystem,
+        syscall_filters: c_syscall_filters,
+        apparmor_profile: c_apparmor_profile,
     })
 }
 
@@ -457,17 +634,31 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
     }
 
     // Validate securityContext.
-    let (run_as_user, run_as_group) = if let Some(ref sc) = spec.security_context {
-        if sc.run_as_non_root == Some(true) && sc.run_as_user.is_none() {
-            bail!("securityContext.runAsNonRoot is true but runAsUser is not set");
-        }
-        if sc.run_as_non_root == Some(true) && sc.run_as_user == Some(0) {
-            bail!("securityContext.runAsNonRoot is true but runAsUser is 0 (root)");
-        }
-        (sc.run_as_user, sc.run_as_group)
-    } else {
-        (None, None)
-    };
+    let (run_as_user, run_as_group, pod_seccomp_type, pod_apparmor) =
+        if let Some(ref sc) = spec.security_context {
+            if sc.run_as_non_root == Some(true) && sc.run_as_user.is_none() {
+                bail!("securityContext.runAsNonRoot is true but runAsUser is not set");
+            }
+            if sc.run_as_non_root == Some(true) && sc.run_as_user == Some(0) {
+                bail!("securityContext.runAsNonRoot is true but runAsUser is 0 (root)");
+            }
+            let seccomp_type = sc.seccomp_profile.as_ref().map(|sp| {
+                match sp.profile_type.as_str() {
+                    "RuntimeDefault" | "Unconfined" => Ok(sp.profile_type.clone()),
+                    "Localhost" => bail!(
+                        "pod securityContext: seccompProfile type 'Localhost' is not supported \
+                         (systemd SystemCallFilter cannot load custom seccomp BPF profiles)"
+                    ),
+                    other => bail!("pod securityContext: unknown seccompProfile type: {other}"),
+                }
+            }).transpose()?;
+            let apparmor = sc.apparmor_profile.as_ref().map(|ap| {
+                validate_apparmor_k8s(ap, "<pod>")
+            }).transpose()?;
+            (sc.run_as_user, sc.run_as_group, seccomp_type, apparmor)
+        } else {
+            (None, None, None, None)
+        };
 
     // Validate volume names are unique.
     let mut vol_names = HashSet::new();
@@ -667,6 +858,8 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
         termination_grace_period: spec.termination_grace_period_seconds,
         run_as_user,
         run_as_group,
+        seccomp_profile_type: pod_seccomp_type,
+        apparmor_profile: pod_apparmor,
     })
 }
 
@@ -1637,6 +1830,14 @@ spec:
             resource_lines: vec![],
             readiness_exec: None,
             liveness_probe: None,
+            run_as_user: None,
+            run_as_group: None,
+            add_caps: vec![],
+            drop_caps: vec![],
+            allow_privilege_escalation: None,
+            read_only_root_filesystem: false,
+            syscall_filters: vec![],
+            apparmor_profile: None,
         }
     }
 
@@ -1652,6 +1853,8 @@ spec:
             termination_grace_period: None,
             run_as_user: None,
             run_as_group: None,
+            seccomp_profile_type: None,
+            apparmor_profile: None,
         }
     }
 
@@ -2253,5 +2456,461 @@ spec:
                 .contains("valueFrom must specify secretKeyRef or configMapKeyRef"),
             "unexpected error: {err}"
         );
+    }
+
+    // --- Container securityContext tests ---
+
+    #[test]
+    fn test_container_security_context_caps_add_drop() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      capabilities:
+        add: ["NET_ADMIN"]
+        drop: ["NET_RAW"]
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let c = &plan.containers[0];
+        assert_eq!(c.add_caps, vec!["CAP_NET_ADMIN"]);
+        assert_eq!(c.drop_caps, vec!["CAP_NET_RAW"]);
+    }
+
+    #[test]
+    fn test_container_security_context_caps_drop_all() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      capabilities:
+        add: ["CHOWN"]
+        drop: ["ALL"]
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let c = &plan.containers[0];
+        assert_eq!(c.add_caps, vec!["CAP_CHOWN"]);
+        assert_eq!(c.drop_caps, vec!["ALL"]);
+    }
+
+    #[test]
+    fn test_container_security_context_invalid_cap() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      capabilities:
+        add: ["BOGUS"]
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("unknown capability"),
+            "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn test_container_security_context_seccomp_runtime_default() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      seccompProfile:
+        type: RuntimeDefault
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let c = &plan.containers[0];
+        assert!(!c.syscall_filters.is_empty(), "should have syscall filters");
+        assert!(
+            c.syscall_filters.iter().any(|f| f.contains("@raw-io")),
+            "should include @raw-io filter"
+        );
+    }
+
+    #[test]
+    fn test_container_security_context_seccomp_unconfined() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      seccompProfile:
+        type: Unconfined
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let c = &plan.containers[0];
+        assert!(c.syscall_filters.is_empty(), "Unconfined should have no filters");
+    }
+
+    #[test]
+    fn test_container_security_context_seccomp_localhost_rejected() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      seccompProfile:
+        type: Localhost
+        localhostProfile: my-profile.json
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(
+            err.to_string().contains("Localhost"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_container_security_context_apparmor_runtime_default() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      appArmorProfile:
+        type: RuntimeDefault
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let c = &plan.containers[0];
+        assert_eq!(c.apparmor_profile.as_deref(), Some("sdme-default"));
+    }
+
+    #[test]
+    fn test_container_security_context_apparmor_localhost() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      appArmorProfile:
+        type: Localhost
+        localhostProfile: my-custom-profile
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let c = &plan.containers[0];
+        assert_eq!(c.apparmor_profile.as_deref(), Some("my-custom-profile"));
+    }
+
+    #[test]
+    fn test_container_security_context_apparmor_unconfined() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      appArmorProfile:
+        type: Unconfined
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let c = &plan.containers[0];
+        // Unconfined resolves to empty string.
+        assert_eq!(c.apparmor_profile.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn test_container_security_context_run_as_user() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let c = &plan.containers[0];
+        assert_eq!(c.run_as_user, Some(1000));
+        assert_eq!(c.run_as_group, Some(1000));
+    }
+
+    #[test]
+    fn test_container_security_context_run_as_non_root_no_user() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      runAsNonRoot: true
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(
+            err.to_string().contains("runAsNonRoot"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_container_security_context_allow_privilege_escalation() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      allowPrivilegeEscalation: false
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let c = &plan.containers[0];
+        assert_eq!(c.allow_privilege_escalation, Some(false));
+    }
+
+    #[test]
+    fn test_container_security_context_read_only_root_filesystem() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      readOnlyRootFilesystem: true
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let c = &plan.containers[0];
+        assert!(c.read_only_root_filesystem);
+    }
+
+    #[test]
+    fn test_container_security_context_all_fields() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    securityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+      runAsNonRoot: true
+      capabilities:
+        add: ["NET_ADMIN"]
+        drop: ["NET_RAW"]
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      seccompProfile:
+        type: RuntimeDefault
+      appArmorProfile:
+        type: RuntimeDefault
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let c = &plan.containers[0];
+        assert_eq!(c.run_as_user, Some(1000));
+        assert_eq!(c.run_as_group, Some(1000));
+        assert_eq!(c.add_caps, vec!["CAP_NET_ADMIN"]);
+        assert_eq!(c.drop_caps, vec!["CAP_NET_RAW"]);
+        assert_eq!(c.allow_privilege_escalation, Some(false));
+        assert!(c.read_only_root_filesystem);
+        assert!(!c.syscall_filters.is_empty());
+        assert_eq!(c.apparmor_profile.as_deref(), Some("sdme-default"));
+    }
+
+    #[test]
+    fn test_pod_security_context_seccomp_runtime_default() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert_eq!(plan.seccomp_profile_type.as_deref(), Some("RuntimeDefault"));
+    }
+
+    #[test]
+    fn test_pod_security_context_apparmor() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  securityContext:
+    appArmorProfile:
+      type: RuntimeDefault
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert_eq!(plan.apparmor_profile.as_deref(), Some("sdme-default"));
+    }
+
+    #[test]
+    fn test_unit_container_security_caps_drop() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let mut kc = make_test_container("app");
+        kc.drop_caps = vec!["CAP_NET_RAW".to_string()];
+        let plan = make_test_plan();
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+        assert!(!unit.contains("CAP_NET_RAW"), "CAP_NET_RAW should be dropped");
+        assert!(unit.contains("CAP_SYS_ADMIN"), "must keep CAP_SYS_ADMIN");
+    }
+
+    #[test]
+    fn test_unit_container_security_drop_all() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let mut kc = make_test_container("app");
+        kc.drop_caps = vec!["ALL".to_string()];
+        kc.add_caps = vec!["CAP_CHOWN".to_string()];
+        let plan = make_test_plan();
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+        assert!(unit.contains("CAP_SYS_ADMIN"), "must keep CAP_SYS_ADMIN");
+        assert!(unit.contains("CAP_CHOWN"), "should have added cap");
+        assert!(!unit.contains("CAP_SETUID"), "defaults should be dropped");
+    }
+
+    #[test]
+    fn test_unit_container_security_read_only() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let mut kc = make_test_container("app");
+        kc.read_only_root_filesystem = true;
+        let plan = make_test_plan();
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+        assert!(unit.contains("ReadOnlyPaths=/"), "should have ReadOnlyPaths");
+    }
+
+    #[test]
+    fn test_unit_container_security_apparmor() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let mut kc = make_test_container("app");
+        kc.apparmor_profile = Some("sdme-default".to_string());
+        let plan = make_test_plan();
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+        assert!(
+            unit.contains("AppArmorProfile=sdme-default"),
+            "should have AppArmor profile"
+        );
+    }
+
+    #[test]
+    fn test_unit_container_security_syscall_filters() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let mut kc = make_test_container("app");
+        kc.syscall_filters = vec!["~@raw-io".to_string()];
+        let plan = make_test_plan();
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+        assert!(
+            unit.contains("SystemCallFilter=~@raw-io"),
+            "should have syscall filter"
+        );
+    }
+
+    #[test]
+    fn test_unit_pod_seccomp_fallback() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let kc = make_test_container("app");
+        let mut plan = make_test_plan();
+        plan.seccomp_profile_type = Some("RuntimeDefault".to_string());
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+        assert!(
+            unit.contains("SystemCallFilter="),
+            "pod-level seccomp should produce syscall filters"
+        );
+    }
+
+    #[test]
+    fn test_unit_container_user_overrides_pod() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let mut kc = make_test_container("app");
+        kc.run_as_user = Some(2000);
+        kc.run_as_group = Some(2000);
+        let mut plan = make_test_plan();
+        plan.run_as_user = Some(1000);
+        plan.run_as_group = Some(1000);
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+        // Container-level 2000 should override pod-level 1000.
+        assert!(unit.contains("2000 2000"), "container user should override pod user: {unit}");
     }
 }

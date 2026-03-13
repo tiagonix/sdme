@@ -275,7 +275,7 @@ fn validate_syscall_filter(filter: &str) -> Result<()> {
 /// Validate an AppArmor profile name.
 ///
 /// Profile names must be non-empty and contain only safe characters.
-fn validate_apparmor_profile(profile: &str) -> Result<()> {
+pub fn validate_apparmor_profile(profile: &str) -> Result<()> {
     if profile.is_empty() {
         bail!("AppArmor profile name cannot be empty");
     }
@@ -331,6 +331,29 @@ pub fn check_apparmor_loaded(profile: &str) -> Result<()> {
 
     Ok(())
 }
+
+/// Default capability bounding set for OCI app systemd service units.
+///
+/// These match the Docker default set plus `CAP_SYS_ADMIN` (needed by the
+/// isolate binary for `unshare()`+`mount()`; it drops it via
+/// `prctl(PR_CAPBSET_DROP)` before exec'ing the workload).
+pub const OCI_DEFAULT_CAPS: &[&str] = &[
+    "CAP_AUDIT_WRITE",
+    "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_FOWNER",
+    "CAP_FSETID",
+    "CAP_KILL",
+    "CAP_MKNOD",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_NET_RAW",
+    "CAP_SETFCAP",
+    "CAP_SETGID",
+    "CAP_SETPCAP",
+    "CAP_SETUID",
+    "CAP_SYS_ADMIN",
+    "CAP_SYS_CHROOT",
+];
 
 /// Capabilities dropped by `--hardened`.
 pub const HARDENED_DROP_CAPS: &[&str] = &[

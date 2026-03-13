@@ -178,6 +178,114 @@ fn resolve_exec_command(app_root: &Path, exec_start: &str) -> String {
     exec_start.to_string()
 }
 
+// --- OCI service security ---
+
+/// Security overrides for an OCI app's systemd service unit.
+///
+/// When provided, these modify the default hardened baseline defined by
+/// `OCI_DEFAULT_CAPS` and the fixed directives in `build_hardening_block()`.
+pub(crate) struct OciServiceSecurity {
+    /// Capabilities to add to the default bounding set.
+    pub add_caps: Vec<String>,
+    /// Capabilities to drop from the default bounding set.
+    /// `"ALL"` drops everything (then only `add_caps` + `CAP_SYS_ADMIN` remain).
+    pub drop_caps: Vec<String>,
+    /// If `Some(true)`, sets `NoNewPrivileges=no`. Default baseline is `yes`.
+    pub allow_privilege_escalation: Option<bool>,
+    /// Add `ReadOnlyPaths=/` to the unit.
+    pub read_only_root_filesystem: bool,
+    /// `SystemCallFilter=` lines (e.g. `~@raw-io`).
+    pub syscall_filters: Vec<String>,
+    /// `AppArmorProfile=` value.
+    pub apparmor_profile: Option<String>,
+}
+
+/// Build the hardening directives block for an OCI app service unit.
+///
+/// Computes the capability bounding set, `NoNewPrivileges`, fixed protection
+/// directives, and optional seccomp/AppArmor/read-only overrides.
+///
+/// `CAP_SYS_ADMIN` is always included because the isolate binary needs it
+/// for `unshare()`+`mount()` before dropping it via `prctl(PR_CAPBSET_DROP)`.
+fn build_hardening_block(security: Option<&OciServiceSecurity>) -> String {
+    use crate::security::OCI_DEFAULT_CAPS;
+
+    // 1. Compute bounding set.
+    let mut caps: Vec<String> = match security {
+        Some(sec) if sec.drop_caps.iter().any(|c| c == "ALL") => {
+            // "ALL" drops everything; start with only CAP_SYS_ADMIN.
+            vec!["CAP_SYS_ADMIN".to_string()]
+        }
+        Some(sec) => {
+            let mut set: Vec<String> = OCI_DEFAULT_CAPS
+                .iter()
+                .filter(|c| !sec.drop_caps.iter().any(|d| d == **c))
+                .map(|c| c.to_string())
+                .collect();
+            // Ensure CAP_SYS_ADMIN is present even if someone tried to drop it.
+            if !set.iter().any(|c| c == "CAP_SYS_ADMIN") {
+                set.push("CAP_SYS_ADMIN".to_string());
+            }
+            set
+        }
+        None => OCI_DEFAULT_CAPS.iter().map(|c| c.to_string()).collect(),
+    };
+
+    // Add requested caps.
+    if let Some(sec) = security {
+        for cap in &sec.add_caps {
+            if !caps.iter().any(|c| c == cap) {
+                caps.push(cap.clone());
+            }
+        }
+    }
+
+    let caps_line = format!("CapabilityBoundingSet={}\n", caps.join(" "));
+
+    // 2. NoNewPrivileges: yes unless allow_privilege_escalation == Some(true).
+    let nnp = match security.and_then(|s| s.allow_privilege_escalation) {
+        Some(true) => "NoNewPrivileges=no\n",
+        _ => "NoNewPrivileges=yes\n",
+    };
+
+    // 3. Fixed protection directives.
+    let fixed = "\
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ProtectProc=invisible
+ProcSubset=pid
+";
+
+    // 4. Optional read-only root filesystem.
+    let read_only = if security.is_some_and(|s| s.read_only_root_filesystem) {
+        "ReadOnlyPaths=/\n"
+    } else {
+        ""
+    };
+
+    // 5. Optional syscall filters.
+    let syscall = match security {
+        Some(sec) if !sec.syscall_filters.is_empty() => sec
+            .syscall_filters
+            .iter()
+            .map(|f| format!("SystemCallFilter={f}\n"))
+            .collect::<String>(),
+        _ => String::new(),
+    };
+
+    // 6. Optional AppArmor profile.
+    let apparmor = match security.and_then(|s| s.apparmor_profile.as_deref()) {
+        Some(p) => format!("AppArmorProfile={p}\n"),
+        None => String::new(),
+    };
+
+    format!("{caps_line}{nnp}{fixed}{read_only}{syscall}{apparmor}")
+}
+
 // --- OCI application image support ---
 
 /// Configuration for setting up an OCI app inside a combined rootfs.
@@ -227,6 +335,8 @@ pub(crate) struct OciAppSetup<'a> {
     pub requires_units: Vec<String>,
     /// `ExecStartPost=` command for readiness checks.
     pub readiness_exec: Option<String>,
+    /// Per-service security overrides from K8s `securityContext`.
+    pub security: Option<OciServiceSecurity>,
 }
 
 /// Set up a single OCI app inside a combined rootfs.
@@ -398,18 +508,7 @@ ExecStart={isolate_exec}
     // CAP_SYS_ADMIN is kept in the bounding set because the isolate binary
     // needs it for unshare() and mount(); the binary drops it via
     // prctl(PR_CAPBSET_DROP) before exec'ing the workload.
-    let isolate_hardening = "\
-CapabilityBoundingSet=CAP_AUDIT_WRITE CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_KILL CAP_MKNOD CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETFCAP CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN CAP_SYS_CHROOT
-NoNewPrivileges=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-ProtectProc=invisible
-ProcSubset=pid
-";
+    let isolate_hardening = build_hardening_block(opts.security.as_ref());
 
     // Build [Unit] section dependencies.
     // Merge extra_after (e.g. volume service) into after_units/requires_units.
@@ -583,6 +682,7 @@ pub(crate) fn setup_app_image(
         after_units: Vec::new(),
         requires_units: Vec::new(),
         readiness_exec: None,
+        security: None,
     })?;
 
     // 5. Clean up temp OCI dir.
@@ -715,5 +815,158 @@ mod tests {
         let err = resolve_oci_user(&root, "nginx:missing").unwrap_err();
         assert!(err.to_string().contains("not found"), "unexpected: {err}");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_build_hardening_block_default() {
+        let block = build_hardening_block(None);
+        assert!(block.contains("CAP_SYS_ADMIN"), "must include CAP_SYS_ADMIN");
+        assert!(block.contains("CAP_NET_RAW"), "must include CAP_NET_RAW");
+        assert!(
+            block.contains("NoNewPrivileges=yes"),
+            "default NoNewPrivileges should be yes"
+        );
+        assert!(
+            block.contains("ProtectKernelModules=yes"),
+            "should have fixed directives"
+        );
+        assert!(!block.contains("ReadOnlyPaths"), "should not be read-only by default");
+        assert!(!block.contains("SystemCallFilter"), "no syscall filters by default");
+        assert!(!block.contains("AppArmorProfile"), "no apparmor by default");
+    }
+
+    #[test]
+    fn test_build_hardening_block_add_caps() {
+        let sec = OciServiceSecurity {
+            add_caps: vec!["CAP_NET_ADMIN".to_string()],
+            drop_caps: vec![],
+            allow_privilege_escalation: None,
+            read_only_root_filesystem: false,
+            syscall_filters: vec![],
+            apparmor_profile: None,
+        };
+        let block = build_hardening_block(Some(&sec));
+        assert!(block.contains("CAP_NET_ADMIN"), "should add CAP_NET_ADMIN");
+        assert!(block.contains("CAP_SYS_ADMIN"), "must keep CAP_SYS_ADMIN");
+    }
+
+    #[test]
+    fn test_build_hardening_block_drop_caps() {
+        let sec = OciServiceSecurity {
+            add_caps: vec![],
+            drop_caps: vec!["CAP_NET_RAW".to_string()],
+            allow_privilege_escalation: None,
+            read_only_root_filesystem: false,
+            syscall_filters: vec![],
+            apparmor_profile: None,
+        };
+        let block = build_hardening_block(Some(&sec));
+        assert!(!block.contains("CAP_NET_RAW"), "CAP_NET_RAW should be dropped");
+        assert!(block.contains("CAP_SYS_ADMIN"), "must keep CAP_SYS_ADMIN");
+    }
+
+    #[test]
+    fn test_build_hardening_block_drop_all() {
+        let sec = OciServiceSecurity {
+            add_caps: vec!["CAP_CHOWN".to_string()],
+            drop_caps: vec!["ALL".to_string()],
+            allow_privilege_escalation: None,
+            read_only_root_filesystem: false,
+            syscall_filters: vec![],
+            apparmor_profile: None,
+        };
+        let block = build_hardening_block(Some(&sec));
+        // Only CAP_SYS_ADMIN (always) and CAP_CHOWN (explicitly added) should remain.
+        assert!(block.contains("CAP_SYS_ADMIN"), "must preserve CAP_SYS_ADMIN");
+        assert!(block.contains("CAP_CHOWN"), "should include added cap");
+        assert!(!block.contains("CAP_NET_RAW"), "should not include defaults after ALL drop");
+        assert!(!block.contains("CAP_SETUID"), "should not include defaults after ALL drop");
+    }
+
+    #[test]
+    fn test_build_hardening_block_drop_all_preserves_sys_admin() {
+        let sec = OciServiceSecurity {
+            add_caps: vec![],
+            drop_caps: vec!["ALL".to_string()],
+            allow_privilege_escalation: None,
+            read_only_root_filesystem: false,
+            syscall_filters: vec![],
+            apparmor_profile: None,
+        };
+        let block = build_hardening_block(Some(&sec));
+        // Even dropping ALL, CAP_SYS_ADMIN must be present.
+        assert!(
+            block.contains("CAP_SYS_ADMIN"),
+            "CAP_SYS_ADMIN must survive drop ALL"
+        );
+    }
+
+    #[test]
+    fn test_build_hardening_block_allow_privilege_escalation() {
+        let sec = OciServiceSecurity {
+            add_caps: vec![],
+            drop_caps: vec![],
+            allow_privilege_escalation: Some(true),
+            read_only_root_filesystem: false,
+            syscall_filters: vec![],
+            apparmor_profile: None,
+        };
+        let block = build_hardening_block(Some(&sec));
+        assert!(
+            block.contains("NoNewPrivileges=no"),
+            "should set NoNewPrivileges=no"
+        );
+    }
+
+    #[test]
+    fn test_build_hardening_block_read_only() {
+        let sec = OciServiceSecurity {
+            add_caps: vec![],
+            drop_caps: vec![],
+            allow_privilege_escalation: None,
+            read_only_root_filesystem: true,
+            syscall_filters: vec![],
+            apparmor_profile: None,
+        };
+        let block = build_hardening_block(Some(&sec));
+        assert!(block.contains("ReadOnlyPaths=/"), "should add ReadOnlyPaths");
+    }
+
+    #[test]
+    fn test_build_hardening_block_syscall_filters() {
+        let sec = OciServiceSecurity {
+            add_caps: vec![],
+            drop_caps: vec![],
+            allow_privilege_escalation: None,
+            read_only_root_filesystem: false,
+            syscall_filters: vec!["~@raw-io".to_string(), "~@debug".to_string()],
+            apparmor_profile: None,
+        };
+        let block = build_hardening_block(Some(&sec));
+        assert!(
+            block.contains("SystemCallFilter=~@raw-io"),
+            "should have syscall filter"
+        );
+        assert!(
+            block.contains("SystemCallFilter=~@debug"),
+            "should have syscall filter"
+        );
+    }
+
+    #[test]
+    fn test_build_hardening_block_apparmor() {
+        let sec = OciServiceSecurity {
+            add_caps: vec![],
+            drop_caps: vec![],
+            allow_privilege_escalation: None,
+            read_only_root_filesystem: false,
+            syscall_filters: vec![],
+            apparmor_profile: Some("sdme-default".to_string()),
+        };
+        let block = build_hardening_block(Some(&sec));
+        assert!(
+            block.contains("AppArmorProfile=sdme-default"),
+            "should have AppArmor profile"
+        );
     }
 }

@@ -500,10 +500,10 @@ pub(crate) fn setup_kube_container(
         .or(config.working_dir.as_deref())
         .unwrap_or("/");
 
-    // Use pod-level securityContext user override, then OCI config, then "root".
+    // Use container-level securityContext user override, then pod-level, then OCI config.
     let user_override;
-    let user = if let Some(uid) = plan.run_as_user {
-        let gid = plan.run_as_group.unwrap_or(uid);
+    let user = if let Some(uid) = kc.run_as_user.or(plan.run_as_user) {
+        let gid = kc.run_as_group.or(plan.run_as_group).unwrap_or(uid);
         user_override = format!("{uid}:{gid}");
         &user_override
     } else {
@@ -582,6 +582,53 @@ pub(crate) fn setup_kube_container(
         (Vec::new(), Vec::new())
     };
 
+    // Build per-service security overrides from merged pod+container security context.
+    let security = {
+        // Seccomp: container overrides pod.
+        let syscall_filters = if !kc.syscall_filters.is_empty() {
+            kc.syscall_filters.clone()
+        } else if let Some(ref spt) = plan.seccomp_profile_type {
+            match spt.as_str() {
+                "RuntimeDefault" => crate::security::STRICT_SYSCALL_FILTERS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                _ => Vec::new(), // Unconfined
+            }
+        } else {
+            Vec::new()
+        };
+
+        // AppArmor: container overrides pod.
+        let apparmor_profile = if kc.apparmor_profile.is_some() {
+            kc.apparmor_profile.clone()
+        } else {
+            plan.apparmor_profile.clone()
+        };
+        // Filter out empty string (Unconfined resolved to "").
+        let apparmor_profile = apparmor_profile.filter(|s| !s.is_empty());
+
+        let has_overrides = !kc.add_caps.is_empty()
+            || !kc.drop_caps.is_empty()
+            || kc.allow_privilege_escalation.is_some()
+            || kc.read_only_root_filesystem
+            || !syscall_filters.is_empty()
+            || apparmor_profile.is_some();
+
+        if has_overrides {
+            Some(crate::oci::app::OciServiceSecurity {
+                add_caps: kc.add_caps.clone(),
+                drop_caps: kc.drop_caps.clone(),
+                allow_privilege_escalation: kc.allow_privilege_escalation,
+                read_only_root_filesystem: kc.read_only_root_filesystem,
+                syscall_filters,
+                apparmor_profile,
+            })
+        } else {
+            None
+        }
+    };
+
     crate::oci::app::setup_oci_app(&crate::oci::app::OciAppSetup {
         name: &kc.name,
         staging_dir,
@@ -604,6 +651,7 @@ pub(crate) fn setup_kube_container(
         after_units,
         requires_units,
         readiness_exec: kc.readiness_exec.clone(),
+        security,
     })
 }
 
