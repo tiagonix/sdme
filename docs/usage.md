@@ -187,7 +187,7 @@ sudo sdme config set host_rootfs_opaque_dirs /etc/systemd/system,/var/log
 To see the host clone in action, try this:
 
 ```bash
-sudo sdme new --name webtest
+sudo sdme new webtest
 ```
 
 Inside the container:
@@ -666,12 +666,15 @@ sudo sdme logs --oci-app redis mycontainer -f
 
 Single-container pods auto-select the only app, so `--oci` is sufficient.
 
-**What's tested.** The kube test suite runs six progressive levels:
-L1 (basic lifecycle), L2 (pod spec features: command/args, env, init
-containers, restart policy, security context, resources, readiness
-probes), L3 (volumes: emptyDir, hostPath, secrets, configmaps, PVCs),
+**What's tested.** The kube test suite runs eight progressive levels:
+L1 (basic lifecycle), L2-spec (pod spec features: command/args, env,
+init containers, restart policy, resources, readiness probes),
+L2-security (container securityContext: capabilities, privilege
+escalation, seccomp, AppArmor, runAsUser/runAsGroup), L3-volumes
+(emptyDir, hostPath, configmaps, envFrom, read-only mounts, PVCs),
+L3-secrets (secret volumes, projected items, defaultMode),
 L4 (multi-container localhost connectivity), L5 (Redis round-trip), and
-L6 (a full Gitea + MySQL + Nginx stack). All pass. See
+L6 (a full Gitea + MySQL + Nginx stack). See
 [test/results.md](../test/results.md) for the complete results.
 
 ### 7.3 Composing kube pods with pod networking
