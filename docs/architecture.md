@@ -98,7 +98,7 @@ the container's systemd manages everything inside. Both talk to their
 own D-Bus, both write to their own journal, but the container's writes
 land on the overlayfs upper layer and never touch the host - well,
 except that they are stored on the host. This matters, and the details
-are explained in Section 14.
+are explained in Section 15.
 
 **User identity preservation.** When sdme is run via `sudo` and the
 container is a host-rootfs clone (no `-r` flag), it reads `$SUDO_USER`
@@ -524,7 +524,7 @@ This is a known upstream limitation (see
 sdme solves this with a generated static ELF binary (`isolate`,
 under 2 KiB) that creates PID/IPC namespaces, remounts /proc, drops
 `CAP_SYS_ADMIN`, optionally drops privileges (`setgroups`/`setgid`/
-`setuid`), changes the working directory, and exec's the target — all
+`setuid`), changes the working directory, and exec's the target -- all
 via raw syscalls with no libc or NSS dependency. The binary is written
 to `/.sdme-isolate` inside the OCI root at import time (mode `0o111`,
 owned by root). The generated unit becomes:
@@ -539,8 +539,89 @@ creates PID/IPC namespaces for proper container isolation.
 
 The OCI `User` field is resolved at import time against `etc/passwd`
 and `etc/group` inside the OCI rootfs, supporting named users, numeric
-UIDs, explicit groups, and `uid:gid` pairs. Full details in
-[docs/hacks.md](hacks.md).
+UIDs, explicit groups, and `uid:gid` pairs.
+
+### The isolate binary
+
+systemd's execution pipeline for a service unit with `RootDirectory=` runs
+in this order:
+
+1. NSS lookup of `User=` against the host filesystem
+2. `RootDirectory=` chroot
+3. `execve()` of the service binary
+
+For OCI containers, steps 1 and 2 should be reversed: the user exists in
+the OCI rootfs, not on the host. This is a known upstream limitation:
+
+- [systemd#12498](https://github.com/systemd/systemd/issues/12498):
+  `RootDirectory` with `User` not working. Fixed the ordering for some
+  chroot operations, but NSS lookup still happens pre-chroot.
+- [systemd#19781](https://github.com/systemd/systemd/issues/19781):
+  RFE: allow exec units as uid without passwd entry. Open; upstream
+  position is to use NSS registration (nss-systemd, machined) instead.
+- [systemd#14806](https://github.com/systemd/systemd/issues/14806):
+  Support uid/gids from target rootfs with `--root`. Fixed for `tmpfiles`
+  via `fgetpwent`, but not for service execution.
+
+sdme generates a static ELF binary (`isolate`) that creates PID/IPC
+namespaces, remounts /proc, drops `CAP_SYS_ADMIN`, optionally drops
+privileges, and execs the target -- all via raw syscalls with no libc
+dependency and no NSS. The binary is invoked as:
+
+```
+/.sdme-isolate <uid> <gid> <workdir> <command> [args...]
+```
+
+The syscall sequence:
+
+1. `unshare(CLONE_NEWPID | CLONE_NEWIPC)`: create new PID and IPC namespaces
+2. `fork()`: enter the new PID namespace (child becomes PID 1)
+3. `mount("proc", "/proc", "proc", ...)`: remount /proc for the new namespace
+4. `prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN)`: drop CAP_SYS_ADMIN from bounding set
+5. `setgroups(0, NULL)`: clear supplementary groups (skipped if uid==0)
+6. `setgid(gid)`: set group ID (skipped if uid==0)
+7. `setuid(uid)`: set user ID (skipped if uid==0)
+8. `chdir(workdir)`: change to the application's working directory
+9. `execve(command, args, envp)`: replace the process with the application
+
+Each syscall is checked for errors. On failure, a diagnostic message is
+written to stderr and the process exits with code 1. For root users
+(uid==0, gid==0), steps 5-7 are skipped but namespace isolation still
+applies.
+
+**User resolution.** The OCI `User` field is resolved at import time
+against `etc/passwd` and `etc/group` inside the OCI rootfs:
+
+| Format            | Behavior                                            |
+|-------------------|-----------------------------------------------------|
+| `""`, `"root"`    | Root; isolate with uid=0 gid=0 (namespace isolation only) |
+| `"name"`          | Resolved via `etc/passwd` in OCI rootfs             |
+| `"uid"`           | Used directly; primary GID from passwd if found     |
+| `"name:group"`    | User from `etc/passwd`, group from `etc/group`      |
+| `"uid:gid"`       | Both used directly                                  |
+
+**Security model.** The privilege-dropping sequence is designed to be
+irreversible:
+
+- `setgroups(0, NULL)` clears all supplementary groups before any
+  uid/gid change.
+- `setgid(gid)` before `setuid(uid)`: correct order, since `setgid`
+  requires root and must happen first.
+- `setuid(uid)` for non-zero UIDs is irreversible (the kernel clears
+  all capabilities).
+- Binary permissions (`0o111`, execute-only): non-root users cannot read,
+  write, or delete the file.
+- Binary ownership (root:root): only root can modify or remove it.
+- Parent directory (`/` inside the chroot) is owned by root, so non-root
+  cannot unlink files from it.
+- No SUID/SGID bit: the binary runs with the caller's privileges (root,
+  since no `User=` in the unit).
+- No file capabilities: no `security.capability` xattr is set.
+- The `atoi` implementation rejects values exceeding `u32::MAX` to
+  prevent wrap-around to UID 0.
+
+After `execve`, the new process inherits the dropped uid/gid and cannot
+regain root.
 
 ### /dev/std* shim for journal socket compatibility
 
@@ -562,8 +643,195 @@ syscall.
 The shim is written to `/.sdme-devfd-shim.so` inside the OCI root at
 import time, and the generated unit includes
 `Environment=LD_PRELOAD=/.sdme-devfd-shim.so`. This applies to all OCI
-containers (both root and non-root users). Full details in
-[docs/hacks.md](hacks.md).
+containers (both root and non-root users).
+
+### The /dev/std* shim
+
+OCI images commonly create symlinks from log files to the standard
+file descriptors:
+
+```
+/var/log/nginx/error.log -> /dev/stderr -> /proc/self/fd/2
+```
+
+When the application opens its log file, the kernel follows the symlink
+chain to `/proc/self/fd/N` and calls `open()` on the underlying file
+descriptor.
+
+Under Docker, fds 1/2 are pipes. The kernel allows `open()` on
+pipe-backed `/proc/self/fd/N`, and the call succeeds.
+
+Under systemd, fds 1/2 are journal sockets. The kernel rejects `open()`
+on socket-backed `/proc/self/fd/N` with ENXIO ("No such device or
+address"). This is a kernel limitation, not a systemd one.
+
+The distinction matters: `write()` on a socket fd works fine. Only
+`open()` on `/proc/self/fd/N` fails. Applications that write directly
+to fd 1 or fd 2 have no problem. Applications that open a path that
+resolves to `/proc/self/fd/N` (like nginx opening its log symlinks) fail
+with ENXIO.
+
+**Alternatives considered.** eBPF cannot solve this. `bpf_override_return`
+can inject error codes, but it cannot fabricate file descriptors.
+Returning a valid fd from `open()` requires allocating a kernel
+`struct file` and installing it in the process's fd table. No eBPF hook
+is capable of this. Removing the symlinks works but means log output goes
+to files inside the chroot instead of the journal. Since the whole point
+of running under systemd is journal integration, losing log output to
+files defeats the purpose.
+
+sdme generates an LD_PRELOAD shared library that intercepts `open()`,
+`openat()`, `open64()`, and `openat64()` at the libc symbol level. When
+the path matches a standard fd path, the interceptor returns `dup(N)`
+instead of calling the real `open()`. All other paths fall through to the
+real `openat` syscall.
+
+Intercepted paths:
+
+| Path               | Result   |
+|--------------------|----------|
+| `/dev/stdin`       | `dup(0)` |
+| `/dev/stdout`      | `dup(1)` |
+| `/dev/stderr`      | `dup(2)` |
+| `/dev/fd/0`        | `dup(0)` |
+| `/dev/fd/1`        | `dup(1)` |
+| `/dev/fd/2`        | `dup(2)` |
+| `/proc/self/fd/0`  | `dup(0)` |
+| `/proc/self/fd/1`  | `dup(1)` |
+| `/proc/self/fd/2`  | `dup(2)` |
+
+**Why dup() instead of returning the raw fd.** Returning the raw fd
+number (0, 1, or 2) would work for simple cases, but callers expect
+`open()` to return a new, independently closeable fd. If we returned fd 2
+directly and the caller later called `close()`, stderr would be closed
+for the entire process. `dup()` gives the caller their own fd that they
+can close without affecting the original.
+
+**Path matching.** The interceptor uses 8-byte loads and integer
+comparisons organized as a prefix tree. No string function calls:
+
+1. Load the first 8 bytes as a 64-bit integer.
+2. Compare against `/dev/std` (8 bytes). On match, check for `in\0`,
+   `out\0`, `err\0` at offset 8.
+3. Compare against `/dev/fd/` (8 bytes). On match, check for `0\0`,
+   `1\0`, `2\0` at offset 8.
+4. Compare against `/proc/se` (8 bytes). On match, check for
+   `lf/fd/0\0`, `lf/fd/1\0`, `lf/fd/2\0` at offset 8.
+5. No match: call the real `openat` syscall.
+
+**ENXIO fallback.** If the real `openat` syscall returns `-ENXIO`, the
+interceptor resolves one level of symlink via `readlinkat` and retries
+the path matching against the resolved target. This handles cases like
+nginx opening `/var/log/nginx/error.log`, which is a symlink to
+`/dev/stderr`. Without this fallback, only direct opens of `/dev/std*`
+paths would be intercepted.
+
+On error (from `dup` or a non-ENXIO `openat` failure), the shim sets
+`errno` via `__errno_location()` (imported through the GOT, resolved by
+the dynamic linker at load time) and returns `-1` per C convention.
+
+The `open()` entry point rewrites its arguments to match the `openat()`
+calling convention (inserting `AT_FDCWD` as the directory fd) and jumps
+to the `openat` entry point. `open64` and `openat64` are aliases since
+they are identical on 64-bit Linux.
+
+### Deployment
+
+Both binaries are deployed during `sdme fs import` of an OCI application
+image (one imported with `--base-fs`):
+
+1. The OCI image config's `User` field is parsed.
+2. The `devfd_shim` shared library is written to `/.sdme-devfd-shim.so`
+   inside the OCI root (mode `0o444`, readable for mmap).
+3. The `isolate` binary is written to `/.sdme-isolate` (mode `0o111`,
+   execute-only). If the user is non-root, the name is resolved against
+   `etc/passwd` and `etc/group` inside the OCI rootfs.
+4. A systemd service unit (`sdme-oci-{name}.service`) is generated with
+   both binaries wired in.
+
+Generated unit (non-root user):
+
+```ini
+[Service]
+Type=exec
+RootDirectory=/oci/apps/nginx/root
+MountAPIVFS=yes
+Environment=LD_PRELOAD=/.sdme-devfd-shim.so
+EnvironmentFile=-/oci/apps/nginx/env
+ExecStart=/.sdme-isolate 101 101 / /docker-entrypoint.sh nginx -g 'daemon off;'
+```
+
+`LD_PRELOAD` loads the devfd shim into the application's address space.
+`ExecStart` invokes the isolate binary, which creates PID/IPC namespaces,
+drops privileges to uid/gid, and then exec's the actual entrypoint.
+
+Generated unit (root user):
+
+```ini
+[Service]
+Type=exec
+RootDirectory=/oci/apps/nginx/root
+MountAPIVFS=yes
+Environment=LD_PRELOAD=/.sdme-devfd-shim.so
+EnvironmentFile=-/oci/apps/nginx/env
+ExecStart=/.sdme-isolate 0 0 / /docker-entrypoint.sh nginx -g 'daemon off;'
+```
+
+For root users, the isolate binary still runs to provide namespace
+isolation, but privilege dropping is skipped.
+
+### Implementation notes
+
+Both binaries are generated at import time for the host architecture:
+
+| Binary       | x86_64            | aarch64          | Size    |
+|--------------|-------------------|------------------|---------|
+| `isolate`    | `syscall`, rax=nr | `svc #0`, x8=nr  | < 2 KiB |
+| `devfd_shim` | `syscall`, rax=nr | `svc #0`, x8=nr  | ~ 4 KiB |
+
+Both are generated entirely in Rust with no assembler, no external tools,
+and no libc. Each architecture module contains its own `Asm` struct with
+a label/fixup system tailored to the ISA: x86_64 uses rel8/rel32 fixups
+for variable-length instructions; aarch64 uses BCond/Branch26 fixups for
+fixed 4-byte instructions.
+
+**ELF structure.** `isolate` is a minimal ET_EXEC static ELF64 with:
+
+- ELF header + 1 program header (PT_LOAD RX)
+- Machine code (namespace creation + privilege drop + exec syscall sequence)
+- String constants (error messages, read from code-relative addresses)
+- No section headers, no dynamic section, no symbol table
+
+`devfd_shim` is a minimal ET_DYN shared library with:
+
+- ELF header + 3 program headers (PT_LOAD RX, PT_LOAD RW, PT_DYNAMIC)
+- Machine code (the interceptor logic)
+- SysV hash table for symbol lookup by the dynamic linker
+- Dynamic symbol table: exported symbols (`open`, `openat`, `open64`,
+  `openat64`) and imported symbols (`__errno_location`)
+- RELA relocations pointing the dynamic linker at GOT slots
+- GOT entries (filled by the dynamic linker at load time)
+- Dynamic section (DT_HASH, DT_STRTAB, DT_SYMTAB, etc.)
+- No section headers (not needed at runtime)
+
+**Module layout:**
+
+| File                         | Purpose                                           |
+|------------------------------|---------------------------------------------------|
+| `src/elf.rs`                 | Shared `Arch` enum + ET_EXEC ELF builder          |
+| `src/isolate/mod.rs`        | Public API: `generate(Arch) -> Vec<u8>`           |
+| `src/isolate/x86_64.rs`     | x86_64 machine code emitter (PID/IPC ns + privs)  |
+| `src/isolate/aarch64.rs`    | AArch64 machine code emitter (PID/IPC ns + privs) |
+| `src/devfd_shim/mod.rs`     | Public API: `generate(Arch) -> Vec<u8>`           |
+| `src/devfd_shim/elf.rs`     | ET_DYN ELF builder with SysV hash table           |
+| `src/devfd_shim/x86_64.rs`  | x86_64 machine code emitter                       |
+| `src/devfd_shim/aarch64.rs` | AArch64 machine code emitter                      |
+
+Both architecture modules use the same pattern: an `Asm` struct that emits
+machine code bytes, a label system for forward references, and a fixup pass
+that patches relative offsets once all labels are defined. The `elf` module
+in each crate assembles the ELF headers, program headers, and metadata
+tables around the emitted code.
 
 ### OCI plumbing: ports and volumes
 
@@ -780,7 +1048,161 @@ change routes in the shared netns. `CAP_SYS_ADMIN` is present
 prevents access to host process netns references. The OCI app process
 itself (running as a non-root UID) has zero effective capabilities.
 
-## 11. Resource Limits
+## 11. Kubernetes Pod Support
+
+sdme can run Kubernetes Pod YAML files as nspawn containers. Each pod maps
+to a single container where each workload runs as a separate systemd
+service chrooted into its own rootfs under `/oci/apps/{name}/root`. For
+usage examples and CLI reference, see
+[usage.md, Section 7](usage.md#7-kubernetes-pod-yaml).
+
+### Pipeline
+
+1. **Parse & Validate**: reads the YAML, validates container names, volume
+   references, etc. Accepts `kind: Pod` (v1) and `kind: Deployment`
+   (apps/v1; extracts pod template).
+2. **Pull Images**: downloads each container's OCI image from the registry.
+3. **Build Combined Rootfs**: copies the base rootfs, then places each
+   container's OCI rootfs under `/oci/apps/{name}/root` with a generated
+   systemd service unit.
+4. **Generate Volume Mounts**: if the pod has volume mounts, generates a
+   `sdme-kube-volumes.service` oneshot unit that bind-mounts
+   `/oci/volumes/{name}` into each app's root directory; app services
+   depend on this unit via `After=`/`Requires=`.
+5. **Create Container**: creates an sdme container using the combined
+   rootfs (hostPath volumes become nspawn `--bind=` mounts; emptyDir
+   volumes live inside the rootfs).
+6. **Start & Boot**: boots the container; the volume mount service runs
+   first, then all app services start.
+
+### Supported Pod spec fields
+
+| Field | Description |
+|-------|-------------|
+| `containers[].image` | OCI image reference (pulled from registry) |
+| `containers[].name` | Container name (becomes service name) |
+| `containers[].command` | Override ENTRYPOINT |
+| `containers[].args` | Override CMD |
+| `containers[].env` | Per-container environment variables |
+| `containers[].env[].valueFrom` | Resolve from secretKeyRef or configMapKeyRef |
+| `containers[].ports` | Aggregated port forwarding (on private network) |
+| `containers[].volumeMounts` | Bind volumes into the container's rootfs |
+| `containers[].workingDir` | Override working directory |
+| `containers[].imagePullPolicy` | Always, IfNotPresent, or Never |
+| `containers[].resources` | MemoryMax, MemoryLow, CPUQuota, CPUWeight |
+| `containers[].readinessProbe` | Exec-based readiness check (ExecStartPre) |
+| `containers[].livenessProbe` | Exec-based (parsed; not yet enforced at runtime) |
+| `initContainers[]` | Run-to-completion containers before app containers |
+| `volumes` (emptyDir) | Shared directory between containers |
+| `volumes` (hostPath) | Mount host directory into the pod |
+| `volumes` (secret) | Populate from sdme kube secret (supports items, defaultMode) |
+| `volumes` (configMap) | Populate from sdme kube configmap (supports items, defaultMode) |
+| `volumes` (persistentVolumeClaim) | Host dir at {datadir}/volumes/{claimName} |
+| `restartPolicy` | Maps to systemd Restart= (Always/OnFailure/Never) |
+| `terminationGracePeriodSeconds` | Shutdown timeout for the container |
+| `securityContext.runAsUser` | Pod-level UID for all containers |
+| `securityContext.runAsGroup` | Pod-level GID for all containers |
+| `securityContext.runAsNonRoot` | Validates runAsUser is set and non-zero |
+
+### Filesystem layout
+
+```
+/oci/
+├── apps/
+│   ├── nginx/
+│   │   ├── root/           # nginx OCI rootfs
+│   │   ├── env             # environment variables
+│   │   ├── ports           # exposed ports
+│   │   └── volumes         # declared volumes
+│   └── redis/
+│       ├── root/           # redis OCI rootfs
+│       ├── env
+│       ├── ports
+│       └── volumes
+└── volumes/
+    └── cache-vol/          # emptyDir shared volume
+
+/etc/systemd/system/
+├── sdme-oci-nginx.service
+├── sdme-oci-redis.service
+├── sdme-kube-volumes.service    # oneshot: bind-mounts volumes
+└── multi-user.target.wants/
+    ├── sdme-oci-nginx.service -> ...
+    ├── sdme-oci-redis.service -> ...
+    └── sdme-kube-volumes.service -> ...
+```
+
+### Generated service units
+
+Each container gets a systemd service `sdme-oci-{name}.service`:
+
+```ini
+[Unit]
+Description=OCI app: nginx (docker.io/nginx:latest)
+After=network.target
+After=sdme-kube-volumes.service
+Requires=sdme-kube-volumes.service
+
+[Service]
+Type=exec
+RootDirectory=/oci/apps/nginx/root
+MountAPIVFS=yes
+Environment=LD_PRELOAD=/.sdme-devfd-shim.so
+ExecStart=/docker-entrypoint.sh nginx -g 'daemon off;'
+WorkingDirectory=/
+EnvironmentFile=-/oci/apps/nginx/env
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The `After=`/`Requires=` lines are only present when the pod has volume
+mounts.
+
+When shared volumes exist, a `sdme-kube-volumes.service` oneshot unit is
+also generated:
+
+```ini
+[Unit]
+Description=Kube volume mounts
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/mount --bind /oci/volumes/shared-data /oci/apps/nginx/root/usr/share/nginx/html
+ExecStart=/bin/mount --bind /oci/volumes/shared-data /oci/apps/content-gen/root/data
+
+[Install]
+WantedBy=multi-user.target
+```
+
+This runs `mount --bind` in the container's PID 1 mount namespace before
+app services start, so all services see the same shared directories.
+Read-only mounts get an additional `remount,ro,bind` line.
+
+### State management
+
+Kube pods are tracked with additional state fields:
+
+- `KUBE=yes`: marks this as a kube pod
+- `KUBE_CONTAINERS=nginx,redis,...`: list of container names
+- `KUBE_YAML_HASH={sha256}`: hash of the source YAML (for future update
+  detection)
+
+`sdme ps` shows kube pods with a KUBE column, e.g.: `kube:nginx,redis`
+
+### Limitations
+
+- No idempotent re-apply: `kube apply` on an existing pod fails; delete
+  first, then re-apply
+- No per-container securityContext (only pod-level `runAsUser`/`runAsGroup`)
+- Liveness probes are parsed but not enforced at runtime
+- No startup probes
+
+## 12. Resource Limits
 
 sdme exposes three cgroup-based resource controls:
 
@@ -805,7 +1227,7 @@ systemd's `CPUQuota=` percentage internally). CPU weight is an integer
 from 1 to 10000, controlling relative scheduling priority when CPUs are
 contended.
 
-## 12. Bind Mounts and Environment Variables
+## 13. Bind Mounts and Environment Variables
 
 Custom bind mounts and environment variables are set at creation time
 with `-b`/`--bind` and `-e`/`--env`, available on both `sdme create`
@@ -824,7 +1246,7 @@ variable becomes a `--setenv=KEY=VALUE` argument to systemd-nspawn.
 Both are stored in the container's state file (`BINDS=` and `ENVS=`,
 pipe-separated) and reconstituted into nspawn arguments on every start.
 
-## 13. Configuration
+## 14. Configuration
 
 sdme stores its settings in a TOML file at `~/.config/sdme/sdmerc`:
 
@@ -849,7 +1271,7 @@ explicit `-c`/`--config` flag overrides all resolution logic.
 Config files are written with mode `0600` and directories with mode
 `0700`.
 
-## 14. Security
+## 15. Security
 
 This section documents sdme's security implementation: capabilities,
 seccomp, AppArmor, the `--hardened` and `--strict` flags, and input
@@ -1141,7 +1563,7 @@ result in `sdme start` mysteriously misbehaving.
 If you find a way to escape a container, traverse a path, or corrupt
 the host filesystem through sdme, please open an issue.
 
-## 15. Reliability
+## 16. Reliability
 
 Multi-step operations in sdme are designed to fail cleanly rather than
 leave broken state behind.

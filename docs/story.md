@@ -63,7 +63,7 @@ base OS imports work like directory imports: detect the distro, install
 systemd and D-Bus, done. App images are different: sdme creates a
 systemd container with one of your existing rootfs and places the OCI
 app inside it as a chroot with its own network namespace. A systemd
-service manages the lifecycle. It was [tricky](hacks.md) to get
+service manages the lifecycle. It was [tricky](architecture.md#8-oci-integration) to get
 right, but it works.
 
 Once those were working, we needed pods. A pod is a shared network

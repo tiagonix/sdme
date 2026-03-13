@@ -1,87 +1,133 @@
 # Using sdme
 
-sdme is a container manager for Linux built on top of systemd-nspawn and
-overlayfs. It produces a single static binary that creates, runs, and
-manages containers as regular systemd services. No daemon, no runtime
-dependency beyond systemd itself.
+## 1. Introduction
 
-From a Linux system with just systemd and sdme, you can create and run
-any container and cloud image that exists today. The containers boot a
-full systemd init, so you get journalctl, systemctl, cgroups, and
-everything else you already know.
+sdme is a container manager for Linux. It does not run containers itself.
+Instead, it creates overlayfs directories, generates a systemd template unit
+(`sdme@.service`), and tells systemd to start it. systemd runs
+`systemd-nspawn`, which boots a full init inside the container. sdme talks
+to systemd over D-Bus for start, stop, and status operations.
 
-## Install
+The result is that every sdme container is a regular systemd service. You
+manage it with `systemctl`, read its logs with `journalctl`, and apply
+resource limits through cgroups. If you already know systemd, you already
+know most of how sdme works at runtime.
+
+sdme is a single static binary. There is no daemon. All operations require
+root because they involve overlayfs mounts and D-Bus calls to systemd. All
+container data lives under `/var/lib/sdme`.
+
+For a deeper look at how the pieces fit together (the overlayfs layering,
+the template unit, the D-Bus protocol, the boot-wait logic), see the
+[architecture document](architecture.md).
+
+## 2. Installing sdme
+
+### The binary
 
 Download a static binary from
-[fiorix.github.io/sdme](https://fiorix.github.io/sdme/).
+[fiorix.github.io/sdme](https://fiorix.github.io/sdme/). Both x86_64 and
+aarch64 are available. Drop it somewhere in your PATH and you are done.
 
-sdme requires root for all operations. It talks to systemd over D-Bus
-and manages overlayfs mounts, both of which need elevated privileges.
+### System requirements
+
+sdme requires root and systemd version 252 or later. It checks the systemd
+version at startup and will tell you if yours is too old.
+
+The one package you need is `systemd-container`, which provides
+`systemd-nspawn` (the actual container runtime), `machinectl` (used by
+`sdme join` and `sdme exec`), and related tooling.
+
+Install it for your distribution:
+
+```bash
+# Debian / Ubuntu
+sudo apt install systemd-container
+
+# Fedora / CentOS / AlmaLinux
+sudo dnf install systemd-container
+
+# Arch Linux (nspawn is included in the base systemd package)
+sudo pacman -S systemd
+
+# openSUSE
+sudo zypper install systemd-container
+```
+
+If you plan to import QCOW2 cloud images, also install `qemu-utils` (or
+your distro's equivalent) for `qemu-nbd`.
 
 **On macOS?** See [macos.md](macos.md) for instructions using lima-vm.
 
-## Dependencies
+### Building from source
 
-sdme checks for its dependencies at runtime before using them. On most
-systemd-based distributions, you only need one extra package.
-
-| Program            | Package             | Used by                        |
-|--------------------|---------------------|--------------------------------|
-| `systemd` (>= 252) | `systemd`           | All commands (D-Bus)           |
-| `systemd-nspawn`   | `systemd-container` | Running containers             |
-| `machinectl`       | `systemd-container` | `sdme join`, `sdme exec`       |
-| `journalctl`       | `systemd`           | `sdme logs`                    |
-| `qemu-nbd`         | `qemu-utils`        | QCOW2 image imports only       |
-
-On Debian and Ubuntu:
+If you prefer to build sdme yourself:
 
 ```bash
-sudo apt install systemd-container
+cargo build --release       # build the binary
+cargo test                  # run all tests
+make                        # same as cargo build --release
+sudo make install           # install to /usr/local (does NOT rebuild)
 ```
 
-For QCOW2 image imports, also install `qemu-utils`.
+## 3. Cloning your machine
 
-## Your first container
-
-The simplest thing sdme does is clone your running host system:
+This is the simplest and most powerful thing sdme does. With one command,
+you get a full clone of your running system that you can break without
+consequences:
 
 ```bash
 sudo sdme new
 ```
 
-This creates an overlayfs clone of `/`, boots systemd inside it, and
-drops you into a shell. The host rootfs is the read-only lower layer;
-all writes go to the container's own upper layer. You can install
-packages, change configs, break things. The host is untouched.
+What happens behind the scenes: sdme creates an overlayfs mount with your
+host rootfs (`/`) as the read-only lower layer and a fresh directory as
+the writable upper layer. It then tells systemd to start the container,
+which boots `systemd-nspawn`, which boots a full systemd init inside. Once
+systemd reaches the running state, sdme drops you into a shell.
 
-By default, host-rootfs containers make `/etc/systemd/system` and
-`/var/log` opaque so the host's systemd overrides and log history
-don't leak in. Override this with `-o` or change the default:
+Every file on your system is visible inside the container, but all writes
+go to the upper layer. The host is untouched. You can `apt install`
+packages, edit `/etc` files, build software, test configuration changes,
+even break systemd units. When you are done, remove the container and
+everything is gone.
 
-```bash
-sudo sdme config set host_rootfs_opaque_dirs /etc/systemd/system,/var/log
-```
+### What you can do inside
+
+The container is a full Linux system. It has its own systemd, its own
+journal, its own process tree. You can:
+
+- Install and remove packages (`apt install`, `dnf install`, etc.)
+- Start and stop services (`systemctl start nginx`)
+- Edit configuration files and test the results
+- Build and run software
+- Break things without fear
+
+The host filesystem is always safe underneath the overlayfs lower layer.
 
 ### Container lifecycle
 
-Once a container exists, you manage it with familiar patterns:
+Once you have created a container (either through `sdme new` or `sdme
+create`), you manage it with these commands:
 
 ```bash
-sudo sdme ps                     # list containers
-sudo sdme join <name>            # enter a running container
-sudo sdme join --start <name>    # start if stopped, then enter
-sudo sdme exec <name> -- ls /    # run a command inside
-sudo sdme logs <name>            # view container journal
-sudo sdme stop <name>...         # graceful shutdown
+sudo sdme ps                     # list containers with status and health
+sudo sdme join mybox             # enter a running container's shell
+sudo sdme join --start mybox     # start it first if stopped, then enter
+sudo sdme exec mybox -- ls /     # run a one-off command inside
+sudo sdme logs mybox             # view the container's journal
+sudo sdme stop mybox             # graceful shutdown (SIGRTMIN+4)
 sudo sdme stop --all             # stop all running containers
-sudo sdme rm <name>...           # remove container and files
+sudo sdme start mybox            # start a stopped container
+sudo sdme start --all            # start all stopped containers
+sudo sdme rm mybox               # remove the container and its files
 sudo sdme rm --all               # remove all containers
-sudo sdme enable <name>...       # auto-start on boot
-sudo sdme disable <name>...      # remove auto-start
+sudo sdme enable mybox           # auto-start on host boot
+sudo sdme disable mybox          # remove auto-start
 ```
 
-`sdme new` is a shortcut that combines create, start, and join. For
-more control, use create and start separately:
+`sdme new` is a shortcut that combines create, start, and join. When you
+want more control over the process, use them separately:
 
 ```bash
 sudo sdme create mybox
@@ -89,143 +135,326 @@ sudo sdme start mybox
 sudo sdme join mybox
 ```
 
-## Importing other distros
+### Bind mounts
 
-The host clone is great for quick experiments, but the real power comes
-from importing root filesystems from other distributions. Each imported
-rootfs becomes a reusable template. You can spin up as many containers
-as you want from it; each gets its own overlayfs upper layer.
-
-### From an OCI registry
-
-The easiest way to get a distro rootfs. sdme speaks the OCI Distribution
-Spec natively (no Docker or Podman required):
+To share directories between the host and the container, use `-b` (or
+`--bind`). The syntax is `host-path:container-path`, with an optional
+`:ro` suffix for read-only mounts:
 
 ```bash
-sudo sdme fs import debian docker.io/debian
-sudo sdme fs import ubuntu docker.io/ubuntu:24.04
-sudo sdme fs import fedora quay.io/fedora/fedora
+sudo sdme create mybox -b /srv/data:/data -b /var/log/app:/var/log/app:ro
 ```
 
-Then create containers from them:
+Paths must be absolute and cannot contain `..`. The bind mounts are stored
+in the container's state file and applied every time the container starts.
+
+### Environment variables
+
+Set environment variables for the container's init process with `-e` (or
+`--env`):
 
 ```bash
-sudo sdme new -r debian
-sudo sdme new -r ubuntu
-sudo sdme new -r fedora
+sudo sdme create mybox -e MY_VAR=hello -e DEBUG=1
 ```
 
-### From debootstrap
+These are passed to `systemd-nspawn` as `--setenv=` flags and are visible
+to all processes inside the container.
 
-If you prefer building rootfs locally (on Debian/Ubuntu):
+### Opaque directories
+
+When you clone the host, certain directories should not inherit content
+from the lower layer. For example, you usually do not want the host's
+systemd unit overrides or old log files leaking into the container. sdme
+handles this with "opaque directories": it sets the
+`trusted.overlay.opaque` xattr on them, telling overlayfs to hide the
+lower-layer contents.
+
+The defaults are `/etc/systemd/system` and `/var/log`. You can override
+them per container with `-o`:
 
 ```bash
-debootstrap --include=dbus,systemd noble /tmp/ubuntu
-sudo sdme fs import ubuntu /tmp/ubuntu
-sudo sdme new -r ubuntu
+sudo sdme create mybox -o /etc/systemd/system,/var/log,/tmp
 ```
 
-### From a cloud image (QCOW2)
-
-sdme can import QCOW2 and raw disk images by mounting them via
-`qemu-nbd`, inspecting the partition table, and copying the rootfs:
+Or change the default for all host-rootfs containers:
 
 ```bash
-sudo sdme fs import cloud-ubuntu some-cloud-image.qcow2
-sudo sdme new -r cloud-ubuntu
+sudo sdme config set host_rootfs_opaque_dirs /etc/systemd/system,/var/log
 ```
 
-There is no cloud-init support, but the imported rootfs is a fully
-bootable systemd container.
+### A quick test: running nginx in a host clone
 
-### Managing root filesystems
-
-```bash
-sudo sdme fs ls                  # list imported rootfs
-sudo sdme fs rm ubuntu           # remove a rootfs
-```
-
-## OCI applications
-
-Beyond base OS images, sdme can run OCI application images (nginx,
-redis, mysql, postgresql, anything on Docker Hub) as systemd services
-inside containers. The concept: take a base OS rootfs that has systemd,
-place the OCI app rootfs under `/oci/apps/{name}/root`, and generate a
-systemd service (`sdme-oci-{name}.service`) that chroots into it.
-
-You get the OCI packaging model (pull from any registry) with the
-systemd operational model (journalctl, systemctl, cgroup limits).
-
-### Quick example: nginx
+To see the host clone in action, try this:
 
 ```bash
-# Import a base OS if you haven't already
-sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
-
-# Import nginx as an OCI app on top of ubuntu
-sudo sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
-
-# Create and enter the container
-sudo sdme new -r nginx
+sudo sdme new --name webtest
 ```
 
 Inside the container:
 
 ```bash
-systemctl status sdme-oci-nginx.service
+apt install -y nginx
+systemctl start nginx
 curl -s http://localhost
 ```
 
-Since containers share the host network by default, you can also reach
-nginx from the host directly.
+Since containers share the host's network by default, you can also reach
+nginx from the host:
 
-To avoid passing `--base-fs` every time, set a default:
+```bash
+curl -s http://localhost
+```
+
+When you are done, exit the container and clean up:
+
+```bash
+sudo sdme rm webtest
+```
+
+The host never had nginx installed.
+
+## 4. Importing root filesystems
+
+The host clone is useful for quick experiments, but the real power comes
+from importing root filesystems from other distributions. Each imported
+rootfs becomes a reusable template: you can create as many containers as
+you want from it, and each one gets its own overlayfs upper layer.
+
+### 4.1 Choosing an import source
+
+sdme auto-detects the source type. Here are the five options and when to
+use each:
+
+| Source | Example | When to use |
+|--------|---------|-------------|
+| OCI registry | `docker.io/ubuntu:24.04` | Easiest path; any distro on Docker Hub or Quay |
+| Directory | `/tmp/ubuntu` | debootstrap, custom builds |
+| Tarball | `rootfs.tar.gz` | Pre-built archives (auto-detects gz/bz2/xz/zstd) |
+| URL | `https://...rootfs.tar.xz` | Remote tarballs, cloud image URLs |
+| QCOW2 | `cloud-image.qcow2` | Cloud images (requires `qemu-nbd`) |
+
+The OCI registry path is what most people want. sdme speaks the OCI
+Distribution Spec natively, so no Docker or Podman is required:
+
+```bash
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+sudo sdme fs import fedora quay.io/fedora/fedora:41 -v --install-packages=yes
+```
+
+The `-v` flag shows progress. The `--install-packages=yes` flag tells sdme
+to install any missing packages needed for `machinectl shell` to work
+(things like `util-linux` and `pam` on RHEL-family distros).
+
+For a directory-based import (useful with debootstrap on Debian/Ubuntu):
+
+```bash
+debootstrap --include=dbus,systemd noble /tmp/ubuntu
+sudo sdme fs import ubuntu /tmp/ubuntu
+```
+
+For QCOW2 cloud images:
+
+```bash
+sudo sdme fs import cloud-ubuntu some-cloud-image.qcow2
+```
+
+There is no cloud-init support, but the imported rootfs is a fully bootable
+systemd container.
+
+Once imported, create containers from any rootfs with `-r`:
+
+```bash
+sudo sdme new -r ubuntu
+sudo sdme new -r fedora
+```
+
+### 4.2 The distro support matrix
+
+After importing a rootfs, sdme detects the distribution, checks for
+systemd, and if systemd is missing, installs it via chroot. The
+`--install-packages` flag controls this behavior. Supported distro
+families: Debian (apt-get), Fedora (dnf), Arch (pacman), SUSE (zypper).
+NixOS is a special case: it must be pre-built with systemd, since there is
+no chroot-based package installation for Nix.
+
+The following matrix is verified in the release process:
+
+```
+Base OS       Source                              Tested
+-----------   ----------------------------------  ------
+debian        docker.io/debian:stable             Yes
+ubuntu        docker.io/ubuntu:24.04              Yes
+fedora        quay.io/fedora/fedora:41            Yes
+centos        quay.io/centos/centos:stream9       Yes
+almalinux     quay.io/almalinuxorg/almalinux:9    Yes
+suse          docker.io/opensuse/tumbleweed       Yes
+archlinux     docker.io/archlinux                 Yes
+```
+
+The key point: once imported, you can spin up any number of containers from
+the same rootfs. Each gets its own overlayfs layer, so they are completely
+independent.
+
+### 4.3 Managing root filesystems
+
+Listing and removing imported rootfs is straightforward:
+
+```bash
+sudo sdme fs ls                  # list imported rootfs with size and distro
+sudo sdme fs rm ubuntu           # remove an imported rootfs
+```
+
+For more on how the fs subsystem works internally, see
+[architecture.md, Section 6](architecture.md#6-the-fs-subsystem-managing-root-filesystems).
+
+## 5. OCI applications
+
+### 5.1 Base OS vs application images
+
+This is the key conceptual distinction for OCI images in sdme. A "base OS"
+image (ubuntu, fedora, debian) contains systemd and can boot as a
+standalone container. An "application" image (nginx, redis, postgresql) has
+no init system; it expects something else to run it.
+
+sdme auto-detects which mode to use. If the image has systemd, it is
+treated as a base OS rootfs. If not, it is treated as an application that
+needs a base OS to run inside. You can override this with `--oci-mode`
+(values: `auto`, `base`, `app`), but auto-detection works correctly in
+practice.
+
+### 5.2 How OCI apps work
+
+When you import an application image with `--base-fs`, sdme uses a
+"capsule" model. It takes your base OS rootfs (which has systemd), copies
+it, and places the OCI application's files under
+`/oci/apps/{name}/root` inside it. Then it generates a systemd service
+unit (`sdme-oci-{name}.service`) that starts the application inside a
+chroot (`RootDirectory=/oci/apps/{name}/root`).
+
+The app name is derived from the image. For example,
+`docker.io/redis` becomes `redis`, and
+`docker.io/nginxinc/nginx-unprivileged` becomes `nginx-unprivileged`.
+
+Here is the full workflow, from importing a base OS to running an OCI app:
+
+```bash
+# Step 1: import a base OS (only needed once)
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+
+# Step 2: import an OCI app on top of that base OS
+sudo sdme fs import redis docker.io/redis --base-fs=ubuntu -v
+
+# Step 3: create and enter the container
+sudo sdme new -r redis
+```
+
+Inside the container, the app is a regular systemd service:
+
+```bash
+systemctl status sdme-oci-redis.service
+```
+
+From outside, you can view its logs and run commands in the app's root:
+
+```bash
+sudo sdme logs --oci mycontainer
+sudo sdme logs --oci mycontainer -f     # follow mode
+sudo sdme exec --oci mycontainer -- redis-cli ping
+```
+
+The `--oci` flag on `logs` shows the OCI app service journal instead of
+the container's main journal. On `exec`, it runs the command inside the
+app's rootfs (`/oci/apps/{name}/root`) rather than the container root.
+
+### 5.3 The convenience of this model
+
+Why is this useful? You get the OCI distribution model (pull from any
+registry, use any image on Docker Hub, GHCR, or Quay) combined with the
+systemd operational model (journalctl, systemctl, cgroup limits, security
+hardening). The base OS is yours: you can extend it with monitoring
+agents, custom services, log shippers, or anything else via `sdme fs
+build`. These extensions run alongside the OCI workload inside the same
+container.
+
+Docker and Podman have no equivalent to this. You either run one process
+per container or build increasingly complex entrypoint scripts. With sdme,
+you have a full systemd environment where the OCI app is just one of
+potentially many services.
+
+**Setting a default base OS.** To avoid passing `--base-fs` on every OCI
+app import:
 
 ```bash
 sudo sdme config set default_base_fs ubuntu
 ```
 
-### OCI environment variables
+Now `sudo sdme fs import redis docker.io/redis -v` will automatically use
+ubuntu as the base.
 
-Use `--oci-env` on `create` or `new` to set environment variables for
-the OCI app service. These are written to the OCI env file
-(`/oci/apps/{name}/env`) in the container's overlayfs upper layer and
-read by the `sdme-oci-{name}.service` unit via `EnvironmentFile=`.
-
-This is separate from `-e`/`--env`, which sets environment variables
-for the container's systemd init (PID 1) via nspawn `--setenv=` flags.
+**OCI environment variables.** Use `--oci-env` on `create` or `new` to
+set environment variables for the OCI app service:
 
 ```bash
 sudo sdme new -r postgresql --oci-env POSTGRES_PASSWORD=secret
 ```
 
-### OCI exec and logs
+These are written to the app's env file (`/oci/apps/{name}/env`) and
+loaded by the systemd service via `EnvironmentFile=`. This is separate
+from `-e`/`--env`, which sets environment variables for the container's
+systemd init (PID 1) via nspawn `--setenv=` flags. The distinction
+matters: `--oci-env` reaches the app, `-e` reaches init.
 
-Run a command inside the OCI app root (`/oci/apps/{name}/root`) without needing
-chroot:
+**OCI ports and volumes.** OCI images declare exposed ports and volumes
+in their metadata. sdme reads these at import time and auto-wires them
+when you create a container. Ports become `--port` rules (when the
+container has a private network), and volumes become bind mounts to
+host-side directories under `/var/lib/sdme/volumes/{container}/`. You
+can suppress this behavior with `--no-oci-ports` and `--no-oci-volumes`.
+Your own `--port` and `--bind` flags always take priority.
 
-```bash
-sudo sdme exec --oci mycontainer redis-cli ping
+### 5.4 Security
+
+OCI apps get additional isolation automatically, beyond what the nspawn
+container provides. The `isolate` binary (a static ELF under 2 KiB,
+written into the OCI root at import time) creates PID and IPC namespaces,
+remounts `/proc` with restricted options, and drops `CAP_SYS_ADMIN` from
+the bounding set before exec'ing the workload. The systemd service unit
+also applies hardening directives: `NoNewPrivileges=yes`,
+`ProtectKernelModules=yes`, `ProtectProc=invisible`, and others.
+
+The net effect is that the OCI application process sees its own PID
+namespace, cannot access the container's IPC objects, cannot see other
+processes, and has an effective capability set comparable to Docker's
+defaults.
+
+For the full details, see [security.md, Part 2](security.md#part-2-oci-workload-security)
+and [architecture.md, Section 8](architecture.md#8-oci-integration).
+
+### 5.5 Tested OCI app matrix
+
+The following applications are verified across all supported base OS
+distros in the release process:
+
+```
+App                  Base OS distros tested
+-------------------  ----------------------------------
+nginx-unprivileged   all 7 (debian thru archlinux)
+redis                all 7
+postgresql           all 7
 ```
 
-View the OCI app service journal instead of the container unit journal:
+OCI port forwarding and volume mounting are additionally tested on ubuntu
+and fedora. See [test/results.md](../test/results.md) for the complete
+test matrix.
 
-```bash
-sudo sdme logs --oci mycontainer
-sudo sdme logs --oci mycontainer -f    # follow mode
-```
+## 6. Pods
 
-See the [OCI integration section](architecture.md#8-oci-integration)
-in the architecture doc for internals, including the capsule model,
-privilege dropping, and known limitations.
+A pod is a shared network namespace that multiple containers can join.
+This is the same concept as Kubernetes pods: one network, multiple
+processes. Containers in the same pod can reach each other on localhost
+without any port forwarding or bridge configuration.
 
-## Pods
-
-Pods give multiple containers a shared network namespace so they can
-reach each other on localhost. Same concept as Kubernetes pods: one
-network namespace, multiple processes.
-
-### Lifecycle
+### Creating and managing pods
 
 ```bash
 sudo sdme pod new my-pod         # create a pod
@@ -235,31 +464,53 @@ sudo sdme pod rm -f my-pod       # force remove
 ```
 
 A pod creates a network namespace at `/run/sdme/pods/{name}/netns` with
-loopback only. State is persisted at `{datadir}/pods/{name}/state`.
+only a loopback interface. The namespace persists until the pod is removed.
 
-### Joining a pod
+### 6.1 The `--pod` flag: whole container in the pod's netns
 
-Containers join a pod at creation time via `--pod` or `--oci-pod`.
-
-**`--pod` (whole container):** The entire nspawn container (init,
-services, everything) runs in the pod's network namespace:
+With `--pod`, the entire nspawn container (init, services, everything)
+runs in the pod's network namespace:
 
 ```bash
 sudo sdme pod new my-pod
 sudo sdme create --pod=my-pod -r ubuntu db
 sudo sdme create --pod=my-pod -r ubuntu app
 sudo sdme start db app
-# db and app communicate via 127.0.0.1
 ```
 
-`--pod` is mutually exclusive with `--private-network`. Incompatible
-with `--userns` and `--hardened` because the kernel blocks
-`setns(CLONE_NEWNET)` across user namespace boundaries.
+Both containers share localhost. A service listening on port 5432 in `db`
+is reachable from `app` at `127.0.0.1:5432`, and vice versa.
 
-**`--oci-pod` (app process only):** Only the
-`sdme-oci-{name}.service` process enters the pod's network namespace.
-The container's systemd init and other services remain in their own
-namespace:
+To reach pod services from the host, enter the pod's network namespace:
+
+```bash
+sudo nsenter --net=/run/sdme/pods/my-pod/netns curl -s http://localhost
+```
+
+**Limitations.** `--pod` is incompatible with `--userns` and `--hardened`.
+The reason is specific: the kernel blocks `setns(CLONE_NEWNET)` when the
+calling process is in a different user namespace than the one that owns
+the target network namespace. Since `--userns` (and `--hardened`, which
+implies it) puts the container in a child user namespace, while the pod's
+netns was created in the init user namespace, the kernel refuses the
+operation. This is not an sdme limitation; it is a kernel security
+boundary.
+
+If you need both pod networking and security hardening, use `--oci-pod`
+instead (see below).
+
+### 6.2 The `--oci-pod` flag: OCI app only in the pod's netns
+
+With `--oci-pod`, only the `sdme-oci-{name}.service` process enters the
+pod's network namespace. The container's systemd init and other services
+stay in their own namespace. This works with `--hardened` because the
+netns join happens inside the container via a systemd drop-in
+(`NetworkNamespacePath=`), not at the nspawn level.
+
+The requirement is that the container must have `--private-network`
+(or `--hardened`/`--strict`, which imply it). Without a private network,
+systemd-nspawn strips `CAP_NET_ADMIN`, and the inner systemd cannot call
+`setns(CLONE_NEWNET)` for the `NetworkNamespacePath=` directive.
 
 ```bash
 sudo sdme pod new web-pod
@@ -267,119 +518,209 @@ sudo sdme create --oci-pod=web-pod --hardened -r nginx web
 sudo sdme start web
 ```
 
-Requires `--private-network` (or `--hardened`/`--strict`, which imply
-it). Works with `--hardened` because the netns join happens inside the
-container's own user namespace.
+**When to use which.** Use `--pod` when you want the simplest shared
+networking and do not need `--userns` or `--hardened`. Use `--oci-pod`
+when you need hardened containers that share an application-level network.
 
-**Combining both flags:** Both `--pod` and `--oci-pod` can be set on
-the same container, pointing to the same or different pods. When set to
-different pods, the container-level networking and the application-level
-networking operate in separate network namespaces.
+Both flags can be set on the same container, pointing to the same or
+different pods. When set to different pods, container-level networking
+and application-level networking operate in separate network namespaces.
 
-```bash
-sudo sdme pod new infra-pod
-sudo sdme pod new app-pod
-sudo sdme create --pod=infra-pod --oci-pod=app-pod -r nginx web
-```
+### 6.3 Multi-service patterns
 
-### Host access via nsenter
-
-Reach pod services from the host by entering the pod's network
-namespace:
-
-```bash
-sudo nsenter --net=/run/sdme/pods/my-pod/netns curl -s http://localhost
-```
-
-### Multi-service patterns
-
-Multiple containers in a pod communicate over localhost without port
-forwarding or bridges:
+Pods are most useful when you have multiple services that need to
+communicate over localhost:
 
 ```bash
 sudo sdme pod new monitoring
 sudo sdme create --pod=monitoring -r nginx web
 sudo sdme create --pod=monitoring -r redis cache
-sudo sdme create --pod=monitoring -r prometheus monitor
-sudo sdme start web cache monitor
+sudo sdme start web cache
 ```
 
 All services are reachable from any container in the pod: nginx on :80,
-redis on :6379, prometheus on :9090.
+redis on :6379.
 
-**OCI app pod groups.** Group OCI app containers into isolated pod
-networks:
+For OCI apps with security hardening:
 
 ```bash
-# Web tier
 sudo sdme pod new web-tier
 sudo sdme create --oci-pod=web-tier --hardened -r nginx frontend
-sudo sdme create --oci-pod=web-tier --hardened -r nginx api-gateway
-
-# Data tier (separate pod, separate network)
-sudo sdme pod new data-tier
-sudo sdme create --oci-pod=data-tier --hardened -r redis cache
-sudo sdme create --oci-pod=data-tier --hardened -r mysql db
+sudo sdme create --oci-pod=web-tier --hardened -r redis cache
+sudo sdme start frontend cache
 ```
 
-Containers in `web-tier` share localhost. Containers in `data-tier`
-share a separate localhost. The two tiers are network-isolated.
+### 6.4 What's tested
 
-## Security
+Pod tests verify loopback connectivity between `--pod` containers, correct
+rejection of incompatible flag combinations (`--pod` with `--hardened`,
+`--pod` with `--userns`, `--oci-pod` without `--private-network`), and
+successful `--oci-pod` with `--hardened`. See
+[test/results.md](../test/results.md) for details.
 
-By default, sdme trusts its workloads. For hardening, there are two
-convenient flags and a set of fine-grained controls.
+For the pod implementation internals, see
+[architecture.md, Section 10](architecture.md#10-pods).
 
-**`--hardened`** enables user namespace isolation, private network,
-no-new-privileges, and drops several capabilities:
+## 7. Kubernetes Pod YAML
+
+sdme can create containers from Kubernetes Pod YAML files. Each pod maps
+to a single nspawn container where each workload runs as a separate
+systemd service (`sdme-oci-{name}.service`) chrooted into its own rootfs.
+Multi-container pods share localhost and can communicate the same way they
+would in a real Kubernetes cluster.
+
+### 7.1 Preparing a base rootfs
+
+You need a base rootfs with systemd. If you followed section 4, you
+already have one. If not:
+
+```bash
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+```
+
+To avoid passing `--base-fs` on every kube command:
+
+```bash
+sudo sdme config set default_base_fs ubuntu
+```
+
+### 7.2 Running kube pods
+
+Write a Pod YAML file (or use an existing one). Here is a minimal example:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  - name: nginx
+    image: docker.io/nginx:latest
+    ports:
+    - containerPort: 80
+```
+
+Then apply it:
+
+```bash
+sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu
+```
+
+This pulls the image, builds a combined rootfs (base OS plus the app
+under `/oci/apps/nginx/root`), creates the container, boots it, and drops
+you into a shell. Each container in the pod becomes a
+`sdme-oci-{name}.service` inside the single nspawn container.
+
+To create without starting:
+
+```bash
+sudo sdme kube create -f nginx-pod.yaml --base-fs ubuntu
+sudo sdme start nginx
+```
+
+To stop and clean up (removes both the container and the kube rootfs):
+
+```bash
+sudo sdme kube delete nginx
+```
+
+**Supported Pod spec features:**
+
+- `containers[].image`, `name`, `command`, `args`, `env`, `ports`,
+  `volumeMounts`, `workingDir`, `imagePullPolicy`, `resources`,
+  `readinessProbe`
+- `initContainers[]` (run-to-completion before app containers)
+- Volumes: `emptyDir`, `hostPath`, `secret`, `configMap`,
+  `persistentVolumeClaim`
+- `env[].valueFrom` with `secretKeyRef` and `configMapKeyRef`
+- `restartPolicy` (Always, OnFailure, Never)
+- `securityContext.runAsUser` / `runAsGroup` / `runAsNonRoot` (pod-level)
+- `terminationGracePeriodSeconds`
+- Deployments (`kind: Deployment`, apps/v1) are accepted; sdme extracts
+  the pod template
+
+**Secrets and configmaps.** Create them before applying a pod that
+references them:
+
+```bash
+sudo sdme kube secret create db-creds --from-literal user=admin --from-literal password=s3cret
+sudo sdme kube configmap create app-config --from-literal log_level=info --from-file config.yaml=./config.yaml
+
+sudo sdme kube secret ls
+sudo sdme kube configmap ls
+```
+
+Secrets and configmaps can be mounted as volumes or referenced via
+`env[].valueFrom` in the pod spec. Values are resolved at container
+creation time; changes to secrets or configmaps after creation do not
+affect running containers.
+
+**Multi-container pods.** For pods with more than one container, use
+`--oci-app` to target a specific service with `exec` and `logs`:
+
+```bash
+sudo sdme exec --oci-app nginx mycontainer -- nginx -t
+sudo sdme logs --oci-app redis mycontainer -f
+```
+
+Single-container pods auto-select the only app, so `--oci` is sufficient.
+
+**What's tested.** The kube test suite runs six progressive levels:
+L1 (basic lifecycle), L2 (pod spec features: command/args, env, init
+containers, restart policy, security context, resources, readiness
+probes), L3 (volumes: emptyDir, hostPath, secrets, configmaps, PVCs),
+L4 (multi-container localhost connectivity), L5 (Redis round-trip), and
+L6 (a full Gitea + MySQL + Nginx stack). All pass. See
+[test/results.md](../test/results.md) for the complete results.
+
+### 7.3 Composing kube pods with pod networking
+
+You can combine `--pod` or `--oci-pod` with kube pods to give multiple
+kube containers a shared network namespace:
+
+```bash
+sudo sdme pod new infra
+sudo sdme kube apply -f frontend.yaml --base-fs ubuntu --pod infra
+sudo sdme kube apply -f backend.yaml --base-fs ubuntu --pod infra
+```
+
+Both kube containers now share localhost. The frontend can reach the
+backend's services directly, and vice versa.
+
+For the full kube specification reference, see
+[architecture.md, Section 11](architecture.md#11-kubernetes-pod-support).
+
+## 8. Security, networking, and resource limits
+
+This guide focuses on the concepts and workflows above. For the remaining
+topics, the existing documentation covers them well:
+
+**Security.** sdme provides three tiers of hardening. `--hardened` enables
+user namespace isolation, private network, no-new-privileges, and drops
+several capabilities. `--strict` adds Docker-equivalent capability drops,
+seccomp filters, and AppArmor. Individual flags (`--drop-capability`,
+`--no-new-privileges`, `--read-only`, `--system-call-filter`,
+`--apparmor-profile`) are also available for fine-grained control.
 
 ```bash
 sudo sdme new -r ubuntu --hardened
-```
-
-**`--strict`** implies `--hardened` and adds Docker-equivalent
-capability drops, seccomp filters, and AppArmor:
-
-```bash
 sudo sdme new -r ubuntu --strict
 ```
 
-Individual flags are also available:
+See [security.md](security.md) for the full comparison with Docker and
+Podman, and [architecture.md, Section 14](architecture.md#15-security)
+for implementation details.
+
+**Networking.** Containers share the host network by default. For
+isolation, use `--private-network`, optionally combined with
+`--network-veth`, `--network-zone`, or `--port`:
 
 ```bash
-sudo sdme create mybox -r ubuntu \
-  --userns \
-  --private-network \
-  --drop-capability CAP_NET_RAW \
-  --no-new-privileges \
-  --read-only \
-  --system-call-filter '~@raw-io'
+sudo sdme create mybox --private-network --network-veth --port 8080:80
 ```
 
-See [architecture.md, Section 14](architecture.md#14-security) for
-implementation details and [security.md](security.md) for comparisons
-with Docker and Podman.
-
-## Networking
-
-By default, containers share the host's network namespace. Services
-bind directly to the host's interfaces, no port mapping needed. This
-is equivalent to `docker run --net=host`.
-
-For isolation:
-
-```bash
-sudo sdme create mybox --private-network                # loopback only
-sudo sdme create mybox --private-network --network-veth  # veth link
-sudo sdme create mybox --private-network --port 8080:80  # port forwarding
-```
-
-`--hardened` and `--strict` both enable `--private-network`
-automatically.
-
-### Network zones
-
-Containers in the same zone can reach each other by name:
+Network zones let containers in the same zone reach each other by name:
 
 ```bash
 sudo sdme create -r nginx --private-network --network-zone=myzone -p 8080:80 web
@@ -388,92 +729,43 @@ sudo sdme start web client
 sudo sdme exec client -- curl http://web
 ```
 
-## Resource limits
+See [architecture.md, Section 9](architecture.md#9-networking) for details.
 
-Containers can have memory and CPU limits applied via cgroups:
+**Resource limits.** Memory and CPU limits are applied via cgroups:
 
 ```bash
 sudo sdme create mybox -r ubuntu --memory 2G --cpus 0.5
 sudo sdme set mybox --memory 4G --cpus 2
 ```
 
-Limits are applied as systemd drop-in files and take effect on the
-next container start.
+**Building rootfs.** `sdme fs build` takes a Dockerfile-like config to
+produce custom rootfs images. See
+[architecture.md, Section 7](architecture.md#7-fs-build-building-root-filesystems).
 
-## Bind mounts and environment variables
-
-Custom bind mounts and environment variables are set at creation time:
-
-```bash
-sudo sdme create mybox -r ubuntu \
-  --bind /srv/data:/data \
-  --bind /var/log/app:/var/log/app:ro \
-  --env MY_VAR=hello
-```
-
-## Building root filesystems
-
-`sdme fs build` takes a Dockerfile-like config and produces a new
-rootfs:
-
-```
-FROM ubuntu
-COPY ./my-app /opt/my-app
-RUN apt-get update && apt-get install -y libssl3
-RUN systemctl enable my-app.service
-```
-
-```bash
-sudo sdme fs build my-rootfs build.conf
-```
-
-See [architecture.md](architecture.md) for details on how the build
-engine works.
-
-## Configuration
-
-sdme stores settings in `~/.config/sdme/sdmerc` (TOML format). Since
-sdme runs as root via `sudo`, it checks `$SUDO_USER` and uses that
-user's config file if it exists.
+**Configuration.** Settings are stored in `~/.config/sdme/sdmerc` (TOML).
+Since sdme runs as root via sudo, it uses `$SUDO_USER` to find the right
+config file.
 
 ```bash
 sudo sdme config get                    # show all settings
 sudo sdme config set boot_timeout 120   # change a setting
 ```
 
-| Setting                   | Default                        | Description                     |
-|---------------------------|--------------------------------|---------------------------------|
-| `interactive`             | `true`                         | Enable interactive prompts      |
-| `datadir`                 | `/var/lib/sdme`                | Root data directory             |
-| `boot_timeout`            | `60`                           | Seconds to wait for boot        |
-| `join_as_sudo_user`       | `true`                         | Join as `$SUDO_USER`           |
-| `host_rootfs_opaque_dirs` | `/etc/systemd/system,/var/log` | Default opaque dirs             |
-| `default_base_fs`         | (none)                         | Default `--base-fs` for OCI app |
-
-## Building from source
-
-```bash
-cargo build --release       # build the binary
-cargo test                  # run all tests
-make                        # same as cargo build --release
-sudo make install           # install to /usr/local (does NOT rebuild)
-```
-
-See [test/README.md](../test/README.md) for the test suite and
-[test/results.md](../test/results.md) for the latest verified results.
-
-## Further reading
+## 9. Further reading
 
 - [Architecture and design](architecture.md): internals, overlayfs
   layout, container lifecycle, the build engine
-- [OCI integration](architecture.md#8-oci-integration): capsule model,
-  privilege dropping, ports, volumes, limitations
-- [Security implementation](architecture.md#14-security): capabilities,
+- [OCI integration](architecture.md#8-oci-integration): the capsule
+  model, privilege dropping, ports, volumes, known limitations
+- [Security implementation](architecture.md#15-security): capabilities,
   seccomp, AppArmor, `--hardened`, `--strict`
 - [Security comparisons](security.md): isolation model vs Docker and
-  Podman
-- [OCI-to-nspawn bridging](hacks.md): how sdme handles non-root OCI
-  users and /dev/stdout compatibility
+  Podman, OCI workload security, kube security
+- [Kubernetes Pod support](architecture.md#11-kubernetes-pod-support):
+  full spec reference, supported fields, filesystem layout, service unit
+  generation
+- [OCI-to-nspawn bridging](architecture.md#8-oci-integration): how sdme
+  handles non-root OCI users and /dev/stdout compatibility
 - [macOS](macos.md): running sdme on macOS via lima-vm
 - [Tests](../test/README.md): test suite, how to run
 - [Test results](../test/results.md): latest verified results
