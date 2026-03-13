@@ -117,6 +117,8 @@ sudo sdme join --start mybox     # start it first if stopped, then enter
 sudo sdme exec mybox -- ls /     # run a one-off command inside
 sudo sdme logs mybox             # view the container's journal
 sudo sdme stop mybox             # graceful shutdown (SIGRTMIN+4)
+sudo sdme stop --term mybox     # terminate (SIGTERM, 30s timeout)
+sudo sdme stop --kill mybox     # force-kill all processes (SIGKILL, 15s)
 sudo sdme stop --all             # stop all running containers
 sudo sdme start mybox            # start a stopped container
 sudo sdme start --all            # start all stopped containers
@@ -133,6 +135,12 @@ want more control over the process, use them separately:
 sudo sdme create mybox
 sudo sdme start mybox
 sudo sdme join mybox
+```
+
+To create a container and enable auto-start on boot in one step:
+
+```bash
+sudo sdme create mybox --enable
 ```
 
 ### Bind mounts
@@ -222,12 +230,13 @@ you want from it, and each one gets its own overlayfs upper layer.
 
 ### 4.1 Choosing an import source
 
-sdme auto-detects the source type. Here are the five options and when to
+sdme auto-detects the source type. Here are the six options and when to
 use each:
 
 | Source | Example | When to use |
 |--------|---------|-------------|
 | OCI registry | `docker.io/ubuntu:24.04` | Easiest path; any distro on Docker Hub or Quay |
+| OCI tarball | `image.oci.tar.xz` | Local OCI image exported as a tarball (detected by `oci-layout` file) |
 | Directory | `/tmp/ubuntu` | debootstrap, custom builds |
 | Tarball | `rootfs.tar.gz` | Pre-built archives (auto-detects gz/bz2/xz/zstd) |
 | URL | `https://...rootfs.tar.xz` | Remote tarballs, cloud image URLs |
@@ -303,6 +312,19 @@ Listing and removing imported rootfs is straightforward:
 sudo sdme fs ls                  # list imported rootfs with size and distro
 sudo sdme fs rm ubuntu           # remove an imported rootfs
 ```
+
+sdme caches OCI blobs (image layers) to speed up repeated imports. You
+can inspect and manage the cache with `sdme fs cache`:
+
+```bash
+sudo sdme fs cache info            # show cache location, size, and blob count
+sudo sdme fs cache ls              # list cached blobs
+sudo sdme fs cache clean           # clean up unreferenced blobs
+sudo sdme fs cache clean --all     # remove all cached blobs
+```
+
+The cache directory and maximum size are configurable via `oci_cache_dir`
+and `oci_cache_max_size` (default: 10G).
 
 For more on how the fs subsystem works internally, see
 [architecture.md, Section 6](architecture.md#6-the-fs-subsystem-managing-root-filesystems).
@@ -625,6 +647,15 @@ To stop and clean up (removes both the container and the kube rootfs):
 sudo sdme kube delete nginx
 ```
 
+Security flags (`--hardened`, `--strict`, `--userns`, `--drop-capability`,
+`--capability`, `--no-new-privileges`, `--read-only`, `--system-call-filter`,
+`--apparmor-profile`) are available on both `kube apply` and `kube create`:
+
+```bash
+sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu --hardened
+sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu --strict
+```
+
 **Supported Pod spec features:**
 
 - `containers[].image`, `name`, `command`, `args`, `env`, `ports`,
@@ -712,12 +743,12 @@ sudo sdme new -r ubuntu --strict
 ```
 
 See [security.md](security.md) for the full comparison with Docker and
-Podman, and [architecture.md, Section 14](architecture.md#15-security)
+Podman, and [architecture.md, Section 15](architecture.md#15-security)
 for implementation details.
 
 **Networking.** Containers share the host network by default. For
 isolation, use `--private-network`, optionally combined with
-`--network-veth`, `--network-zone`, or `--port`:
+`--network-veth`, `--network-bridge`, `--network-zone`, or `--port`:
 
 ```bash
 sudo sdme create mybox --private-network --network-veth --port 8080:80

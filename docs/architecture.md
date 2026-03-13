@@ -867,23 +867,21 @@ network namespace level.
 
 OCI image environment variables are stored in `/oci/apps/{name}/env` inside the
 rootfs (loaded via `EnvironmentFile=-/oci/apps/{name}/env` in the generated unit).
-Runtime-only variables (e.g. `MYSQL_ROOT_PASSWORD`) must be added
-manually before first boot:
+Additional variables (e.g. `MYSQL_ROOT_PASSWORD`) can be set at creation time
+with `--oci-env`:
 
 ```bash
-echo 'MYSQL_ROOT_PASSWORD=secret' | sudo tee -a /var/lib/sdme/fs/mysql/oci/apps/mysql/env
+sudo sdme new -r mysql --oci-env MYSQL_ROOT_PASSWORD=secret
 ```
+
+The `--oci-env` flag appends to the existing env file from the OCI image,
+so image-defined variables are preserved unless explicitly overridden.
 
 ### Limitations
 
 - **One OCI service per container.** Each rootfs generates a single
   `sdme-oci-{name}.service`.
-- **Environment variables need manual setup.** Runtime-only variables
-  must be added to `/oci/apps/{name}/env` before first boot.
 - **No health checks.** OCI HEALTHCHECK directives are ignored.
-- **No restart policy mapping.** OCI restart policies don't map to
-  systemd; the generated unit uses systemd defaults.
-
 ### Future direction
 
 At this point this is all very exploratory. This journey is 1% complete.
@@ -1250,13 +1248,19 @@ pipe-separated) and reconstituted into nspawn arguments on every start.
 
 sdme stores its settings in a TOML file at `~/.config/sdme/sdmerc`:
 
-| Setting                   | Default                        | Description                                                            |
-|---------------------------|--------------------------------|------------------------------------------------------------------------|
-| `interactive`             | `true`                         | Enable interactive prompts                                             |
-| `datadir`                 | `/var/lib/sdme`                | Root directory for all container and rootfs data                       |
-| `boot_timeout`            | `60`                           | Seconds to wait for container boot before giving up                    |
-| `join_as_sudo_user`       | `true`                         | Join host-rootfs containers as `$SUDO_USER` instead of root            |
-| `host_rootfs_opaque_dirs` | `/etc/systemd/system,/var/log` | Default opaque dirs for host-rootfs containers (empty string disables) |
+| Setting                   | Default                              | Description                                                            |
+|---------------------------|--------------------------------------|------------------------------------------------------------------------|
+| `interactive`             | `true`                               | Enable interactive prompts                                             |
+| `datadir`                 | `/var/lib/sdme`                      | Root directory for all container and rootfs data                       |
+| `boot_timeout`            | `60`                                 | Seconds to wait for container boot before giving up                    |
+| `join_as_sudo_user`       | `true`                               | Join host-rootfs containers as `$SUDO_USER` instead of root            |
+| `host_rootfs_opaque_dirs` | `/etc/systemd/system,/var/log`       | Default opaque dirs for host-rootfs containers (empty string disables) |
+| `hardened_drop_caps`      | `CAP_SYS_PTRACE,CAP_NET_RAW,...`     | Comma-separated capabilities dropped by `--hardened`                   |
+| `default_base_fs`         | (empty)                              | Default base rootfs for OCI application images                         |
+| `docker_user`             | (empty)                              | Docker Hub username for authenticated pulls                            |
+| `docker_token`            | (empty)                              | Docker Hub personal access token for authenticated pulls               |
+| `oci_cache_dir`           | (empty = `{datadir}/cache/oci`)      | OCI blob cache directory                                               |
+| `oci_cache_max_size`      | `10G`                                | Maximum OCI blob cache size (`0` disables the cache)                   |
 
 Settings are read with `sdme config get` and written with
 `sdme config set <key> <value>`.

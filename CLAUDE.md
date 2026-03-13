@@ -58,6 +58,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme fs ls` | List imported root filesystems |
 | `sdme fs rm` | Remove imported root filesystems |
 | `sdme fs build` | Build a root filesystem from a build config |
+| `sdme fs cache info/ls/clean` | Manage the OCI blob cache (info, list, clean `[--all]`) |
 | `sdme set` | Set resource limits on a container (replaces all limits) |
 | `sdme config get/set` | View or modify configuration |
 | `sdme pod new` | Create a new pod (shared network namespace) |
