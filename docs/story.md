@@ -204,7 +204,7 @@ Test areas include:
 - Distro detection (Debian, Ubuntu, Fedora, RHEL, AlmaLinux, NixOS,
   unknown)
 - Name generation (collision avoidance, vowel mutation)
-- ELF generation for drop_privs + devfd_shim (x86_64 + aarch64
+- ELF generation for isolate + devfd_shim (x86_64 + aarch64
   machine code verification)
 - State file serialization roundtrips
 - Config loading/saving
@@ -249,7 +249,7 @@ verification.
 - x86_64
 - aarch64
 
-Both get custom ELF binaries generated at compile time (drop_privs +
+Both get custom ELF binaries generated at compile time (isolate +
 devfd_shim -- raw machine code emitters, not cross-compiled C).
 
 ### Security Tiers: 3

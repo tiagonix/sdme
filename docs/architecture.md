@@ -521,20 +521,21 @@ This is a known upstream limitation (see
 [systemd#12498](https://github.com/systemd/systemd/issues/12498),
 [systemd#19781](https://github.com/systemd/systemd/issues/19781)).
 
-sdme solves this with a generated static ELF binary (`drop_privs`,
-under 1 KiB) that performs `setgroups(0,NULL)` then `setgid` then
-`setuid` then `chdir` then `execve`, all via raw syscalls with no libc
-or NSS dependency. The binary is written to `/.sdme-drop-privs` inside
-the OCI root at import time (mode `0o111`, owned by root). For non-root
-users the generated unit becomes:
+sdme solves this with a generated static ELF binary (`isolate`,
+under 2 KiB) that creates PID/IPC namespaces, remounts /proc, drops
+`CAP_SYS_ADMIN`, optionally drops privileges (`setgroups`/`setgid`/
+`setuid`), changes the working directory, and exec's the target — all
+via raw syscalls with no libc or NSS dependency. The binary is written
+to `/.sdme-isolate` inside the OCI root at import time (mode `0o111`,
+owned by root). The generated unit becomes:
 
 ```ini
-ExecStart=/.sdme-drop-privs <uid> <gid> <workdir> <entrypoint> [args...]
+ExecStart=/.sdme-isolate <uid> <gid> <workdir> <entrypoint> [args...]
 ```
 
 No `User=` or `WorkingDirectory=` directives are needed; the binary
-handles both. For root users, the standard `User=root` unit is generated
-unchanged.
+handles both. For root users, uid and gid are 0; the binary still
+creates PID/IPC namespaces for proper container isolation.
 
 The OCI `User` field is resolved at import time against `etc/passwd`
 and `etc/group` inside the OCI rootfs, supporting named users, numeric

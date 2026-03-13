@@ -595,7 +595,6 @@ pub(crate) fn setup_kube_container(
         after_units,
         requires_units,
         readiness_exec: kc.readiness_exec.clone(),
-        isolate: true,
     })
 }
 

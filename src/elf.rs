@@ -1,9 +1,19 @@
-// elf.rs: Minimal ELF64 header construction
+// elf.rs: Shared types and minimal ELF64 header construction.
+//
+// Provides the `Arch` enum used by isolate and devfd_shim, and the ELF builder
+// used by isolate to produce static ET_EXEC binaries.
 //
 // Builds the smallest valid ELF64 executable: a 64-byte ELF header followed
 // by a single 56-byte PT_LOAD program header, then the machine code. No
 // section headers, no interpreter, no dynamic linking. The kernel maps the
 // entire file as a single read-execute segment and jumps to the entry point.
+
+/// Target architecture for generated binaries.
+#[derive(Clone, Copy)]
+pub enum Arch {
+    X86_64,
+    Aarch64,
+}
 
 /// ELF header + program header = 120 bytes. Code starts at this offset.
 pub const HEADER_SIZE: usize = 64 + 56;

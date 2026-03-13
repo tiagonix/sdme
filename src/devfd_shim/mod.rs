@@ -17,7 +17,7 @@ mod aarch64;
 mod elf;
 mod x86_64;
 
-use crate::drop_privs::Arch;
+use crate::elf::Arch;
 
 /// Generate a complete devfd shim shared library for the given architecture.
 ///

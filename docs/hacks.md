@@ -21,9 +21,10 @@ in that model break under systemd-nspawn:
    with ENXIO.
 
 sdme solves both with generated static binaries deployed at import time:
-a privilege-dropping ELF (`drop_privs`, under 1 KiB) and an LD_PRELOAD
-shared library (`devfd_shim`, approximately 4 KiB). Neither has a libc
-dependency; both use raw syscalls and are generated entirely in Rust.
+an isolation ELF (`isolate`, under 2 KiB) that creates PID/IPC namespaces
+and optionally drops privileges, and an LD_PRELOAD shared library
+(`devfd_shim`, approximately 4 KiB). Neither has a libc dependency; both
+use raw syscalls and are generated entirely in Rust.
 
 ## 2. Privilege Dropping
 
@@ -51,24 +52,31 @@ the OCI rootfs, not on the host. This is a known upstream limitation:
 
 ### The solution
 
-sdme generates a static ELF binary (`drop_privs`) that performs privilege
-dropping via raw syscalls, with no libc dependency and no NSS. The binary
-is invoked as:
+sdme generates a static ELF binary (`isolate`) that creates PID/IPC
+namespaces, remounts /proc, drops `CAP_SYS_ADMIN`, optionally drops
+privileges, and execs the target — all via raw syscalls with no libc
+dependency and no NSS. The binary is invoked as:
 
 ```
-/.sdme-drop-privs <uid> <gid> <workdir> <command> [args...]
+/.sdme-isolate <uid> <gid> <workdir> <command> [args...]
 ```
 
 The syscall sequence:
 
-1. `setgroups(0, NULL)`: clear supplementary groups
-2. `setgid(gid)`: set group ID (must happen before setuid)
-3. `setuid(uid)`: set user ID (irreversible for non-zero UIDs)
-4. `chdir(workdir)`: change to the application's working directory
-5. `execve(command, args, envp)`: replace the process with the application
+1. `unshare(CLONE_NEWPID | CLONE_NEWIPC)`: create new PID and IPC namespaces
+2. `fork()`: enter the new PID namespace (child becomes PID 1)
+3. `mount("proc", "/proc", "proc", ...)`: remount /proc for the new namespace
+4. `prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN)`: drop CAP_SYS_ADMIN from bounding set
+5. `setgroups(0, NULL)`: clear supplementary groups (skipped if uid==0)
+6. `setgid(gid)`: set group ID (skipped if uid==0)
+7. `setuid(uid)`: set user ID (skipped if uid==0)
+8. `chdir(workdir)`: change to the application's working directory
+9. `execve(command, args, envp)`: replace the process with the application
 
 Each syscall is checked for errors. On failure, a diagnostic message is
-written to stderr and the process exits with code 1.
+written to stderr and the process exits with code 1. For root users
+(uid==0, gid==0), steps 5-7 are skipped but namespace isolation still
+applies.
 
 ### User resolution
 
@@ -77,7 +85,7 @@ The OCI `User` field is resolved at import time against `etc/passwd` and
 
 | Format            | Behavior                                            |
 |-------------------|-----------------------------------------------------|
-| `""`, `"root"`    | Root; uses standard `User=root` unit                |
+| `""`, `"root"`    | Root; isolate with uid=0 gid=0 (namespace isolation only) |
 | `"name"`          | Resolved via `etc/passwd` in OCI rootfs             |
 | `"uid"`           | Used directly; primary GID from passwd if found     |
 | `"name:group"`    | User from `etc/passwd`, group from `etc/group`      |
@@ -216,15 +224,15 @@ image (one imported with `--base-fs`):
 1. The OCI image config's `User` field is parsed.
 2. The `devfd_shim` shared library is written to `/.sdme-devfd-shim.so`
    inside the OCI root (mode `0o444`, readable for mmap).
-3. If the user is non-root, the name is resolved against `etc/passwd` and
-   `etc/group` inside the OCI rootfs, and the `drop_privs` binary is
-   written to `/.sdme-drop-privs` (mode `0o111`, execute-only).
+3. The `isolate` binary is written to `/.sdme-isolate` (mode `0o111`,
+   execute-only). If the user is non-root, the name is resolved against
+   `etc/passwd` and `etc/group` inside the OCI rootfs.
 4. A systemd service unit (`sdme-oci-{name}.service`) is generated with
    both binaries wired in.
 
 ### Generated unit (non-root user)
 
-Both the privilege dropper and the devfd shim appear in the same unit:
+Both the isolate binary and the devfd shim appear in the same unit:
 
 ```ini
 [Service]
@@ -233,16 +241,17 @@ RootDirectory=/oci/apps/nginx/root
 MountAPIVFS=yes
 Environment=LD_PRELOAD=/.sdme-devfd-shim.so
 EnvironmentFile=-/oci/apps/nginx/env
-ExecStart=/.sdme-drop-privs 101 101 / /docker-entrypoint.sh nginx -g 'daemon off;'
+ExecStart=/.sdme-isolate 101 101 / /docker-entrypoint.sh nginx -g 'daemon off;'
 ```
 
 `LD_PRELOAD` loads the devfd shim into the application's address space.
-`ExecStart` invokes the privilege dropper, which sets uid/gid and then
-exec's the actual entrypoint.
+`ExecStart` invokes the isolate binary, which creates PID/IPC namespaces,
+drops privileges to uid/gid, and then exec's the actual entrypoint.
 
 ### Generated unit (root user)
 
-For root users, `drop_privs` is not needed. The devfd shim still applies:
+For root users, the isolate binary still runs to provide namespace
+isolation, but privilege dropping is skipped:
 
 ```ini
 [Service]
@@ -250,10 +259,8 @@ Type=exec
 RootDirectory=/oci/apps/nginx/root
 MountAPIVFS=yes
 Environment=LD_PRELOAD=/.sdme-devfd-shim.so
-ExecStart=/docker-entrypoint.sh nginx -g 'daemon off;'
-WorkingDirectory=/
 EnvironmentFile=-/oci/apps/nginx/env
-User=root
+ExecStart=/.sdme-isolate 0 0 / /docker-entrypoint.sh nginx -g 'daemon off;'
 ```
 
 ## 5. Implementation Notes
@@ -264,7 +271,7 @@ Both binaries are generated at import time for the host architecture:
 
 | Binary       | x86_64            | aarch64          | Size    |
 |--------------|-------------------|------------------|---------|
-| `drop_privs` | `syscall`, rax=nr | `svc #0`, x8=nr  | < 1 KiB |
+| `isolate`    | `syscall`, rax=nr | `svc #0`, x8=nr  | < 2 KiB |
 | `devfd_shim` | `syscall`, rax=nr | `svc #0`, x8=nr  | ~ 4 KiB |
 
 Both are generated entirely in Rust with no assembler, no external tools,
@@ -275,10 +282,10 @@ fixed 4-byte instructions.
 
 ### ELF structure
 
-`drop_privs` is a minimal ET_EXEC static ELF64 with:
+`isolate` is a minimal ET_EXEC static ELF64 with:
 
 - ELF header + 1 program header (PT_LOAD RX)
-- Machine code (the syscall sequence)
+- Machine code (namespace creation + privilege drop + exec syscall sequence)
 - String constants (error messages, read from code-relative addresses)
 - No section headers, no dynamic section, no symbol table
 
@@ -296,16 +303,16 @@ fixed 4-byte instructions.
 
 ### Module layout
 
-| File                         | Purpose                                 |
-|------------------------------|-----------------------------------------|
-| `src/drop_privs/mod.rs`     | Public API: `generate(Arch) -> Vec<u8>` |
-| `src/drop_privs/elf.rs`     | ET_EXEC ELF builder                     |
-| `src/drop_privs/x86_64.rs`  | x86_64 machine code emitter             |
-| `src/drop_privs/aarch64.rs` | AArch64 machine code emitter            |
-| `src/devfd_shim/mod.rs`     | Public API: `generate(Arch) -> Vec<u8>` |
-| `src/devfd_shim/elf.rs`     | ET_DYN ELF builder with SysV hash table |
-| `src/devfd_shim/x86_64.rs`  | x86_64 machine code emitter             |
-| `src/devfd_shim/aarch64.rs` | AArch64 machine code emitter            |
+| File                         | Purpose                                           |
+|------------------------------|---------------------------------------------------|
+| `src/elf.rs`                 | Shared `Arch` enum + ET_EXEC ELF builder          |
+| `src/isolate/mod.rs`        | Public API: `generate(Arch) -> Vec<u8>`           |
+| `src/isolate/x86_64.rs`     | x86_64 machine code emitter (PID/IPC ns + privs)  |
+| `src/isolate/aarch64.rs`    | AArch64 machine code emitter (PID/IPC ns + privs) |
+| `src/devfd_shim/mod.rs`     | Public API: `generate(Arch) -> Vec<u8>`           |
+| `src/devfd_shim/elf.rs`     | ET_DYN ELF builder with SysV hash table           |
+| `src/devfd_shim/x86_64.rs`  | x86_64 machine code emitter                       |
+| `src/devfd_shim/aarch64.rs` | AArch64 machine code emitter                      |
 
 Both architecture modules use the same pattern: an `Asm` struct that emits
 machine code bytes, a label system for forward references, and a fixup pass

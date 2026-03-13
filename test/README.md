@@ -27,7 +27,7 @@ cargo test -- --list          # list all tests without running
 | security     | Capabilities, seccomp, AppArmor, hardening modes |
 | rootfs       | Rootfs listing, removal, os-release, distro      |
 | lib          | Utility: sudo_user, resource limits, interrupts  |
-| drop_privs   | Privilege drop ELF generation (x86_64, aarch64)  |
+| elf          | Shared Arch enum and ELF builder (x86_64, aarch64) |
 | systemd      | D-Bus unit management, boot wait, lifecycle      |
 | config       | Config loading/saving, defaults, path resolution |
 | pod          | Pod creation, netns sharing, state persistence   |

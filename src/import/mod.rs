@@ -1056,9 +1056,9 @@ fn lookup_group(group_path: &Path, group: &str) -> Option<u32> {
 /// - `"uid"` → use directly; look up primary GID from etc/passwd if found
 /// - `"name:group"` or `"uid:gid"` → resolve both parts
 ///
-/// Returns `None` for root users (uid=0), since they don't need drop_privs.
+/// Returns `None` for root users (uid=0), since they don't need privilege dropping.
 pub(crate) fn resolve_oci_user(oci_root: &Path, user: &str) -> Result<Option<ResolvedUser>> {
-    // Empty or literal "root": no drop_privs needed.
+    // Empty or literal "root": no privilege dropping needed.
     // Note: "root:somegroup" is treated as plain root (group ignored). This
     // differs from "0:somegroup" which goes through full resolution. The
     // early return is intentional: it avoids requiring etc/passwd to exist
@@ -1093,7 +1093,7 @@ pub(crate) fn resolve_oci_user(oci_root: &Path, user: &str) -> Result<Option<Res
         }
     };
 
-    // Root user (uid=0 without explicit group): no drop_privs needed.
+    // Root user (uid=0 without explicit group): no privilege dropping needed.
     if uid == 0 && group_part.is_none() {
         return Ok(None);
     }
@@ -1114,7 +1114,7 @@ pub(crate) fn resolve_oci_user(oci_root: &Path, user: &str) -> Result<Option<Res
         None => default_gid,
     };
 
-    // Root user with explicit root group: still no drop_privs needed.
+    // Root user with explicit root group: still no privilege dropping needed.
     if uid == 0 && gid == 0 {
         return Ok(None);
     }
@@ -1124,7 +1124,7 @@ pub(crate) fn resolve_oci_user(oci_root: &Path, user: &str) -> Result<Option<Res
 
 /// Resolve the first word of an exec command to an absolute path.
 ///
-/// The isolate and drop_privs binaries use raw `execve()` which requires
+/// The isolate binary uses raw `execve()` which requires
 /// absolute paths. OCI images sometimes specify entrypoints as bare names
 /// (e.g. `docker-entrypoint.sh`) that rely on PATH resolution.
 ///
@@ -1213,17 +1213,12 @@ pub(crate) struct OciAppSetup<'a> {
     pub requires_units: Vec<String>,
     /// `ExecStartPost=` command for readiness checks.
     pub readiness_exec: Option<String>,
-    /// Whether to enable PID/IPC namespace isolation via `.sdme-isolate`.
-    /// When true, deploys `.sdme-isolate` instead of `.sdme-drop-privs`,
-    /// wraps the workload in its own PID/IPC namespaces, and adds
-    /// systemd hardening directives to the service unit.
-    pub isolate: bool,
 }
 
 /// Set up a single OCI app inside a combined rootfs.
 ///
 /// Creates the service unit, env/ports/volumes files, deploys devfd shim
-/// and drop_privs binary. Common logic shared by `setup_app_image()` and
+/// and isolate binary. Common logic shared by `setup_app_image()` and
 /// kube's `setup_kube_container()`.
 pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
     // 1. Ensure essential runtime directories.
@@ -1249,8 +1244,8 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
 
     // 2. Deploy devfd shim.
     let arch = match std::env::consts::ARCH {
-        "x86_64" => crate::drop_privs::Arch::X86_64,
-        "aarch64" => crate::drop_privs::Arch::Aarch64,
+        "x86_64" => crate::elf::Arch::X86_64,
+        "aarch64" => crate::elf::Arch::Aarch64,
         other => bail!("unsupported architecture: {other}"),
     };
     let shim_bytes = crate::devfd_shim::generate(arch);
@@ -1264,45 +1259,29 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
         eprintln!("wrote devfd shim: {}", shim_path.display());
     }
 
-    // 3. Resolve user, deploy drop_privs or isolate binary.
+    // 3. Resolve user, deploy .sdme-isolate binary.
+    // Always use isolate for all OCI apps (root and non-root). The isolate
+    // binary creates PID/IPC namespaces, remounts /proc, drops CAP_SYS_ADMIN,
+    // and optionally drops privileges — strictly more correct and secure than
+    // running without namespace isolation.
     let resolved_user = resolve_oci_user(opts.app_root, opts.user)?;
-    if opts.isolate {
-        // Deploy .sdme-isolate for all users (root and non-root).
-        let elf_bytes = crate::isolate::generate(arch);
-        let isolate_path = opts.app_root.join(".sdme-isolate");
-        fs::write(&isolate_path, &elf_bytes)
-            .with_context(|| format!("failed to write {}", isolate_path.display()))?;
-        fs::set_permissions(&isolate_path, fs::Permissions::from_mode(0o111)).with_context(
-            || format!("failed to set permissions on {}", isolate_path.display()),
-        )?;
-        if opts.verbose {
-            let user_info = if let Some(ref ru) = resolved_user {
-                format!(" for uid={} gid={}", ru.uid, ru.gid)
-            } else {
-                String::new()
-            };
-            eprintln!(
-                "wrote isolate binary{}: {}",
-                user_info,
-                isolate_path.display()
-            );
-        }
-    } else if let Some(ref ru) = resolved_user {
-        let elf_bytes = crate::drop_privs::generate(arch);
-        let drop_privs_path = opts.app_root.join(".sdme-drop-privs");
-        fs::write(&drop_privs_path, &elf_bytes)
-            .with_context(|| format!("failed to write {}", drop_privs_path.display()))?;
-        fs::set_permissions(&drop_privs_path, fs::Permissions::from_mode(0o111)).with_context(
-            || format!("failed to set permissions on {}", drop_privs_path.display()),
-        )?;
-        if opts.verbose {
-            eprintln!(
-                "wrote drop_privs binary for uid={} gid={}: {}",
-                ru.uid,
-                ru.gid,
-                drop_privs_path.display()
-            );
-        }
+    let elf_bytes = crate::isolate::generate(arch);
+    let isolate_path = opts.app_root.join(".sdme-isolate");
+    fs::write(&isolate_path, &elf_bytes)
+        .with_context(|| format!("failed to write {}", isolate_path.display()))?;
+    fs::set_permissions(&isolate_path, fs::Permissions::from_mode(0o111))
+        .with_context(|| format!("failed to set permissions on {}", isolate_path.display()))?;
+    if opts.verbose {
+        let user_info = if let Some(ref ru) = resolved_user {
+            format!(" for uid={} gid={}", ru.uid, ru.gid)
+        } else {
+            String::new()
+        };
+        eprintln!(
+            "wrote isolate binary{}: {}",
+            user_info,
+            isolate_path.display()
+        );
     }
 
     // 4. Write env file.
@@ -1345,65 +1324,31 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
         .map(|sig| format!("KillSignal={sig}\n"))
         .unwrap_or_default();
 
-    let service_section = if opts.isolate {
-        // Isolate mode: use .sdme-isolate for all users (root and non-root).
-        // The isolate binary handles PID/IPC namespace creation, /proc remount,
-        // CAP_SYS_ADMIN drop, and optional privilege dropping.
-        let (uid, gid) = if let Some(ref ru) = resolved_user {
-            (ru.uid, ru.gid)
-        } else {
-            (0, 0) // root: isolate still creates namespaces
-        };
-        // The isolate binary uses raw execve which requires absolute paths.
-        // Resolve relative command names against the app root's PATH dirs.
-        let exec_start = resolve_exec_command(opts.app_root, opts.exec_start);
-        let isolate_exec = format!(
-            "/.sdme-isolate {} {} {} {}",
-            uid, gid, opts.working_dir, exec_start
-        );
-        format!(
-            "\
+    // Always use .sdme-isolate for all users (root and non-root).
+    // The isolate binary handles PID/IPC namespace creation, /proc remount,
+    // CAP_SYS_ADMIN drop, and optional privilege dropping.
+    let (uid, gid) = if let Some(ref ru) = resolved_user {
+        (ru.uid, ru.gid)
+    } else {
+        (0, 0) // root: isolate still creates namespaces
+    };
+    // The isolate binary uses raw execve which requires absolute paths.
+    // Resolve relative command names against the app root's PATH dirs.
+    let exec_start = resolve_exec_command(opts.app_root, opts.exec_start);
+    let isolate_exec = format!(
+        "/.sdme-isolate {} {} {} {}",
+        uid, gid, opts.working_dir, exec_start
+    );
+    let service_section = format!(
+        "\
 RootDirectory=/oci/apps/{name}/root
 MountAPIVFS=yes
 Environment=LD_PRELOAD=/.sdme-devfd-shim.so
 EnvironmentFile=-/oci/apps/{name}/env
 ExecStart={isolate_exec}
 {stop_signal_line}{bind_paths_section}",
-            name = opts.name
-        )
-    } else if let Some(ref ru) = resolved_user {
-        let exec_start = resolve_exec_command(opts.app_root, opts.exec_start);
-        let drop_privs_exec = format!(
-            "/.sdme-drop-privs {} {} {} {}",
-            ru.uid, ru.gid, opts.working_dir, exec_start
-        );
-        format!(
-            "\
-RootDirectory=/oci/apps/{name}/root
-MountAPIVFS=yes
-Environment=LD_PRELOAD=/.sdme-devfd-shim.so
-EnvironmentFile=-/oci/apps/{name}/env
-ExecStart={drop_privs_exec}
-{stop_signal_line}{bind_paths_section}",
-            name = opts.name
-        )
-    } else {
-        format!(
-            "\
-RootDirectory=/oci/apps/{name}/root
-MountAPIVFS=yes
-Environment=LD_PRELOAD=/.sdme-devfd-shim.so
-ExecStart={exec_start}
-WorkingDirectory={working_dir}
-EnvironmentFile=-/oci/apps/{name}/env
-User={user}
-{stop_signal_line}{bind_paths_section}",
-            name = opts.name,
-            exec_start = opts.exec_start,
-            working_dir = opts.working_dir,
-            user = opts.user,
-        )
-    };
+        name = opts.name
+    );
 
     let restart_line = match opts.restart_policy {
         Some(policy) if opts.unit_type != Some("oneshot") => format!("Restart={policy}\n"),
@@ -1435,12 +1380,11 @@ User={user}
         .map(|cmd| format!("ExecStartPost={cmd}\n"))
         .unwrap_or_default();
 
-    // Hardening directives for isolate mode.
+    // Hardening directives: always applied since all OCI apps use isolate.
     // CAP_SYS_ADMIN is kept in the bounding set because the isolate binary
     // needs it for unshare() and mount(); the binary drops it via
     // prctl(PR_CAPBSET_DROP) before exec'ing the workload.
-    let isolate_hardening = if opts.isolate {
-        "\
+    let isolate_hardening = "\
 CapabilityBoundingSet=CAP_AUDIT_WRITE CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_KILL CAP_MKNOD CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETFCAP CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN CAP_SYS_CHROOT
 NoNewPrivileges=yes
 ProtectKernelModules=yes
@@ -1451,10 +1395,7 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 ProtectProc=invisible
 ProcSubset=pid
-"
-    } else {
-        ""
-    };
+";
 
     // Build [Unit] section dependencies.
     // Merge extra_after (e.g. volume service) into after_units/requires_units.
@@ -1628,7 +1569,6 @@ fn setup_app_image(
         after_units: Vec::new(),
         requires_units: Vec::new(),
         readiness_exec: None,
-        isolate: false,
     })?;
 
     // 5. Clean up temp OCI dir.
@@ -3004,7 +2944,7 @@ pub(crate) mod tests {
     #[test]
     fn test_resolve_oci_user_root() {
         let root = make_oci_root("resolve-root");
-        // Root user returns None (no drop_privs needed).
+        // Root user returns None (no privilege dropping needed).
         assert!(resolve_oci_user(&root, "root").unwrap().is_none());
         assert!(resolve_oci_user(&root, "0").unwrap().is_none());
         assert!(resolve_oci_user(&root, "").unwrap().is_none());
@@ -3167,8 +3107,8 @@ pub(crate) mod tests {
         assert!(unit.is_file());
         let unit_content = fs::read_to_string(&unit).unwrap();
         assert!(
-            unit_content.contains("ExecStart=/usr/bin/myapp --serve"),
-            "unit should contain ExecStart with entrypoint+cmd"
+            unit_content.contains("/usr/bin/myapp --serve"),
+            "unit should contain entrypoint+cmd: {unit_content}"
         );
 
         // Symlink for multi-user.target.wants.
@@ -3328,9 +3268,10 @@ pub(crate) mod tests {
 
         let unit = staging.join("etc/systemd/system/sdme-oci-wdapp.service");
         let unit_content = fs::read_to_string(&unit).unwrap();
+        // With isolate, the working directory is passed as the 3rd arg to .sdme-isolate.
         assert!(
-            unit_content.contains("WorkingDirectory=/app"),
-            "unit should contain WorkingDirectory=/app"
+            unit_content.contains("/.sdme-isolate 0 0 /app /app"),
+            "unit should pass working dir to isolate: {unit_content}"
         );
     }
 
@@ -3370,22 +3311,22 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        // drop_privs binary should exist.
+        // isolate binary should exist.
         assert!(staging
-            .join("oci/apps/userapp/root/.sdme-drop-privs")
+            .join("oci/apps/userapp/root/.sdme-isolate")
             .is_file());
 
         let unit = staging.join("etc/systemd/system/sdme-oci-userapp.service");
         let unit_content = fs::read_to_string(&unit).unwrap();
-        // ExecStart should use drop_privs with uid/gid.
+        // ExecStart should use isolate with uid/gid.
         assert!(
-            unit_content.contains("/.sdme-drop-privs 101 101"),
-            "unit should use drop_privs for non-root user: {unit_content}"
+            unit_content.contains("/.sdme-isolate 101 101"),
+            "unit should use isolate for non-root user: {unit_content}"
         );
         // Should NOT contain User= directive.
         assert!(
             !unit_content.contains("\nUser="),
-            "unit should not have User= for non-root user (uses drop_privs instead)"
+            "unit should not have User= for non-root user (uses isolate instead)"
         );
     }
 
@@ -3416,19 +3357,19 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        // No drop_privs binary.
+        // isolate binary should exist (used for all users, including root).
         assert!(
-            !staging
-                .join("oci/apps/rootapp/root/.sdme-drop-privs")
+            staging
+                .join("oci/apps/rootapp/root/.sdme-isolate")
                 .exists(),
-            "drop_privs should not exist for root user"
+            "isolate should exist for root user"
         );
 
         let unit = staging.join("etc/systemd/system/sdme-oci-rootapp.service");
         let unit_content = fs::read_to_string(&unit).unwrap();
         assert!(
-            unit_content.contains("User=root"),
-            "unit should contain User=root"
+            unit_content.contains("/.sdme-isolate 0 0"),
+            "unit should use isolate with uid=0 gid=0 for root user: {unit_content}"
         );
     }
 
