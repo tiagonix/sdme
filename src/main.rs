@@ -6,9 +6,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    config, confirm, containers, kube, kube_configmap, kube_secret, pod, rootfs, security,
-    system_check, systemd,
-    BindConfig, EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
+    config, confirm, containers, kube, pod, rootfs, security, system_check, systemd, BindConfig,
+    EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
 };
 
 #[derive(Parser)]
@@ -1919,11 +1918,11 @@ fn main() -> Result<()> {
                                 ))
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    kube_secret::create(&cfg.datadir, &name, &literals, &files)?;
+                    kube::secret::create(&cfg.datadir, &name, &literals, &files)?;
                     println!("{name}");
                 }
                 KubeSecretCommand::Ls => {
-                    let secrets = kube_secret::list(&cfg.datadir)?;
+                    let secrets = kube::secret::list(&cfg.datadir)?;
                     if secrets.is_empty() {
                         eprintln!("no secrets");
                         return Ok(());
@@ -1935,7 +1934,7 @@ fn main() -> Result<()> {
                     }
                 }
                 KubeSecretCommand::Rm { names } => {
-                    kube_secret::remove(&cfg.datadir, &names)?;
+                    kube::secret::remove(&cfg.datadir, &names)?;
                     for name in &names {
                         println!("{name}");
                     }
@@ -1967,11 +1966,11 @@ fn main() -> Result<()> {
                                 ))
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    kube_configmap::create(&cfg.datadir, &name, &literals, &files)?;
+                    kube::configmap::create(&cfg.datadir, &name, &literals, &files)?;
                     println!("{name}");
                 }
                 KubeConfigmapCommand::Ls => {
-                    let configmaps = kube_configmap::list(&cfg.datadir)?;
+                    let configmaps = kube::configmap::list(&cfg.datadir)?;
                     if configmaps.is_empty() {
                         eprintln!("no configmaps");
                         return Ok(());
@@ -1988,7 +1987,7 @@ fn main() -> Result<()> {
                     }
                 }
                 KubeConfigmapCommand::Rm { names } => {
-                    kube_configmap::remove(&cfg.datadir, &names)?;
+                    kube::configmap::remove(&cfg.datadir, &names)?;
                     for name in &names {
                         println!("{name}");
                     }

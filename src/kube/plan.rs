@@ -1,298 +1,13 @@
-//! Kubernetes Pod YAML support for sdme.
-//!
-//! Parses `kind: Pod` (v1) and `kind: Deployment` (apps/v1) YAML files,
-//! mapping each pod to a single nspawn container running multiple OCI
-//! workloads as separate systemd services under `/oci/apps/{name}/`.
+//! Validated plan types, YAML parsing, and validation logic.
 
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::Path;
+use std::collections::HashSet;
 
 use anyhow::{bail, Context, Result};
 
-use crate::copy::make_removable;
-use crate::import::registry::{ImageReference, OciContainerConfig};
+use super::types::*;
+use crate::import::registry::ImageReference;
 use crate::import::shell_join;
-use crate::{check_interrupted, validate_name, State};
-
-// --- YAML types ---
-
-/// Top-level Kubernetes manifest (Pod or Deployment).
-#[derive(serde::Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct KubeManifest {
-    #[allow(dead_code)]
-    api_version: Option<String>,
-    kind: String,
-    metadata: Option<Metadata>,
-    spec: Option<serde_yml::Value>,
-}
-
-#[derive(serde::Deserialize, Debug)]
-struct Metadata {
-    name: Option<String>,
-}
-
-/// Deployment spec wrapper to extract the pod template.
-#[derive(serde::Deserialize, Debug)]
-struct DeploymentSpec {
-    template: PodTemplate,
-}
-
-#[derive(serde::Deserialize, Debug)]
-struct PodTemplate {
-    metadata: Option<Metadata>,
-    spec: PodSpec,
-}
-
-/// Core pod specification.
-#[derive(serde::Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PodSpec {
-    pub(crate) containers: Vec<Container>,
-    #[serde(default)]
-    pub(crate) init_containers: Vec<Container>,
-    #[serde(default)]
-    pub(crate) volumes: Vec<Volume>,
-    #[serde(default)]
-    pub(crate) restart_policy: Option<String>,
-    #[serde(default)]
-    pub(crate) termination_grace_period_seconds: Option<u32>,
-    #[serde(default)]
-    pub(crate) security_context: Option<PodSecurityContext>,
-}
-
-#[derive(serde::Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct Container {
-    pub(crate) name: String,
-    pub(crate) image: String,
-    #[serde(default)]
-    pub(crate) command: Option<Vec<String>>,
-    #[serde(default)]
-    pub(crate) args: Option<Vec<String>>,
-    #[serde(default)]
-    pub(crate) env: Vec<EnvVar>,
-    #[serde(default)]
-    pub(crate) ports: Vec<ContainerPort>,
-    #[serde(default)]
-    pub(crate) volume_mounts: Vec<VolumeMount>,
-    #[serde(default)]
-    pub(crate) working_dir: Option<String>,
-    #[serde(default)]
-    pub(crate) image_pull_policy: Option<String>,
-    #[serde(default)]
-    pub(crate) resources: Option<ResourceRequirements>,
-    #[serde(default)]
-    pub(crate) liveness_probe: Option<Probe>,
-    #[serde(default)]
-    pub(crate) readiness_probe: Option<Probe>,
-}
-
-#[derive(serde::Deserialize, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PodSecurityContext {
-    pub(crate) run_as_user: Option<u32>,
-    pub(crate) run_as_group: Option<u32>,
-    pub(crate) run_as_non_root: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Debug, Default)]
-pub(crate) struct ResourceRequirements {
-    #[serde(default)]
-    pub(crate) limits: Option<ResourceList>,
-    #[serde(default)]
-    pub(crate) requests: Option<ResourceList>,
-}
-
-#[derive(serde::Deserialize, Debug, Default)]
-pub(crate) struct ResourceList {
-    pub(crate) memory: Option<String>,
-    pub(crate) cpu: Option<String>,
-}
-
-#[derive(serde::Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct Probe {
-    pub(crate) exec: Option<ExecAction>,
-    #[serde(default)]
-    pub(crate) initial_delay_seconds: Option<u32>,
-    #[serde(default)]
-    pub(crate) period_seconds: Option<u32>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) timeout_seconds: Option<u32>,
-    #[serde(default)]
-    pub(crate) failure_threshold: Option<u32>,
-}
-
-#[derive(serde::Deserialize, Debug)]
-pub(crate) struct ExecAction {
-    pub(crate) command: Vec<String>,
-}
-
-#[derive(serde::Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct EnvVar {
-    pub(crate) name: String,
-    pub(crate) value: Option<String>,
-    #[serde(default)]
-    pub(crate) value_from: Option<EnvVarSource>,
-}
-
-#[derive(serde::Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct EnvVarSource {
-    pub(crate) secret_key_ref: Option<KeySelector>,
-    pub(crate) config_map_key_ref: Option<KeySelector>,
-}
-
-#[derive(serde::Deserialize, Debug)]
-pub(crate) struct KeySelector {
-    pub(crate) name: String,
-    pub(crate) key: String,
-}
-
-#[derive(serde::Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ContainerPort {
-    pub(crate) container_port: u16,
-    #[serde(default)]
-    pub(crate) protocol: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) name: Option<String>,
-}
-
-#[derive(serde::Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct VolumeMount {
-    pub(crate) name: String,
-    pub(crate) mount_path: String,
-    #[serde(default)]
-    pub(crate) read_only: bool,
-}
-
-#[derive(serde::Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct Volume {
-    pub(crate) name: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) empty_dir: Option<serde_yml::Value>,
-    #[serde(default)]
-    pub(crate) host_path: Option<HostPathVolume>,
-    #[serde(default)]
-    pub(crate) secret: Option<SecretVolume>,
-    #[serde(default)]
-    pub(crate) config_map: Option<ConfigMapVolume>,
-    #[serde(default)]
-    pub(crate) persistent_volume_claim: Option<PVCVolume>,
-}
-
-#[derive(serde::Deserialize, Debug)]
-pub(crate) struct HostPathVolume {
-    pub(crate) path: String,
-}
-
-#[derive(serde::Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SecretVolume {
-    pub(crate) secret_name: String,
-    #[serde(default)]
-    pub(crate) items: Vec<SecretKeyToPath>,
-    #[serde(
-        default = "default_secret_mode",
-        deserialize_with = "deserialize_file_mode"
-    )]
-    pub(crate) default_mode: u32,
-}
-
-fn default_secret_mode() -> u32 {
-    0o644
-}
-
-/// Deserialize a file mode from either a YAML integer or an octal string.
-///
-/// YAML 1.2 (used by serde_yml) treats `0400` as a string, not an octal
-/// integer like YAML 1.1. Kubernetes YAML files commonly use this syntax
-/// for `defaultMode`, so we accept both forms.
-fn deserialize_file_mode<'de, D>(deserializer: D) -> std::result::Result<u32, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::{self, Visitor};
-
-    struct FileModeVisitor;
-
-    impl<'de> Visitor<'de> for FileModeVisitor {
-        type Value = u32;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            formatter.write_str("an integer or octal string (e.g. 0644, \"0400\")")
-        }
-
-        fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<u32, E> {
-            u32::try_from(v).map_err(|_| E::custom(format!("file mode out of range: {v}")))
-        }
-
-        fn visit_i64<E: de::Error>(self, v: i64) -> std::result::Result<u32, E> {
-            u32::try_from(v).map_err(|_| E::custom(format!("file mode out of range: {v}")))
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<u32, E> {
-            // Parse octal strings like "0400", "0644".
-            let v = v.trim();
-            if let Some(octal) = v.strip_prefix('0') {
-                if octal.is_empty() {
-                    return Ok(0);
-                }
-                u32::from_str_radix(octal, 8)
-                    .map_err(|_| E::custom(format!("invalid octal file mode: {v}")))
-            } else {
-                v.parse::<u32>()
-                    .map_err(|_| E::custom(format!("invalid file mode: {v}")))
-            }
-        }
-    }
-
-    deserializer.deserialize_any(FileModeVisitor)
-}
-
-#[derive(serde::Deserialize, Debug)]
-pub(crate) struct SecretKeyToPath {
-    pub(crate) key: String,
-    pub(crate) path: String,
-}
-
-#[derive(serde::Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ConfigMapVolume {
-    pub(crate) name: String,
-    #[serde(default)]
-    pub(crate) items: Vec<ConfigMapKeyToPath>,
-    #[serde(
-        default = "default_configmap_mode",
-        deserialize_with = "deserialize_file_mode"
-    )]
-    pub(crate) default_mode: u32,
-}
-
-fn default_configmap_mode() -> u32 {
-    0o644
-}
-
-#[derive(serde::Deserialize, Debug)]
-pub(crate) struct ConfigMapKeyToPath {
-    pub(crate) key: String,
-    pub(crate) path: String,
-}
-
-#[derive(serde::Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PVCVolume {
-    pub(crate) claim_name: String,
-}
+use crate::validate_name;
 
 // --- Parsed / validated plan ---
 
@@ -363,7 +78,7 @@ pub(crate) enum KubeVolumeKind {
         items: Vec<(String, String)>,
         default_mode: u32,
     },
-    PVC(String),
+    Pvc(String),
 }
 
 #[derive(Debug)]
@@ -472,11 +187,11 @@ pub(crate) fn parse_yaml(content: &str) -> Result<(String, PodSpec)> {
                 .context("Deployment manifest missing 'spec' field")?;
             // For deployments, warn on the template spec inside.
             if let serde_yml::Value::Mapping(ref map) = spec_value {
-                if let Some(template) = map.get(serde_yml::Value::String("template".into())) {
-                    if let serde_yml::Value::Mapping(ref tmap) = template {
-                        if let Some(tspec) = tmap.get(serde_yml::Value::String("spec".into())) {
-                            warn_pod_spec_unknown_fields(tspec);
-                        }
+                if let Some(serde_yml::Value::Mapping(ref tmap)) =
+                    map.get(serde_yml::Value::String("template".into()))
+                {
+                    if let Some(tspec) = tmap.get(serde_yml::Value::String("spec".into())) {
+                        warn_pod_spec_unknown_fields(tspec);
                     }
                 }
             }
@@ -517,8 +232,8 @@ fn parse_k8s_memory(s: &str) -> Result<String> {
 
 /// Parse a K8s CPU string (e.g. "500m", "2") to a CPUQuota percentage.
 fn parse_k8s_cpu_quota(s: &str) -> Result<u32> {
-    if s.ends_with('m') {
-        let millis: u32 = s[..s.len() - 1]
+    if let Some(prefix) = s.strip_suffix('m') {
+        let millis: u32 = prefix
             .parse()
             .with_context(|| format!("invalid CPU millicore value: {s}"))?;
         Ok(millis / 10) // 1000m = 100%
@@ -532,8 +247,8 @@ fn parse_k8s_cpu_quota(s: &str) -> Result<u32> {
 
 /// Parse a K8s CPU request to a systemd CPUWeight (1-10000).
 fn parse_k8s_cpu_weight(s: &str) -> Result<u32> {
-    let millis = if s.ends_with('m') {
-        s[..s.len() - 1]
+    let millis = if let Some(prefix) = s.strip_suffix('m') {
+        prefix
             .parse::<u32>()
             .with_context(|| format!("invalid CPU millicore value: {s}"))?
     } else {
@@ -882,7 +597,7 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
             } else if let Some(ref pvc) = v.persistent_volume_claim {
                 validate_name(&pvc.claim_name)
                     .with_context(|| format!("volume '{}': invalid PVC claim name", v.name))?;
-                KubeVolumeKind::PVC(pvc.claim_name.clone())
+                KubeVolumeKind::Pvc(pvc.claim_name.clone())
             } else {
                 KubeVolumeKind::EmptyDir
             };
@@ -907,7 +622,7 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
             KubeVolumeKind::EmptyDir
             | KubeVolumeKind::Secret { .. }
             | KubeVolumeKind::ConfigMap { .. }
-            | KubeVolumeKind::PVC(_) => None,
+            | KubeVolumeKind::Pvc(_) => None,
         })
         .collect();
 
@@ -955,610 +670,12 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
     })
 }
 
-// --- Orchestration ---
-
-/// Create a kube pod: parse YAML, pull images, build combined rootfs, create container.
-///
-/// Returns the container name on success.
-pub fn kube_create(
-    datadir: &Path,
-    yaml_content: &str,
-    base_fs: &str,
-    docker_credentials: Option<(&str, &str)>,
-    verbose: bool,
-) -> Result<String> {
-    validate_name(base_fs)?;
-    let base_dir = datadir.join("fs").join(base_fs);
-    if !base_dir.is_dir() {
-        bail!("base rootfs not found: {base_fs}");
-    }
-
-    let (pod_name, spec) = parse_yaml(yaml_content)?;
-    let mut plan = validate_and_plan(&pod_name, spec)?;
-
-    let rootfs_name = format!("kube-{}", plan.pod_name);
-    let rootfs_dir = datadir.join("fs");
-    let final_dir = rootfs_dir.join(&rootfs_name);
-    let staging_name = format!(".{rootfs_name}.importing");
-    let staging_dir = rootfs_dir.join(&staging_name);
-
-    // Fail if rootfs already exists.
-    if final_dir.exists() {
-        bail!("rootfs already exists: {rootfs_name}; delete the existing kube pod first");
-    }
-
-    // Clean up any leftover staging dir.
-    if staging_dir.exists() {
-        let _ = make_removable(&staging_dir);
-        fs::remove_dir_all(&staging_dir)
-            .with_context(|| format!("failed to remove {}", staging_dir.display()))?;
-    }
-
-    // 1. Copy base rootfs to staging dir.
-    eprintln!("copying base rootfs '{base_fs}' to staging directory");
-    fs::create_dir_all(&staging_dir)
-        .with_context(|| format!("failed to create {}", staging_dir.display()))?;
-    crate::copy::copy_tree(&base_dir, &staging_dir, verbose)
-        .with_context(|| format!("failed to copy base rootfs from {}", base_dir.display()))?;
-
-    // 2. Create /oci/apps/ and /oci/volumes/ directories.
-    let apps_dir = staging_dir.join("oci/apps");
-    fs::create_dir_all(&apps_dir)
-        .with_context(|| format!("failed to create {}", apps_dir.display()))?;
-    let volumes_dir = staging_dir.join("oci/volumes");
-    fs::create_dir_all(&volumes_dir)
-        .with_context(|| format!("failed to create {}", volumes_dir.display()))?;
-
-    // Create emptyDir volumes.
-    for vol in &plan.volumes {
-        if matches!(vol.kind, KubeVolumeKind::EmptyDir) {
-            let vol_path = volumes_dir.join(&vol.name);
-            fs::create_dir_all(&vol_path)
-                .with_context(|| format!("failed to create volume dir {}", vol_path.display()))?;
-        }
-    }
-
-    // Populate secret volumes.
-    for vol in &plan.volumes {
-        if let KubeVolumeKind::Secret {
-            ref secret_name,
-            ref items,
-            default_mode,
-        } = vol.kind
-        {
-            let vol_path = volumes_dir.join(&vol.name);
-            fs::create_dir_all(&vol_path)
-                .with_context(|| format!("failed to create volume dir {}", vol_path.display()))?;
-
-            let secret_data = crate::kube_secret::read_secret_data(datadir, secret_name)
-                .with_context(|| {
-                    format!(
-                        "volume '{}': failed to read secret '{secret_name}'",
-                        vol.name
-                    )
-                })?;
-
-            if items.is_empty() {
-                // Copy all keys.
-                for (key, contents) in &secret_data {
-                    let file_path = vol_path.join(key);
-                    fs::write(&file_path, contents)
-                        .with_context(|| format!("failed to write {}", file_path.display()))?;
-                    set_file_mode(&file_path, default_mode)?;
-                }
-            } else {
-                // Copy only projected keys.
-                let data_map: HashMap<&str, &[u8]> = secret_data
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_slice()))
-                    .collect();
-                for (key, path) in items {
-                    let contents = data_map.get(key.as_str()).with_context(|| {
-                        format!(
-                            "volume '{}': secret '{secret_name}' has no key '{key}'",
-                            vol.name
-                        )
-                    })?;
-                    let file_path = vol_path.join(path);
-                    if let Some(parent) = file_path.parent() {
-                        fs::create_dir_all(parent)
-                            .with_context(|| format!("failed to create {}", parent.display()))?;
-                    }
-                    fs::write(&file_path, contents)
-                        .with_context(|| format!("failed to write {}", file_path.display()))?;
-                    set_file_mode(&file_path, default_mode)?;
-                }
-            }
-        }
-    }
-
-    // Populate configMap volumes.
-    for vol in &plan.volumes {
-        if let KubeVolumeKind::ConfigMap {
-            ref configmap_name,
-            ref items,
-            default_mode,
-        } = vol.kind
-        {
-            let vol_path = volumes_dir.join(&vol.name);
-            fs::create_dir_all(&vol_path)
-                .with_context(|| format!("failed to create volume dir {}", vol_path.display()))?;
-
-            let configmap_data =
-                crate::kube_configmap::read_configmap_data(datadir, configmap_name)
-                    .with_context(|| {
-                        format!(
-                            "volume '{}': failed to read configmap '{configmap_name}'",
-                            vol.name
-                        )
-                    })?;
-
-            if items.is_empty() {
-                // Copy all keys.
-                for (key, contents) in &configmap_data {
-                    let file_path = vol_path.join(key);
-                    fs::write(&file_path, contents)
-                        .with_context(|| format!("failed to write {}", file_path.display()))?;
-                    set_file_mode(&file_path, default_mode)?;
-                }
-            } else {
-                // Copy only projected keys.
-                let data_map: HashMap<&str, &[u8]> = configmap_data
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_slice()))
-                    .collect();
-                for (key, path) in items {
-                    let contents = data_map.get(key.as_str()).with_context(|| {
-                        format!(
-                            "volume '{}': configmap '{configmap_name}' has no key '{key}'",
-                            vol.name
-                        )
-                    })?;
-                    let file_path = vol_path.join(path);
-                    if let Some(parent) = file_path.parent() {
-                        fs::create_dir_all(parent)
-                            .with_context(|| format!("failed to create {}", parent.display()))?;
-                    }
-                    fs::write(&file_path, contents)
-                        .with_context(|| format!("failed to write {}", file_path.display()))?;
-                    set_file_mode(&file_path, default_mode)?;
-                }
-            }
-        }
-    }
-
-    // Handle PVC volumes: create host-side directories and add bind mounts.
-    for vol in &plan.volumes {
-        if let KubeVolumeKind::PVC(ref claim_name) = vol.kind {
-            let host_dir = datadir.join("volumes").join(claim_name);
-            fs::create_dir_all(&host_dir)
-                .with_context(|| format!("failed to create {}", host_dir.display()))?;
-            let vol_path = volumes_dir.join(&vol.name);
-            fs::create_dir_all(&vol_path)
-                .with_context(|| format!("failed to create volume dir {}", vol_path.display()))?;
-            plan.host_binds.push((
-                host_dir.to_string_lossy().to_string(),
-                format!("/oci/volumes/{}", vol.name),
-            ));
-        }
-    }
-
-    // 3. Pull each container image and set up its app directory.
-    let unit_dir = staging_dir.join("etc/systemd/system");
-    fs::create_dir_all(&unit_dir)
-        .with_context(|| format!("failed to create {}", unit_dir.display()))?;
-    let wants_dir = unit_dir.join("multi-user.target.wants");
-    fs::create_dir_all(&wants_dir)
-        .with_context(|| format!("failed to create {}", wants_dir.display()))?;
-
-    // Collect init container names for dependency ordering.
-    let init_container_names: Vec<String> = plan
-        .init_containers
-        .iter()
-        .map(|c| c.name.clone())
-        .collect();
-
-    // Process init containers first, then regular containers.
-    let all_containers: Vec<(&KubeContainer, bool)> = plan
-        .init_containers
-        .iter()
-        .map(|c| (c, true))
-        .chain(plan.containers.iter().map(|c| (c, false)))
-        .collect();
-
-    for (kc, is_init) in &all_containers {
-        check_interrupted()?;
-
-        let app_dir = apps_dir.join(&kc.name);
-        let app_root = app_dir.join("root");
-        fs::create_dir_all(&app_root)
-            .with_context(|| format!("failed to create {}", app_root.display()))?;
-
-        // Check imagePullPolicy before pulling.
-        let should_pull = match kc.image_pull_policy.as_str() {
-            "Never" => {
-                eprintln!(
-                    "skipping image pull for '{}' (imagePullPolicy: Never)",
-                    kc.name
-                );
-                false
-            }
-            "IfNotPresent" => {
-                let has_content = app_root
-                    .read_dir()
-                    .map_or(false, |mut d| d.next().is_some());
-                if has_content {
-                    eprintln!(
-                        "skipping image pull for '{}' (imagePullPolicy: IfNotPresent, app root not empty)",
-                        kc.name
-                    );
-                    false
-                } else {
-                    true
-                }
-            }
-            _ => true, // "Always" or default
-        };
-
-        // Pull the image.
-        let oci_config = if should_pull {
-            crate::import::registry::import_registry_image(
-                &kc.image_ref,
-                &app_root,
-                &rootfs_dir,
-                docker_credentials,
-                verbose,
-            )
-            .with_context(|| format!("failed to pull image for container '{}'", kc.name))?
-        } else {
-            None
-        };
-
-        // Set up the app.
-        setup_kube_container(
-            datadir,
-            &staging_dir,
-            &app_dir,
-            kc,
-            oci_config.as_ref(),
-            &plan.restart_policy,
-            &plan.volumes,
-            &plan,
-            *is_init,
-            &init_container_names,
-            verbose,
-        )
-        .with_context(|| format!("failed to set up container '{}'", kc.name))?;
-    }
-
-    // 4. Generate sdme-kube-volumes.service for shared volume mounts.
-    //
-    // This oneshot service runs `mount --bind` in the container's PID 1 mount
-    // namespace so all OCI app services see the same shared directories.
-    let has_volume_mounts = plan
-        .containers
-        .iter()
-        .any(|kc| !kc.volume_mounts.is_empty());
-    if has_volume_mounts {
-        let mut exec_lines = Vec::new();
-        for kc in &plan.containers {
-            for vm in &kc.volume_mounts {
-                let src = format!("/oci/volumes/{}", vm.volume_name);
-                let dst = format!("/oci/apps/{}/root{}", kc.name, vm.mount_path);
-                exec_lines.push(format!("ExecStart=/bin/mount --bind {src} {dst}"));
-                if vm.read_only {
-                    exec_lines.push(format!("ExecStart=/bin/mount -o remount,ro,bind {dst}"));
-                }
-            }
-        }
-        let vol_unit = format!(
-            "\
-# Generated by sdme kube
-[Unit]
-Description=Kube volume mounts
-DefaultDependencies=no
-After=local-fs.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-{}
-
-[Install]
-WantedBy=multi-user.target
-",
-            exec_lines.join("\n")
-        );
-        let vol_unit_path = unit_dir.join("sdme-kube-volumes.service");
-        fs::write(&vol_unit_path, &vol_unit)
-            .with_context(|| format!("failed to write {}", vol_unit_path.display()))?;
-        // Enable via symlink.
-        let symlink_path = wants_dir.join("sdme-kube-volumes.service");
-        std::os::unix::fs::symlink(
-            "/etc/systemd/system/sdme-kube-volumes.service",
-            &symlink_path,
-        )
-        .with_context(|| format!("failed to symlink {}", symlink_path.display()))?;
-    }
-
-    // 5. Atomic rename.
-    fs::rename(&staging_dir, &final_dir).with_context(|| {
-        format!(
-            "failed to rename {} to {}",
-            staging_dir.display(),
-            final_dir.display()
-        )
-    })?;
-
-    eprintln!("created rootfs: {rootfs_name}");
-
-    // 5. Create the sdme container.
-    let yaml_hash = {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(yaml_content.as_bytes());
-        format!("{:x}", hasher.finalize())
-    };
-
-    let container_names: Vec<&str> = plan
-        .init_containers
-        .iter()
-        .chain(plan.containers.iter())
-        .map(|c| c.name.as_str())
-        .collect();
-
-    // Build bind mounts for hostPath volumes only.
-    let bind_strings: Vec<String> = plan
-        .host_binds
-        .iter()
-        .map(|(host_path, container_path)| format!("{host_path}:{container_path}:rw"))
-        .collect();
-    let binds = crate::BindConfig {
-        binds: bind_strings,
-    };
-
-    // Build port forwarding.
-    let mut network = crate::NetworkConfig::default();
-    if !plan.ports.is_empty() {
-        network.private_network = true;
-        for p in &plan.ports {
-            let proto = p.protocol.as_deref().unwrap_or("tcp").to_lowercase();
-            let port_str = format!("{proto}:{0}:{0}", p.container_port);
-            network.ports.push(port_str);
-        }
-    }
-
-    let opts = crate::containers::CreateOptions {
-        name: Some(plan.pod_name.clone()),
-        rootfs: Some(rootfs_name.clone()),
-        network,
-        binds,
-        ..Default::default()
-    };
-    let name = crate::containers::create(datadir, &opts, verbose)?;
-
-    // Write kube-specific state fields.
-    let state_path = datadir.join("state").join(&name);
-    let mut state = State::read_from(&state_path)?;
-    state.set("KUBE", "yes");
-    state.set("KUBE_CONTAINERS", container_names.join(","));
-    state.set("KUBE_YAML_HASH", &yaml_hash);
-    state.write_to(&state_path)?;
-
-    Ok(name)
-}
-
-/// Delete a kube pod: stop container, remove container, remove rootfs.
-pub fn kube_delete(datadir: &Path, name: &str, force: bool, verbose: bool) -> Result<()> {
-    validate_name(name)?;
-
-    let state_path = datadir.join("state").join(name);
-    if !state_path.exists() {
-        bail!("container not found: {name}");
-    }
-
-    let state = State::read_from(&state_path)?;
-    if !state.is_yes("KUBE") && !force {
-        bail!("container '{name}' is not a kube pod; use --force to delete anyway");
-    }
-
-    let rootfs_name = state.rootfs().to_string();
-
-    // Stop and remove the container.
-    crate::containers::remove(datadir, name, verbose)?;
-
-    // Remove the rootfs.
-    if !rootfs_name.is_empty() {
-        let rootfs_path = datadir.join("fs").join(&rootfs_name);
-        if rootfs_path.exists() {
-            eprintln!("removing rootfs: {rootfs_name}");
-            let _ = make_removable(&rootfs_path);
-            fs::remove_dir_all(&rootfs_path)
-                .with_context(|| format!("failed to remove {}", rootfs_path.display()))?;
-        }
-    }
-
-    Ok(())
-}
-
-// --- Per-container setup ---
-
-/// Set up a single container app inside the combined rootfs.
-///
-/// Builds the K8s command/args overrides, merges env vars, constructs volume
-/// bind paths, then delegates to `setup_oci_app()` for the common logic.
-fn setup_kube_container(
-    datadir: &Path,
-    staging_dir: &Path,
-    app_dir: &Path,
-    kc: &KubeContainer,
-    oci_config: Option<&OciContainerConfig>,
-    restart_policy: &str,
-    _volumes: &[KubeVolume],
-    plan: &KubePlan,
-    is_init: bool,
-    init_container_names: &[String],
-    verbose: bool,
-) -> Result<()> {
-    let app_root = app_dir.join("root");
-    let default_config = OciContainerConfig::default();
-    let config = oci_config.unwrap_or(&default_config);
-
-    // Build ExecStart from command/args overrides per K8s semantics:
-    // - K8s `command` replaces Docker ENTRYPOINT
-    // - K8s `args` replaces Docker CMD
-    // - If only `args`, keep original ENTRYPOINT
-    let mut exec_args: Vec<String> = Vec::new();
-    if let Some(ref cmd_override) = kc.command_override {
-        exec_args.extend(cmd_override.iter().cloned());
-    } else if let Some(ref ep) = config.entrypoint {
-        exec_args.extend(ep.iter().cloned());
-    }
-    if let Some(ref args_override) = kc.args_override {
-        exec_args.extend(args_override.iter().cloned());
-    } else if kc.command_override.is_none() {
-        if let Some(ref cmd) = config.cmd {
-            exec_args.extend(cmd.iter().cloned());
-        }
-    }
-    if exec_args.is_empty() {
-        bail!(
-            "container '{}': no command to run (no entrypoint/cmd in image and no command/args override)",
-            kc.name
-        );
-    }
-    let exec_start = shell_join(&exec_args);
-
-    // Use workingDir override from YAML, then OCI config, then "/".
-    let working_dir = kc
-        .working_dir_override
-        .as_deref()
-        .or(config.working_dir.as_deref())
-        .unwrap_or("/");
-
-    // Use pod-level securityContext user override, then OCI config, then "root".
-    let user_override;
-    let user = if let Some(uid) = plan.run_as_user {
-        let gid = plan.run_as_group.unwrap_or(uid);
-        user_override = format!("{uid}:{gid}");
-        &user_override
-    } else {
-        config.user.as_deref().unwrap_or("root")
-    };
-
-    // Merge env: OCI image env + K8s env overrides (by key).
-    let mut env_lines: Vec<String> = Vec::new();
-    if let Some(ref image_env) = config.env {
-        env_lines.extend(image_env.iter().cloned());
-    }
-    let mut seen_keys: HashMap<String, usize> = HashMap::new();
-    for (i, line) in env_lines.iter().enumerate() {
-        if let Some(key) = line.split('=').next() {
-            seen_keys.insert(key.to_string(), i);
-        }
-    }
-    for (key, env_val) in &kc.env {
-        let value = match env_val {
-            KubeEnvValue::Literal(v) => v.clone(),
-            KubeEnvValue::SecretKeyRef { name, key: k } => {
-                let data = crate::kube_secret::read_secret_data(datadir, name)
-                    .with_context(|| format!("env '{key}': failed to read secret '{name}'"))?;
-                let (_, contents) = data
-                    .iter()
-                    .find(|(dk, _)| dk == k)
-                    .with_context(|| {
-                        format!("env '{key}': secret '{name}' has no key '{k}'")
-                    })?;
-                String::from_utf8(contents.clone()).with_context(|| {
-                    format!("env '{key}': secret '{name}' key '{k}' is not valid UTF-8")
-                })?
-            }
-            KubeEnvValue::ConfigMapKeyRef { name, key: k } => {
-                let data = crate::kube_configmap::read_configmap_data(datadir, name)
-                    .with_context(|| {
-                        format!("env '{key}': failed to read configmap '{name}'")
-                    })?;
-                let (_, contents) = data
-                    .iter()
-                    .find(|(dk, _)| dk == k)
-                    .with_context(|| {
-                        format!("env '{key}': configmap '{name}' has no key '{k}'")
-                    })?;
-                String::from_utf8(contents.clone()).with_context(|| {
-                    format!("env '{key}': configmap '{name}' key '{k}' is not valid UTF-8")
-                })?
-            }
-        };
-        let line = format!("{key}={value}");
-        if let Some(&idx) = seen_keys.get(key) {
-            env_lines[idx] = line;
-        } else {
-            env_lines.push(line);
-        }
-    }
-
-    // Create mount point directories inside the app root (needed as bind targets
-    // for sdme-kube-volumes.service).
-    for vm in &kc.volume_mounts {
-        let mount_dir = app_root.join(vm.mount_path.trim_start_matches('/'));
-        fs::create_dir_all(&mount_dir)
-            .with_context(|| format!("failed to create mount point {}", mount_dir.display()))?;
-    }
-
-    // If there are volume mounts, add ordering dependency on the volume mount service.
-    let extra_after = if kc.volume_mounts.is_empty() {
-        vec![]
-    } else {
-        vec!["sdme-kube-volumes.service".to_string()]
-    };
-
-    // Build unit ordering dependencies for regular containers:
-    // they depend on all init containers.
-    let (after_units, requires_units) = if !is_init && !init_container_names.is_empty() {
-        let after: Vec<String> = init_container_names
-            .iter()
-            .map(|n| format!("sdme-oci-{n}.service"))
-            .collect();
-        (after.clone(), after)
-    } else {
-        (Vec::new(), Vec::new())
-    };
-
-    crate::import::setup_oci_app(&crate::import::OciAppSetup {
-        name: &kc.name,
-        staging_dir,
-        app_dir,
-        app_root: &app_root,
-        exec_start: &exec_start,
-        working_dir,
-        user,
-        env_lines,
-        config,
-        image_ref: &kc.image,
-        restart_policy: Some(restart_policy),
-        bind_paths: vec![],
-        extra_after,
-        verbose,
-        timeout_stop_sec: plan.termination_grace_period,
-        resource_lines: kc.resource_lines.clone(),
-        unit_type: if is_init { Some("oneshot") } else { None },
-        remain_after_exit: is_init,
-        after_units,
-        requires_units,
-        readiness_exec: kc.readiness_exec.clone(),
-    })
-}
-
-/// Set file permissions to the given mode.
-fn set_file_mode(path: &Path, mode: u32) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .with_context(|| format!("failed to set permissions on {}", path.display()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::TempDataDir;
+    use std::fs;
+    use std::sync::Mutex;
 
     #[test]
     fn test_parse_simple_pod() {
@@ -2469,9 +1586,6 @@ spec:
     // These tests call `setup_kube_container()` with a temp directory and
     // verify the generated systemd unit file contains correct directives.
 
-    use crate::testutil::TempDataDir;
-    use std::sync::Mutex;
-
     static UNIT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Helper: set up a temp dir, call `setup_kube_container()`, return the
@@ -2490,7 +1604,7 @@ spec:
         fs::create_dir_all(&app_root).unwrap();
         fs::create_dir_all(staging.join("etc/systemd/system/multi-user.target.wants")).unwrap();
 
-        setup_kube_container(
+        super::super::create::setup_kube_container(
             tmp.path(),
             &staging,
             &app_dir,
@@ -2683,7 +1797,7 @@ spec:
         fs::create_dir_all(&app_root).unwrap();
         fs::create_dir_all(staging.join("etc/systemd/system/multi-user.target.wants")).unwrap();
 
-        setup_kube_container(
+        super::super::create::setup_kube_container(
             tmp.path(),
             &staging,
             &app_dir,
@@ -3023,7 +2137,7 @@ spec:
         assert_eq!(pvc.claim_name, "test-data");
 
         let plan = validate_and_plan(&name, spec).unwrap();
-        assert!(matches!(plan.volumes[0].kind, KubeVolumeKind::PVC(_)));
+        assert!(matches!(plan.volumes[0].kind, KubeVolumeKind::Pvc(_)));
         // PVC volumes don't generate host binds at plan time (added in kube_create).
         assert!(plan.host_binds.is_empty());
     }
