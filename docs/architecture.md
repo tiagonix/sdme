@@ -1146,10 +1146,19 @@ Type=exec
 RootDirectory=/oci/apps/nginx/root
 MountAPIVFS=yes
 Environment=LD_PRELOAD=/.sdme-devfd-shim.so
-ExecStart=/docker-entrypoint.sh nginx -g 'daemon off;'
-WorkingDirectory=/
 EnvironmentFile=-/oci/apps/nginx/env
+ExecStart=/.sdme-isolate 0 0 / /docker-entrypoint.sh nginx -g 'daemon off;'
 Restart=always
+CapabilityBoundingSet=CAP_AUDIT_WRITE CAP_CHOWN CAP_DAC_OVERRIDE ...
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ProtectProc=invisible
+ProcSubset=pid
 
 [Install]
 WantedBy=multi-user.target
