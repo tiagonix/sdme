@@ -96,9 +96,9 @@ redis-cli ping, pg_isready).
 | --hardened with --capability override   | PASS   |
 | --apparmor-profile persistence          | PASS   |
 | --apparmor-profile drop-in              | SKIP   |
-| --apparmor-profile enforcement: boot    | SKIP   |
-| --apparmor-profile enforcement: profile | SKIP   |
-| --apparmor-profile enforcement: deny    | SKIP   |
+| --apparmor-profile enforcement: boot    | PASS   |
+| --apparmor-profile enforcement: profile | PASS   |
+| --apparmor-profile enforcement: deny    | PASS   |
 | --hardened container boots              | PASS   |
 | --hardened runtime enforcement          | PASS   |
 | sdme ps shows container                 | PASS   |
@@ -121,9 +121,12 @@ redis-cli ping, pg_isready).
 - **--hardened bundle**: verifies the combined effect (userns,
   private-network, no-new-privileges, cap drops) and that explicit
   `--capability` overrides suppress the corresponding hardened drop.
-- **AppArmor**: skipped on this system (kernel does not have AppArmor
-  LSM enabled; LSM list: capability,landlock,lockdown,yama,bpf).
-  To be tested separately on an Ubuntu system with AppArmor support.
+- **AppArmor**: enforcement tests verified on Ubuntu 25.10 (aarch64)
+  with AppArmor LSM enabled. The `sdme-default` profile is installed,
+  loaded, and enforced on container PID 1. Denied writes to
+  `/proc/sysrq-trigger` are blocked. The `--apparmor-profile` drop-in
+  test is skipped when the profile name used doesn't exist on the host
+  (expected; the create-time persistence test covers state correctness).
 - **--userns boot**: each distro boots with `--userns`, systemd reaches
   `running` or `degraded` state. suse skipped (requires rootfs from
   `verify-matrix.sh --keep`; suse userns has a systemd UID/GID shift
@@ -246,11 +249,12 @@ code bug. PVC, configMap, envFrom, and read-only mount tests all pass.
 
 ## Usage Guide Verification
 
-48 passed, 1 failed, 0 skipped.
+48 passed, 1 failed, 0 skipped (x86_64 without AppArmor).
 
-The `--strict` security test fails because `--strict` implies
-`--apparmor-profile=sdme-default`, which requires AppArmor support
-in the kernel. Skipped on this system (AppArmor LSM not enabled).
+The `--strict` security test fails on systems without AppArmor because
+`--strict` implies `--apparmor-profile=sdme-default`. On systems with
+AppArmor (e.g. Ubuntu), install the profile first:
+`sdme config apparmor-profile > /etc/apparmor.d/sdme-default && apparmor_parser -r /etc/apparmor.d/sdme-default`.
 
 Walks through each section of `docs/usage.md` and runs the documented
 commands: host clone lifecycle, distro import, OCI apps (nginx, redis,
