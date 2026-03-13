@@ -383,7 +383,6 @@ enum Command {
     /// Manage Kubernetes-compatible pods (experimental)
     #[command(name = "kube", subcommand)]
     Kube(KubeCommand),
-
 }
 
 #[derive(Subcommand)]
@@ -923,7 +922,7 @@ fn resolve_opaque_dirs(
 /// network config (skipping any already covered by user `--port` flags).
 /// When using host network, prints an informational message instead.
 fn auto_wire_oci_ports(rootfs_path: &std::path::Path, network: &mut NetworkConfig) {
-    let oci_ports = containers::read_oci_ports(rootfs_path);
+    let oci_ports = oci::rootfs::read_oci_ports(rootfs_path);
     if oci_ports.is_empty() {
         return;
     }
@@ -991,7 +990,7 @@ fn read_oci_volumes_for_rootfs(
         None => return Ok(Vec::new()),
     };
     let rootfs_path = containers::resolve_rootfs(datadir, Some(rootfs_name))?;
-    let volumes = containers::read_oci_volumes(&rootfs_path);
+    let volumes = oci::rootfs::read_oci_volumes(&rootfs_path);
     if !volumes.is_empty() {
         eprintln!("auto-mounting OCI volumes: {}", volumes.join(", "));
     }
@@ -1058,7 +1057,7 @@ fn resolve_oci_app_name(
         if let Some(rootfs_name) = state.get("ROOTFS") {
             if !rootfs_name.is_empty() {
                 let rootfs_path = datadir.join("fs").join(rootfs_name);
-                if let Some(app) = containers::detect_oci_app_name(&rootfs_path) {
+                if let Some(app) = oci::rootfs::detect_oci_app_name(&rootfs_path) {
                     return Ok(app);
                 }
             }
@@ -1166,10 +1165,7 @@ fn validate_oci_pod_args(
 /// Simplified version of `validate_oci_pod_args` for kube: skips the rootfs
 /// OCI service check since kube always creates OCI services during build.
 /// Only checks that the pod exists.
-fn validate_kube_oci_pod_args(
-    datadir: &std::path::Path,
-    oci_pod: Option<&str>,
-) -> Result<()> {
+fn validate_kube_oci_pod_args(datadir: &std::path::Path, oci_pod: Option<&str>) -> Result<()> {
     let pod_name = match oci_pod {
         Some(n) => n,
         None => return Ok(()),
@@ -1298,9 +1294,8 @@ fn main() -> Result<()> {
                         cfg.oci_cache_dir = value;
                     }
                     "oci_cache_max_size" => {
-                        sdme::parse_size(&value).with_context(|| {
-                            format!("invalid oci_cache_max_size: {value}")
-                        })?;
+                        sdme::parse_size(&value)
+                            .with_context(|| format!("invalid oci_cache_max_size: {value}"))?;
                         cfg.oci_cache_max_size = value;
                     }
                     _ => bail!("unknown config key: {key}"),
@@ -1361,7 +1356,7 @@ fn main() -> Result<()> {
             // Detect OCI app name before moving fs into opts.
             let oci_app_name = fs.as_deref().and_then(|rootfs_name| {
                 let rootfs_path = cfg.datadir.join("fs").join(rootfs_name);
-                containers::detect_oci_app_name(&rootfs_path)
+                oci::rootfs::detect_oci_app_name(&rootfs_path)
             });
 
             let opts = containers::CreateOptions {
@@ -1606,7 +1601,7 @@ fn main() -> Result<()> {
             // Detect OCI app name before moving fs into opts.
             let oci_app_name = fs.as_deref().and_then(|rootfs_name| {
                 let rootfs_path = cfg.datadir.join("fs").join(rootfs_name);
-                containers::detect_oci_app_name(&rootfs_path)
+                oci::rootfs::detect_oci_app_name(&rootfs_path)
             });
 
             let opts = containers::CreateOptions {
@@ -2223,10 +2218,7 @@ fn main() -> Result<()> {
                         eprintln!("no cached blobs");
                     } else {
                         let digest_w = 19; // "sha256:" + 12 hex chars
-                        println!(
-                            "{:<digest_w$}  {:>10}  {}",
-                            "DIGEST", "SIZE", "LAST ACCESS"
-                        );
+                        println!("{:<digest_w$}  {:>10}  {}", "DIGEST", "SIZE", "LAST ACCESS");
                         for entry in &entries {
                             let short = if entry.digest.len() > 19 {
                                 &entry.digest[..19]

@@ -9,34 +9,34 @@ use std::path::{Path, PathBuf};
 use crate::check_interrupted;
 use crate::copy::{make_removable, sanitize_dest_path};
 
-use super::open_decoder;
+use crate::import::open_decoder;
 
 #[derive(Deserialize)]
-pub(super) struct OciLayout {
+pub(crate) struct OciLayout {
     #[serde(rename = "imageLayoutVersion")]
-    pub(super) image_layout_version: String,
+    pub(crate) image_layout_version: String,
 }
 
 #[derive(Deserialize)]
-pub(super) struct OciIndex {
-    pub(super) manifests: Vec<OciDescriptor>,
+pub(crate) struct OciIndex {
+    pub(crate) manifests: Vec<OciDescriptor>,
 }
 
 #[derive(Deserialize)]
-pub(super) struct OciDescriptor {
-    pub(super) digest: String,
+pub(crate) struct OciDescriptor {
+    pub(crate) digest: String,
     #[serde(rename = "mediaType")]
     #[allow(dead_code)]
-    pub(super) media_type: Option<String>,
+    pub(crate) media_type: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub(super) struct OciManifest {
-    pub(super) layers: Vec<OciDescriptor>,
+pub(crate) struct OciManifest {
+    pub(crate) layers: Vec<OciDescriptor>,
 }
 
 /// Check if a directory contains an OCI image layout (has an `oci-layout` file).
-pub(super) fn is_oci_layout(dir: &Path) -> bool {
+pub(crate) fn is_oci_layout(dir: &Path) -> bool {
     dir.join("oci-layout").is_file()
 }
 
@@ -91,7 +91,7 @@ fn resolve_blob(oci_dir: &Path, digest: &str) -> Result<PathBuf> {
 }
 
 /// Import an OCI image layout by reading the manifest chain and extracting layers.
-pub(super) fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
+pub(crate) fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
     // Validate oci-layout version.
     let layout: OciLayout = read_json(&oci_dir.join("oci-layout"))?;
     if layout.image_layout_version != "1.0.0" {
@@ -173,7 +173,7 @@ fn is_inside_dest(path: &Path, dest: &Path) -> bool {
 /// OCI whiteouts:
 /// - `.wh..wh..opq` in a directory means "clear existing contents of this directory"
 /// - `.wh.<name>` means "delete <name> from the destination"
-pub(super) fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
+pub(crate) fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
     let mut archive = tar::Archive::new(reader);
     archive.set_preserve_permissions(true);
     archive.set_preserve_ownerships(true);

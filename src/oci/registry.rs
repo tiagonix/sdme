@@ -19,18 +19,19 @@ use sha2::{Digest, Sha256};
 
 use crate::check_interrupted;
 
-use super::oci::unpack_oci_layer;
-use super::{build_http_agent, open_decoder, proxy_from_env, sorted_keys_csv, MAX_DOWNLOAD_SIZE};
+use super::layout::unpack_oci_layer;
+use super::sorted_keys_csv;
+use crate::import::{build_http_agent, open_decoder, proxy_from_env, MAX_DOWNLOAD_SIZE};
 
 /// Parsed OCI image reference (e.g. `quay.io/centos/centos:stream10`).
 #[derive(Debug, PartialEq)]
 pub(crate) struct ImageReference {
     /// Registry hostname (e.g. `registry-1.docker.io`, `quay.io`).
-    pub(super) registry: String,
+    pub(crate) registry: String,
     /// Repository path (e.g. `library/nginx`, `centos/centos`).
-    pub(super) repository: String,
+    pub(crate) repository: String,
     /// Tag or digest reference (e.g. `latest`, `stream10`).
-    pub(super) reference: String,
+    pub(crate) reference: String,
 }
 
 impl ImageReference {

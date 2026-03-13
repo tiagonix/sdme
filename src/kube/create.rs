@@ -8,8 +8,8 @@ use anyhow::{bail, Context, Result};
 
 use super::plan::*;
 use crate::copy::make_removable;
-use crate::import::registry::OciContainerConfig;
 use crate::import::shell_join;
+use crate::oci::registry::OciContainerConfig;
 use crate::{check_interrupted, validate_name, State};
 
 /// Create a kube pod: parse YAML, pull images, build combined rootfs, create container.
@@ -241,9 +241,7 @@ pub fn kube_create(
                 false
             }
             "IfNotPresent" => {
-                let has_content = app_root
-                    .read_dir()
-                    .is_ok_and(|mut d| d.next().is_some());
+                let has_content = app_root.read_dir().is_ok_and(|mut d| d.next().is_some());
                 if has_content {
                     eprintln!(
                         "skipping image pull for '{}' (imagePullPolicy: IfNotPresent, app root not empty)",
@@ -259,7 +257,7 @@ pub fn kube_create(
 
         // Pull the image.
         let oci_config = if should_pull {
-            crate::import::registry::import_registry_image(
+            crate::oci::registry::import_registry_image(
                 &kc.image_ref,
                 &app_root,
                 &rootfs_dir,
@@ -584,7 +582,7 @@ pub(crate) fn setup_kube_container(
         (Vec::new(), Vec::new())
     };
 
-    crate::import::setup_oci_app(&crate::import::OciAppSetup {
+    crate::oci::app::setup_oci_app(&crate::oci::app::OciAppSetup {
         name: &kc.name,
         staging_dir,
         app_dir,

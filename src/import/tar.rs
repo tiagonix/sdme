@@ -8,8 +8,8 @@ use std::path::Path;
 use crate::check_interrupted;
 use crate::copy::make_removable;
 
-use super::oci::{import_oci_layout, is_oci_layout};
 use super::{detect_compression, get_decoder};
+use crate::oci::layout::{import_oci_layout, is_oci_layout};
 
 /// Unpack a tar archive from a reader into a destination directory.
 pub(super) fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<()> {

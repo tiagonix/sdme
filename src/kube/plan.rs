@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use anyhow::{bail, Context, Result};
 
 use super::types::*;
-use crate::import::registry::ImageReference;
 use crate::import::shell_join;
+use crate::oci::registry::ImageReference;
 use crate::validate_name;
 
 // --- Parsed / validated plan ---
