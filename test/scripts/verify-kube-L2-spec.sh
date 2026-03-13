@@ -234,8 +234,8 @@ test_unit_working_dir() {
 
     local unit
     unit=$(read_unit "app")
-    # With runAsUser set, drop_privs handles working dir, so it appears in ExecStart
-    # rather than WorkingDirectory. Check for /tmp in the drop_privs line.
+    # With isolate mode, the working dir is passed as an argument to .sdme-isolate,
+    # so it appears in ExecStart rather than WorkingDirectory.
     if echo "$unit" | grep -q '/tmp'; then
         record "$test_name" PASS
     else
@@ -280,10 +280,10 @@ test_unit_security_context() {
 
     local unit
     unit=$(read_unit "app")
-    if echo "$unit" | grep -q '\.sdme-drop-privs 65534 65534'; then
+    if echo "$unit" | grep -q '\.sdme-isolate 65534 65534'; then
         record "$test_name" PASS
     else
-        record "$test_name" FAIL "drop_privs 65534 65534 not found"
+        record "$test_name" FAIL "isolate 65534 65534 not found"
         echo "    unit content:"
         echo "$unit"
     fi

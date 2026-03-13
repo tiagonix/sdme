@@ -1746,9 +1746,11 @@ spec:
         let plan = make_test_plan();
         let unit = setup_test_container("app", &kc, &plan, false, &[]);
 
+        // In isolate mode, working dir is passed as an argument to .sdme-isolate,
+        // not as a systemd WorkingDirectory= directive.
         assert!(
-            unit.contains("WorkingDirectory=/app"),
-            "should have WorkingDirectory=/app"
+            unit.contains("/.sdme-isolate 0 0 /app"),
+            "should have /app as working dir in isolate exec, got: {unit}"
         );
     }
 
@@ -1787,9 +1789,9 @@ spec:
         plan.run_as_group = Some(1000);
 
         // setup_kube_container passes "1000:1000" as user, which
-        // resolve_oci_user() resolves as numeric UID:GID, deploying
-        // drop_privs. We need etc/passwd for name lookups but numeric
-        // UIDs work without it.
+        // resolve_oci_user() resolves as numeric UID:GID. Kube uses
+        // isolate mode so .sdme-isolate is deployed. Numeric UIDs
+        // work without etc/passwd.
         let tmp = TempDataDir::new("kube-unit-sec");
         let staging = tmp.path().join("staging");
         let app_dir = staging.join("oci/apps/app");
@@ -1815,13 +1817,13 @@ spec:
         let unit_path = staging.join("etc/systemd/system/sdme-oci-app.service");
         let unit = fs::read_to_string(&unit_path).unwrap();
 
-        // Non-root user: should use drop_privs with uid/gid.
+        // Kube uses isolate mode: should use .sdme-isolate with uid/gid.
         assert!(
-            unit.contains("/.sdme-drop-privs 1000 1000"),
-            "should use drop_privs with uid=1000 gid=1000, got: {unit}"
+            unit.contains("/.sdme-isolate 1000 1000"),
+            "should use isolate with uid=1000 gid=1000, got: {unit}"
         );
-        // drop_privs binary should be deployed.
-        assert!(app_root.join(".sdme-drop-privs").is_file());
+        // isolate binary should be deployed.
+        assert!(app_root.join(".sdme-isolate").is_file());
     }
 
     // --- Secret volumes ---

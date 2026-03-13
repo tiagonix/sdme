@@ -1122,6 +1122,48 @@ pub(crate) fn resolve_oci_user(oci_root: &Path, user: &str) -> Result<Option<Res
     Ok(Some(ResolvedUser { uid, gid }))
 }
 
+/// Resolve the first word of an exec command to an absolute path.
+///
+/// The isolate and drop_privs binaries use raw `execve()` which requires
+/// absolute paths. OCI images sometimes specify entrypoints as bare names
+/// (e.g. `docker-entrypoint.sh`) that rely on PATH resolution.
+///
+/// If the command already starts with `/`, it is returned unchanged.
+/// Otherwise, common PATH directories inside the app root are searched.
+fn resolve_exec_command(app_root: &Path, exec_start: &str) -> String {
+    let (cmd, rest) = match exec_start.split_once(' ') {
+        Some((c, r)) => (c, Some(r)),
+        None => (exec_start, None),
+    };
+
+    if cmd.starts_with('/') {
+        return exec_start.to_string();
+    }
+
+    const SEARCH_DIRS: &[&str] = &[
+        "usr/local/sbin",
+        "usr/local/bin",
+        "usr/sbin",
+        "usr/bin",
+        "sbin",
+        "bin",
+    ];
+
+    for dir in SEARCH_DIRS {
+        let candidate = app_root.join(dir).join(cmd);
+        if candidate.exists() {
+            let abs = format!("/{dir}/{cmd}");
+            return match rest {
+                Some(r) => format!("{abs} {r}"),
+                None => abs,
+            };
+        }
+    }
+
+    // Not found -- return as-is; execve will fail with a clear error.
+    exec_start.to_string()
+}
+
 // --- OCI application image support ---
 
 /// Configuration for setting up an OCI app inside a combined rootfs.
@@ -1171,6 +1213,11 @@ pub(crate) struct OciAppSetup<'a> {
     pub requires_units: Vec<String>,
     /// `ExecStartPost=` command for readiness checks.
     pub readiness_exec: Option<String>,
+    /// Whether to enable PID/IPC namespace isolation via `.sdme-isolate`.
+    /// When true, deploys `.sdme-isolate` instead of `.sdme-drop-privs`,
+    /// wraps the workload in its own PID/IPC namespaces, and adds
+    /// systemd hardening directives to the service unit.
+    pub isolate: bool,
 }
 
 /// Set up a single OCI app inside a combined rootfs.
@@ -1217,9 +1264,30 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
         eprintln!("wrote devfd shim: {}", shim_path.display());
     }
 
-    // 3. Resolve user, deploy drop_privs if non-root.
+    // 3. Resolve user, deploy drop_privs or isolate binary.
     let resolved_user = resolve_oci_user(opts.app_root, opts.user)?;
-    if let Some(ref ru) = resolved_user {
+    if opts.isolate {
+        // Deploy .sdme-isolate for all users (root and non-root).
+        let elf_bytes = crate::isolate::generate(arch);
+        let isolate_path = opts.app_root.join(".sdme-isolate");
+        fs::write(&isolate_path, &elf_bytes)
+            .with_context(|| format!("failed to write {}", isolate_path.display()))?;
+        fs::set_permissions(&isolate_path, fs::Permissions::from_mode(0o111)).with_context(
+            || format!("failed to set permissions on {}", isolate_path.display()),
+        )?;
+        if opts.verbose {
+            let user_info = if let Some(ref ru) = resolved_user {
+                format!(" for uid={} gid={}", ru.uid, ru.gid)
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "wrote isolate binary{}: {}",
+                user_info,
+                isolate_path.display()
+            );
+        }
+    } else if let Some(ref ru) = resolved_user {
         let elf_bytes = crate::drop_privs::generate(arch);
         let drop_privs_path = opts.app_root.join(".sdme-drop-privs");
         fs::write(&drop_privs_path, &elf_bytes)
@@ -1277,10 +1345,37 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
         .map(|sig| format!("KillSignal={sig}\n"))
         .unwrap_or_default();
 
-    let service_section = if let Some(ref ru) = resolved_user {
+    let service_section = if opts.isolate {
+        // Isolate mode: use .sdme-isolate for all users (root and non-root).
+        // The isolate binary handles PID/IPC namespace creation, /proc remount,
+        // CAP_SYS_ADMIN drop, and optional privilege dropping.
+        let (uid, gid) = if let Some(ref ru) = resolved_user {
+            (ru.uid, ru.gid)
+        } else {
+            (0, 0) // root: isolate still creates namespaces
+        };
+        // The isolate binary uses raw execve which requires absolute paths.
+        // Resolve relative command names against the app root's PATH dirs.
+        let exec_start = resolve_exec_command(opts.app_root, opts.exec_start);
+        let isolate_exec = format!(
+            "/.sdme-isolate {} {} {} {}",
+            uid, gid, opts.working_dir, exec_start
+        );
+        format!(
+            "\
+RootDirectory=/oci/apps/{name}/root
+MountAPIVFS=yes
+Environment=LD_PRELOAD=/.sdme-devfd-shim.so
+EnvironmentFile=-/oci/apps/{name}/env
+ExecStart={isolate_exec}
+{stop_signal_line}{bind_paths_section}",
+            name = opts.name
+        )
+    } else if let Some(ref ru) = resolved_user {
+        let exec_start = resolve_exec_command(opts.app_root, opts.exec_start);
         let drop_privs_exec = format!(
             "/.sdme-drop-privs {} {} {} {}",
-            ru.uid, ru.gid, opts.working_dir, opts.exec_start
+            ru.uid, ru.gid, opts.working_dir, exec_start
         );
         format!(
             "\
@@ -1340,6 +1435,27 @@ User={user}
         .map(|cmd| format!("ExecStartPost={cmd}\n"))
         .unwrap_or_default();
 
+    // Hardening directives for isolate mode.
+    // CAP_SYS_ADMIN is kept in the bounding set because the isolate binary
+    // needs it for unshare() and mount(); the binary drops it via
+    // prctl(PR_CAPBSET_DROP) before exec'ing the workload.
+    let isolate_hardening = if opts.isolate {
+        "\
+CapabilityBoundingSet=CAP_AUDIT_WRITE CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_KILL CAP_MKNOD CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETFCAP CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN CAP_SYS_CHROOT
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ProtectProc=invisible
+ProcSubset=pid
+"
+    } else {
+        ""
+    };
+
     // Build [Unit] section dependencies.
     // Merge extra_after (e.g. volume service) into after_units/requires_units.
     let mut all_after = opts.after_units.clone();
@@ -1366,7 +1482,7 @@ Description=OCI app: {name} ({image_ref})
 {unit_requires}
 [Service]
 Type={unit_type}
-{remain_after_exit_line}{service_section}{restart_line}{timeout_stop_line}{resource_section}{readiness_line}
+{remain_after_exit_line}{service_section}{restart_line}{timeout_stop_line}{resource_section}{isolate_hardening}{readiness_line}
 [Install]
 WantedBy=multi-user.target
 "#,
@@ -1512,6 +1628,7 @@ fn setup_app_image(
         after_units: Vec::new(),
         requires_units: Vec::new(),
         readiness_exec: None,
+        isolate: false,
     })?;
 
     // 5. Clean up temp OCI dir.

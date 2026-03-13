@@ -5,7 +5,7 @@
 // where NSS resolves UIDs against the host before entering the chroot.
 
 mod aarch64;
-mod elf;
+pub(crate) mod elf;
 mod x86_64;
 
 /// Generate a complete drop_privs ELF binary for the given architecture.
