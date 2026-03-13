@@ -1041,7 +1041,6 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
             match crate::oci::registry::import_registry_image(
                 img,
                 &staging_dir,
-                &rootfs_dir,
                 docker_credentials,
                 cache,
                 verbose,

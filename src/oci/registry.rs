@@ -717,7 +717,6 @@ fn download_blob(
 pub(crate) fn import_registry_image(
     image: &ImageReference,
     staging_dir: &Path,
-    rootfs_dir: &Path,
     docker_credentials: Option<(&str, &str)>,
     cache: &crate::oci::cache::BlobCache,
     verbose: bool,
@@ -804,10 +803,12 @@ pub(crate) fn import_registry_image(
         .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
 
     // Download and extract layers one at a time.
+    // Temp files go in the staging dir (unique per import) to avoid
+    // collisions when multiple imports run in parallel.
     for (i, layer) in manifest.layers.iter().enumerate() {
         check_interrupted()?;
 
-        let temp_path = rootfs_dir.join(format!(".layer-{i}.tmp"));
+        let temp_path = staging_dir.join(format!(".layer-{i}.tmp"));
 
         let result = (|| -> Result<()> {
             eprintln!(
@@ -1095,19 +1096,12 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ));
-        let rootfs_dir = std::env::temp_dir().join(format!(
-            "sdme-test-registry-rootfs-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
         let _ = fs::remove_dir_all(&dest);
-        let _ = fs::remove_dir_all(&rootfs_dir);
-        fs::create_dir_all(&rootfs_dir).unwrap();
 
         let image = ImageReference::parse("quay.io/centos-bootc/centos-bootc:stream10").unwrap();
         let cfg = crate::config::Config::default();
         let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
-        import_registry_image(&image, &dest, &rootfs_dir, None, &cache, true).unwrap();
+        import_registry_image(&image, &dest, None, &cache, true).unwrap();
 
         // Basic sanity checks.
         assert!(dest.is_dir());
@@ -1115,6 +1109,5 @@ mod tests {
 
         let _ = crate::copy::make_removable(&dest);
         let _ = fs::remove_dir_all(&dest);
-        let _ = fs::remove_dir_all(&rootfs_dir);
     }
 }

@@ -28,7 +28,9 @@ set -uo pipefail
 #     protocol, hostPort), volumeMounts (name, mountPath, readOnly),
 #     workingDir, imagePullPolicy, resources (limits/requests for memory
 #     and cpu), readinessProbe (exec only), livenessProbe (exec only),
-#     securityContext (runAsUser, runAsGroup, runAsNonRoot)
+#     securityContext (runAsUser, runAsGroup, runAsNonRoot, capabilities
+#     add/drop/ALL, allowPrivilegeEscalation, readOnlyRootFilesystem,
+#     seccompProfile, appArmorProfile)
 #   Volume types:
 #     emptyDir, hostPath (path, type), secret (secretName, items with
 #     key/path, defaultMode), configMap (name, items with key/path,
@@ -43,8 +45,7 @@ set -uo pipefail
 #   Probes: httpGet, tcpSocket, grpc; startupProbe; lifecycle hooks
 #   Volumes: projected, downwardAPI, subPath, subPathExpr
 #   Networking: hostNetwork, dnsPolicy, dnsConfig, hostAliases
-#   Security: per-container securityContext (capabilities, seLinux,
-#             seccompProfile, allowPrivilegeEscalation, readOnlyRootFilesystem)
+#   Security: seLinux
 #   Images: imagePullSecrets
 #   Scheduling: nodeSelector, tolerations, affinity, nodeName,
 #               topologySpreadConstraints (not applicable to single-node)

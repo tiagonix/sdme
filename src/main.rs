@@ -135,8 +135,8 @@ enum Command {
         #[arg(long)]
         cpu_weight: Option<String>,
 
-        /// Make directories opaque in overlayfs (hides lower layer contents, repeatable)
-        #[arg(short = 'o', long = "overlayfs-opaque-dirs")]
+        /// Make directories opaque in overlayfs (hides lower layer contents, comma-separated or repeatable)
+        #[arg(short = 'o', long = "overlayfs-opaque-dirs", value_delimiter = ',')]
         opaque_dirs: Vec<String>,
 
         /// Join a pod network namespace (entire container runs in the pod's netns)
@@ -246,8 +246,8 @@ enum Command {
         #[arg(long)]
         cpu_weight: Option<String>,
 
-        /// Make directories opaque in overlayfs (hides lower layer contents, repeatable)
-        #[arg(short = 'o', long = "overlayfs-opaque-dirs")]
+        /// Make directories opaque in overlayfs (hides lower layer contents, comma-separated or repeatable)
+        #[arg(short = 'o', long = "overlayfs-opaque-dirs", value_delimiter = ',')]
         opaque_dirs: Vec<String>,
 
         /// Join a pod network namespace (entire container runs in the pod's netns)

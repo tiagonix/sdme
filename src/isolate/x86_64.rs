@@ -469,7 +469,7 @@ pub fn generate() -> Vec<u8> {
     // --- execve(argv[4], &argv[4..], envp) ---
     a.emit(&[0x48, 0x8B, modrm(1, RDI, RBP), 40]); // mov rdi, [rbp + 40] ; filename
     a.emit(&[0x48, 0x8D, modrm(1, RSI, RBP), 40]); // lea rsi, [rbp + 40] ; argv
-    // envp = rbp + (argc + 2) * 8
+                                                   // envp = rbp + (argc + 2) * 8
     a.emit(&[0x48, 0x8B, modrm(1, RDX, RBP), 0]); // mov rdx, [rbp]      ; argc
     a.emit(&[0x48, 0x83, modrm(3, 0, RDX), 2]); // add rdx, 2
     a.emit(&[0x48, 0xC1, modrm(3, 4, RDX), 3]); // shl rdx, 3
@@ -642,7 +642,7 @@ pub fn generate() -> Vec<u8> {
 
     // cmp rax, -EINTR (-4)            ; EINTR = 4
     a.emit(&[0x48, 0x83, 0xF8, 0xFC]); // cmp rax, -4 (sign-extended imm8)
-    // je wait_loop                    ; retry on EINTR
+                                       // je wait_loop                    ; retry on EINTR
     a.jcc_short(0x74, wait_loop);
 
     // Load status into edi

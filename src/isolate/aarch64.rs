@@ -397,8 +397,8 @@ impl Asm {
 fn encode_bitmask_imm_32(imm: u32) -> (u32, u32) {
     // For our use cases we only need 0x7F and 0xFF
     match imm {
-        0x7F => (0, 6),   // 7 contiguous bits starting at bit 0
-        0xFF => (0, 7),   // 8 contiguous bits starting at bit 0
+        0x7F => (0, 6), // 7 contiguous bits starting at bit 0
+        0xFF => (0, 7), // 8 contiguous bits starting at bit 0
         _ => panic!("unsupported bitmask immediate: {:#x}", imm),
     }
 }
@@ -501,10 +501,10 @@ pub fn generate() -> Vec<u8> {
     // --- clone(SIGCHLD, 0, ...) --- (aarch64 has no fork, use clone)
     a.movz_x(X8, SYS_CLONE);
     a.movz_x(X0, SIGCHLD); // flags = SIGCHLD
-    a.movz_x(X1, 0);       // stack = NULL (fork semantics)
-    a.movz_x(X2, 0);       // parent_tid = NULL
-    a.movz_x(X3, 0);       // tls = NULL
-    a.movz_x(X4, 0);       // child_tid = NULL
+    a.movz_x(X1, 0); // stack = NULL (fork semantics)
+    a.movz_x(X2, 0); // parent_tid = NULL
+    a.movz_x(X3, 0); // tls = NULL
+    a.movz_x(X4, 0); // child_tid = NULL
     a.svc();
     a.cmp_x_imm(X0, 0);
     a.b_cond(COND_LT, err_fork);
@@ -516,12 +516,12 @@ pub fn generate() -> Vec<u8> {
 
     // --- mount("proc", "/proc", "proc", MS_NOSUID|MS_NODEV|MS_NOEXEC, NULL) ---
     a.movz_x(X8, SYS_MOUNT);
-    a.adr(X0, lbl_str_proc);       // source
+    a.adr(X0, lbl_str_proc); // source
     a.adr(X1, lbl_str_slash_proc); // target
-    a.adr(X2, lbl_str_proc);       // fstype
-    // MS_NOSUID | MS_NODEV | MS_NOEXEC = 14
+    a.adr(X2, lbl_str_proc); // fstype
+                             // MS_NOSUID | MS_NODEV | MS_NOEXEC = 14
     a.movz_x(X3, (MS_NOSUID | MS_NODEV | MS_NOEXEC) as u16);
-    a.movz_x(X4, 0);               // data = NULL
+    a.movz_x(X4, 0); // data = NULL
     a.svc();
     a.cmp_x_imm(X0, 0);
     a.b_cond(COND_LT, err_mount);
@@ -569,11 +569,11 @@ pub fn generate() -> Vec<u8> {
     a.b_cond(COND_LT, err_chdir);
 
     // --- execve(argv[4], &argv[4..], envp) ---
-    a.ldr_x(X0, X20, 32);          // filename = argv[4]
-    a.add_x_imm(X1, X20, 32);      // argv = &argv[4..]
-    a.add_x_imm(X2, X19, 1);       // x2 = argc + 1
-    a.lsl_x(X2, X2, 3);            // x2 = (argc + 1) * 8
-    a.add_x_reg(X2, X20, X2);      // x2 = envp
+    a.ldr_x(X0, X20, 32); // filename = argv[4]
+    a.add_x_imm(X1, X20, 32); // argv = &argv[4..]
+    a.add_x_imm(X2, X19, 1); // x2 = argc + 1
+    a.lsl_x(X2, X2, 3); // x2 = (argc + 1) * 8
+    a.add_x_reg(X2, X20, X2); // x2 = envp
     a.movz_x(X8, SYS_EXECVE);
     a.svc();
     // execve only returns on error; fall through
@@ -664,10 +664,10 @@ pub fn generate() -> Vec<u8> {
 
     for sig in [SIGTERM, SIGINT, SIGHUP, SIGQUIT] {
         a.movz_x(X8, SYS_RT_SIGACTION);
-        a.movz_x(X0, sig);        // signum
-        a.mov_x(X1, SP);          // new action
-        a.movz_x(X2, 0);          // old action = NULL
-        a.movz_x(X3, 8);          // sigsetsize = 8
+        a.movz_x(X0, sig); // signum
+        a.mov_x(X1, SP); // new action
+        a.movz_x(X2, 0); // old action = NULL
+        a.movz_x(X3, 8); // sigsetsize = 8
         a.svc();
     }
 
@@ -680,10 +680,10 @@ pub fn generate() -> Vec<u8> {
 
     a.bind(wait_loop);
     a.movz_x(X8, SYS_WAIT4);
-    a.mov_x(X0, X23);             // pid = child
-    a.mov_x(X1, SP);              // &status
-    a.movz_x(X2, 0);              // options = 0
-    a.movz_x(X3, 0);              // rusage = NULL
+    a.mov_x(X0, X23); // pid = child
+    a.mov_x(X1, SP); // &status
+    a.movz_x(X2, 0); // options = 0
+    a.movz_x(X3, 0); // rusage = NULL
     a.svc();
 
     // Check for EINTR: on aarch64, errors are returned as negative values

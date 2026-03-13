@@ -260,7 +260,6 @@ pub fn kube_create(
             crate::oci::registry::import_registry_image(
                 &kc.image_ref,
                 &app_root,
-                &rootfs_dir,
                 docker_credentials,
                 cache,
                 verbose,

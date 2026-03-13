@@ -55,7 +55,10 @@ impl BlobCache {
         } else {
             let p = PathBuf::from(&cfg.oci_cache_dir);
             if !p.is_absolute() {
-                bail!("oci_cache_dir must be an absolute path: {}", cfg.oci_cache_dir);
+                bail!(
+                    "oci_cache_dir must be an absolute path: {}",
+                    cfg.oci_cache_dir
+                );
             }
             p
         };
@@ -570,9 +573,7 @@ mod tests {
 
         let blob = tmp.path().join("blob");
         write_test_blob(&blob, b"data123");
-        cache
-            .put("sha256:test1234", &blob, false)
-            .unwrap();
+        cache.put("sha256:test1234", &blob, false).unwrap();
 
         let info = cache.info().unwrap();
         assert_eq!(info.blob_count, 1);

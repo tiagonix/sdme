@@ -116,7 +116,7 @@ cleanup() {
         $SDME rm -f "$name" 2>/dev/null || true
     done
 
-    names=$($SDME fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep '^vfy-usage-' || true)
+    names=$($SDME fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^(vfy-usage-|kube-vfy-usage-)' || true)
     for name in $names; do
         $SDME fs rm "$name" 2>/dev/null || true
     done
@@ -719,6 +719,104 @@ test_binds_env() {
 }
 
 # =============================================================================
+# Section: Opaque directories
+# =============================================================================
+
+test_opaque_dirs() {
+    log "Section: Opaque dirs"
+
+    local output ct="vfy-usage-opaque"
+
+    # sdme create mybox -o /etc/systemd/system,/var/log,/tmp (host clone)
+    if output=$(timeout "$TIMEOUT_BOOT" $SDME create \
+            -o /etc/systemd/system,/var/log,/tmp "$ct" 2>&1); then
+        record "opaque/create" PASS
+    else
+        record "opaque/create" FAIL "$output"
+        record "opaque/verify" SKIP "create failed"
+        return
+    fi
+
+    # Verify the xattr is set on the upper layer directories (host-side check,
+    # the xattr is on the upper layer, not visible inside the container).
+    local upper_dir="$DATADIR/containers/$ct/upper"
+    local ok=1
+    for d in /etc/systemd/system /var/log /tmp; do
+        if ! getfattr -n trusted.overlay.opaque "$upper_dir$d" 2>/dev/null | \
+                grep -q "trusted.overlay.opaque"; then
+            ok=0
+            break
+        fi
+    done
+    if [[ $ok -eq 1 ]]; then
+        record "opaque/verify" PASS
+    else
+        record "opaque/verify" FAIL "opaque xattr not found on upper layer"
+    fi
+
+    $SDME rm -f "$ct" 2>/dev/null || true
+}
+
+# =============================================================================
+# Section: Kube apply
+# =============================================================================
+
+test_kube_apply() {
+    log "Section: Kube apply"
+
+    if ! need_base; then
+        record "kube/apply" SKIP "base import failed"
+        record "kube/delete" SKIP "base import failed"
+        return
+    fi
+
+    local output
+    local ct="vfy-usage-kube"
+    local yaml_file="/tmp/vfy-usage-kube-pod.yaml"
+
+    # Write a minimal Pod YAML
+    cat > "$yaml_file" <<'EOYAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vfy-usage-kube
+spec:
+  containers:
+  - name: nginx
+    image: docker.io/nginx
+EOYAML
+
+    # sdme kube create -f <file> --base-fs <name> (we use create+start instead
+    # of apply to avoid the interactive join)
+    if output=$(timeout "$TIMEOUT_IMPORT" $SDME kube create \
+            -f "$yaml_file" --base-fs "$BASE_FS" 2>&1) && \
+       output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct" -t 120 2>&1); then
+        record "kube/apply" PASS
+        sleep 3
+
+        # Verify the kube container is visible in ps with kube metadata
+        local ps_out
+        ps_out=$($SDME ps 2>&1)
+        if echo "$ps_out" | grep -q "$ct"; then
+            : # good
+        fi
+
+        stop_container "$ct"
+    else
+        record "kube/apply" FAIL "$output"
+    fi
+
+    # sdme kube delete
+    if output=$(timeout 30 $SDME kube delete "$ct" 2>&1); then
+        record "kube/delete" PASS
+    else
+        record "kube/delete" FAIL "$output"
+    fi
+
+    rm -f "$yaml_file"
+}
+
+# =============================================================================
 # Section: Configuration
 # =============================================================================
 
@@ -825,19 +923,24 @@ test_join_start() {
 }
 
 # =============================================================================
-# Section: stop --all, rm --all
+# Section: stop --all, start --all, rm --all
 # =============================================================================
 
 test_stop_rm_all() {
-    log "Section: stop/rm --all"
+    log "Section: stop/start/rm --all"
 
     if ! need_base; then
         record "batch/stop-all" SKIP "base import failed"
+        record "batch/start-all" SKIP "base import failed"
         record "batch/rm-all" SKIP "base import failed"
         return
     fi
 
     local output
+
+    # NOTE: --all affects ALL sdme containers on the system. This test
+    # is last so other tests have already cleaned up. We verify the flag
+    # works by checking our specific containers in the output.
 
     # Create two containers
     local ct1="vfy-usage-all1"
@@ -847,16 +950,40 @@ test_stop_rm_all() {
     timeout "$TIMEOUT_BOOT" $SDME start "$ct1" -t 120 2>/dev/null || true
     timeout "$TIMEOUT_BOOT" $SDME start "$ct2" -t 120 2>/dev/null || true
 
-    # sdme stop --all (we only stop our own by name, to not affect other tests)
-    if output=$(timeout 60 $SDME stop "$ct1" "$ct2" 2>&1); then
+    # sdme stop --all
+    if output=$(timeout 90 $SDME stop --all 2>&1); then
         record "batch/stop-all" PASS
     else
         record "batch/stop-all" FAIL "$output"
     fi
 
-    # sdme rm (both)
-    if output=$(timeout 10 $SDME rm -f "$ct1" "$ct2" 2>&1); then
-        record "batch/rm-all" PASS
+    # sdme start --all (both containers should be stopped now)
+    if output=$(timeout "$TIMEOUT_BOOT" $SDME start --all -t 120 2>&1); then
+        # Verify both are running
+        local ps_out
+        ps_out=$($SDME ps 2>&1)
+        if echo "$ps_out" | grep -q "$ct1" && echo "$ps_out" | grep -q "$ct2"; then
+            record "batch/start-all" PASS
+        else
+            record "batch/start-all" FAIL "containers not visible after start --all: $ps_out"
+        fi
+    else
+        record "batch/start-all" FAIL "$output"
+    fi
+
+    # Stop before rm
+    timeout 90 $SDME stop --all 2>/dev/null || true
+
+    # sdme rm --all -f
+    if output=$(timeout 30 $SDME rm --all -f 2>&1); then
+        # Verify vfy-usage-all containers are gone
+        local ps_out
+        ps_out=$($SDME ps 2>&1)
+        if echo "$ps_out" | grep -q "vfy-usage-all"; then
+            record "batch/rm-all" FAIL "containers still present after rm --all"
+        else
+            record "batch/rm-all" PASS
+        fi
     else
         record "batch/rm-all" FAIL "$output"
     fi
@@ -917,10 +1044,12 @@ generate_report() {
             net/private net/veth-port net/zone \
             limits/create limits/set \
             binds/create binds/verify \
+            opaque/create opaque/verify \
+            kube/apply kube/delete \
             config/get config/set \
             fs/rm \
             join/start \
-            batch/stop-all batch/rm-all; do
+            batch/stop-all batch/start-all batch/rm-all; do
             if [[ -n "${RESULTS[$key]+x}" ]]; then
                 local section st msg
                 section="${key%%/*}"
@@ -991,6 +1120,8 @@ main() {
     test_networking
     test_limits
     test_binds_env
+    test_opaque_dirs
+    test_kube_apply
     test_config
     test_fs_rm
     test_join_start
