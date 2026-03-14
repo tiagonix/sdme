@@ -1,6 +1,6 @@
 # Maintainer: Alexandre Fiori
 pkgname=sdme
-pkgver=0.3.7
+pkgver=0.4.0
 pkgrel=1
 pkgdesc='Lightweight systemd-nspawn containers with overlayfs'
 arch=('x86_64' 'aarch64')
