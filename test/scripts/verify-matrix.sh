@@ -14,7 +14,7 @@ declare -A DISTRO_IMAGES=(
     [centos]="quay.io/centos/centos:stream9"
     [almalinux]="quay.io/almalinuxorg/almalinux:9"
     [suse]="docker.io/opensuse/tumbleweed:latest"
-    [archlinux]="docker.io/archlinux:latest"
+    [archlinux]="docker.io/lopsided/archlinux:latest"
 )
 
 declare -A APP_IMAGES=(
