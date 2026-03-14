@@ -73,7 +73,6 @@ hardened boot across all distros and hardened OCI app combinations.
 ```bash
 sudo ./test/scripts/verify-matrix.sh
 sudo ./test/scripts/verify-matrix.sh --distro ubuntu --app redis   # single cell
-sudo ./test/scripts/verify-matrix.sh --keep                        # keep artifacts
 sudo ./test/scripts/verify-matrix.sh --report-dir ./test/reports   # custom report dir
 ```
 
@@ -90,10 +89,7 @@ See `./test/scripts/verify-matrix.sh --help` for all options.
 Pod networking validation. Tests shared network namespace connectivity,
 `--private-network` interaction, and error cases.
 
-Requires the `ubuntu` rootfs imported beforehand:
-
 ```bash
-sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
 sudo ./test/scripts/verify-pods.sh
 ```
 
@@ -108,7 +104,6 @@ port-forwarded networking.
 ```bash
 sudo ./test/scripts/verify-oci.sh
 sudo ./test/scripts/verify-oci.sh --distro ubuntu  # single distro
-sudo ./test/scripts/verify-oci.sh --keep           # keep artifacts
 ```
 
 Each distro cell verifies: base import, app import, PORTS and
@@ -123,16 +118,7 @@ validation, state persistence, individual security flags, the `--hardened`
 bundle, AppArmor persistence, hardened boot, multi-distro `--userns` boot,
 and `--userns` with OCI apps.
 
-Requires the `ubuntu` rootfs. For multi-distro userns tests, also requires
-`vfy-*` rootfs from `verify-matrix.sh --keep`:
-
 ```bash
-# Basic security tests (ubuntu rootfs only)
-sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
-sudo ./test/scripts/verify-security.sh
-
-# Full run including multi-distro userns tests
-sudo ./test/scripts/verify-matrix.sh --keep
 sudo ./test/scripts/verify-security.sh
 ```
 
@@ -143,10 +129,7 @@ copy, tarballs (uncompressed, gzip, bzip2, xz, zstd), raw ext4 disk
 images (auto-size and explicit `--size`), format override (`-f`), and
 error handling for nonexistent rootfs.
 
-Requires the `ubuntu` rootfs imported beforehand:
-
 ```bash
-sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
 sudo ./test/scripts/verify-export.sh
 ```
 
@@ -165,7 +148,6 @@ limits, bind mounts, environment variables, and configuration.
 
 ```bash
 sudo ./test/scripts/verify-usage.sh
-sudo ./test/scripts/verify-usage.sh --keep   # keep artifacts
 ```
 
 ### verify-nixos.sh
@@ -177,7 +159,6 @@ daemon running.
 
 ```bash
 sudo ./test/scripts/verify-nixos.sh
-sudo ./test/scripts/verify-nixos.sh --keep   # keep artifacts
 ```
 
 The `test/scripts/nix/build-rootfs.sh` helper builds the NixOS rootfs
@@ -196,8 +177,8 @@ All require a base-fs imported (e.g. `ubuntu`). Run in order:
 | `verify-kube-L3-volumes.sh`   | L3    | ~39   |
 | `verify-kube-L3-secrets.sh`   | L3    | ~16   |
 | `verify-kube-L4-networking.sh`| L4    | ~6    |
-| `verify-kube-L5-redis.sh`     | L5    | ~6    |
-| `verify-kube-L6-gitea.sh`     | L6    | ~15   |
+| `verify-kube-L5-redis-stack.sh`     | L5    | ~6    |
+| `verify-kube-L6-gitea-stack.sh`     | L6    | ~15   |
 
 - **L1-basic**: YAML validation, single-container pod, command
   override, kube delete, shared emptyDir, ps metadata.
@@ -224,20 +205,27 @@ sudo ./test/scripts/verify-kube-L2-security.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L3-volumes.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L3-secrets.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L4-networking.sh --base-fs ubuntu
-sudo ./test/scripts/verify-kube-L5-redis.sh --base-fs ubuntu
-sudo ./test/scripts/verify-kube-L6-gitea.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L5-redis-stack.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L6-gitea-stack.sh --base-fs ubuntu
 ```
 
 ## Running a full test pass
 
-Before tagging a release, run everything from a clean state:
+Before tagging a release, run everything from a clean state. Each script
+sources `lib.sh`, which handles root checks, sdme validation, and base
+rootfs imports automatically. Scripts clean up their own prefixed
+artifacts on exit; the OCI blob cache makes re-imports fast.
 
 ```bash
 # 1. Unit tests
 cargo test
 
-# 2. Integration tests (order matters: matrix first, then the rest)
-sudo ./test/scripts/verify-matrix.sh --keep
+# 2. Build and install
+cargo build --release
+sudo cp target/release/sdme /usr/local/bin/sdme
+
+# 3. Integration tests (any order; each is self-contained)
+sudo ./test/scripts/verify-matrix.sh
 sudo ./test/scripts/verify-pods.sh
 sudo ./test/scripts/verify-oci.sh
 sudo ./test/scripts/verify-security.sh
@@ -245,31 +233,16 @@ sudo ./test/scripts/verify-export.sh
 sudo ./test/scripts/verify-usage.sh
 sudo ./test/scripts/verify-nixos.sh   # requires nix
 
-# 3. Kube tests (requires ubuntu base-fs from step 2)
+# 4. Kube tests
 sudo ./test/scripts/verify-kube-L1-basic.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L2-spec.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L2-security.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L3-volumes.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L3-secrets.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L4-networking.sh --base-fs ubuntu
-sudo ./test/scripts/verify-kube-L5-redis.sh --base-fs ubuntu
-sudo ./test/scripts/verify-kube-L6-gitea.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L5-redis-stack.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L6-gitea-stack.sh --base-fs ubuntu
 ```
-
-Use `--keep` on verify-matrix.sh so that verify-security.sh can reuse
-the imported rootfs for its multi-distro `--userns` tests.
-
-### Clean slate
-
-To remove all test artifacts and start from scratch:
-
-```bash
-sudo sdme rm --all -f
-sudo sdme fs rm --all -f
-```
-
-This removes all containers and imported rootfs. The next integration
-test run will re-import everything from OCI registries.
 
 ## Test results
 

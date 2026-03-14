@@ -8,6 +8,8 @@ set -uo pipefail
 # verifying that OCI-declared ports are auto-forwarded and OCI-declared
 # volumes are auto-mounted and serve content.
 
+source "$(dirname "$0")/lib.sh"
+
 DISTROS=(ubuntu fedora)
 
 declare -A DISTRO_IMAGES=(
@@ -21,7 +23,6 @@ VOLUME_PATH="/usr/share/nginx/html"
 TEST_MARKER="sdme-oci-test"
 
 DATADIR="/var/lib/sdme"
-KEEP=0
 REPORT_DIR="."
 FILTER_DISTROS=()
 
@@ -32,9 +33,6 @@ TIMEOUT_TEST=300
 
 # Result tracking
 declare -A RESULTS
-PASS_COUNT=0
-FAIL_COUNT=0
-SKIP_COUNT=0
 
 usage() {
     cat <<EOF
@@ -45,7 +43,6 @@ Must be run as root.
 
 Options:
   --distro NAME    Only test this distro (repeatable)
-  --keep           Do not remove test artifacts on exit
   --report-dir DIR Write report and log to DIR (default: .)
   --help           Show help
 EOF
@@ -57,9 +54,6 @@ parse_args() {
             --distro)
                 shift
                 FILTER_DISTROS+=("$1")
-                ;;
-            --keep)
-                KEEP=1
                 ;;
             --report-dir)
                 shift
@@ -95,17 +89,14 @@ parse_args() {
 # -- Logging -------------------------------------------------------------------
 
 log() { echo "==> $*"; }
-log_ok() { echo "  [PASS] $*"; }
-log_fail() { echo "  [FAIL] $*"; }
-log_skip() { echo "  [SKIP] $*"; }
 
 record() {
     local key="$1" status="$2" msg="${3:-}"
     RESULTS["$key"]="$status|$msg"
     case "$status" in
-        PASS) PASS_COUNT=$((PASS_COUNT + 1)); log_ok "$key${msg:+: $msg}" ;;
-        FAIL) FAIL_COUNT=$((FAIL_COUNT + 1)); log_fail "$key${msg:+: $msg}" ;;
-        SKIP) SKIP_COUNT=$((SKIP_COUNT + 1)); log_skip "$key${msg:+: $msg}" ;;
+        PASS) ok "$key${msg:+: $msg}" ;;
+        FAIL) fail "$key${msg:+: $msg}" ;;
+        SKIP) skipped "$key${msg:+: $msg}" ;;
     esac
 }
 
@@ -121,40 +112,11 @@ result_msg() {
 # -- Cleanup -------------------------------------------------------------------
 
 cleanup() {
-    if [[ $KEEP -eq 1 ]]; then
-        log "Keeping test artifacts (--keep)"
-        return
-    fi
     log "Cleaning up vfy-oci- artifacts..."
-
-    # Stop and remove containers
-    local names
-    names=$(sdme ps 2>/dev/null | awk 'NR>1 {print $1}' | grep '^vfy-oci-' || true)
-    for name in $names; do
-        sdme stop "$name" 2>/dev/null || sdme stop --term "$name" 2>/dev/null || true
-        sdme rm -f "$name" 2>/dev/null || true
-    done
-
-    # Remove rootfs
-    names=$(sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep '^vfy-oci-' || true)
-    for name in $names; do
-        sdme fs rm "$name" 2>/dev/null || true
-    done
+    cleanup_prefix "vfy-oci-"
 }
 
 trap cleanup EXIT INT TERM
-
-# -- Helpers -------------------------------------------------------------------
-
-stop_container() {
-    local name="$1"
-    timeout 30 sdme stop "$name" 2>/dev/null || \
-        timeout 30 sdme stop --term "$name" 2>/dev/null || true
-}
-
-fs_exists() {
-    sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$1"
-}
 
 # -- Phase 1: Import base OS rootfs -------------------------------------------
 
@@ -377,10 +339,6 @@ HTMLEOF
 # -- Phase 3: Remove rootfs ---------------------------------------------------
 
 phase3_cleanup() {
-    if [[ $KEEP -eq 1 ]]; then
-        log "Phase 3: Skipping rootfs cleanup (--keep)"
-        return
-    fi
     log "Phase 3: Remove rootfs"
     for distro in "${DISTROS[@]}"; do
         sdme fs rm "vfy-oci-nginx-on-$distro" 2>/dev/null || true
@@ -417,12 +375,12 @@ generate_report() {
 
         echo "## Summary"
         echo ""
-        local total=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT))
+        local total=$((_pass + _fail + _skip))
         echo "| Result | Count |"
         echo "|--------|-------|"
-        echo "| PASS | $PASS_COUNT |"
-        echo "| FAIL | $FAIL_COUNT |"
-        echo "| SKIP | $SKIP_COUNT |"
+        echo "| PASS | $_pass |"
+        echo "| FAIL | $_fail |"
+        echo "| SKIP | $_skip |"
         echo "| Total | $total |"
         echo ""
 
@@ -486,15 +444,8 @@ generate_report() {
 main() {
     parse_args "$@"
 
-    if [[ $(id -u) -ne 0 ]]; then
-        echo "error: must run as root" >&2
-        exit 1
-    fi
-
-    if ! command -v sdme &>/dev/null; then
-        echo "error: sdme not found in PATH" >&2
-        exit 1
-    fi
+    ensure_root
+    ensure_sdme
 
     echo "OCI port/volume verification: ${#DISTROS[@]} distros"
     echo "Distros: ${DISTROS[*]}"
@@ -506,12 +457,7 @@ main() {
     phase3_cleanup
     generate_report
 
-    echo ""
-    echo "Results: $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped"
-
-    if [[ $FAIL_COUNT -gt 0 ]]; then
-        exit 1
-    fi
+    print_summary
 }
 
 main "$@"

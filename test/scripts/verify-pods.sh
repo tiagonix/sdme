@@ -2,52 +2,22 @@
 set -euo pipefail
 
 # verify-pods.sh - end-to-end pod verification
-# Must run as root. Requires a base Ubuntu rootfs imported as "ubuntu".
-#
-# Usage:
-#   sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
-#   sudo ./test/verify-pods.sh
 #
 # Tests:
 #   1. nspawn pods (--pod): two host-rootfs containers share localhost via pod netns
 #   2. --pod + --private-network: private-network silently dropped, loopback works
 #   3. Validation: error cases (--oci-pod w/o --private-network, --pod + userns, etc.)
 
-SDME="${SDME:-sdme}"
-VERBOSE="${VERBOSE:-}"
-VFLAG=""
-if [[ -n "$VERBOSE" ]]; then
-    VFLAG="-v"
-fi
+source "$(dirname "$0")/lib.sh"
 
 TIMEOUT_BOOT=120
 TIMEOUT_TEST=60
-
-pass=0
-fail=0
-
-ok() {
-    echo "  PASS: $1"
-    ((pass++)) || true
-}
-
-fail() {
-    echo "  FAIL: $1"
-    ((fail++)) || true
-}
-
-cleanup_container() {
-    timeout 30 "$SDME" stop "$1" 2>/dev/null || \
-        timeout 30 "$SDME" stop --term "$1" 2>/dev/null || true
-    "$SDME" rm -f "$1" 2>/dev/null || true
-}
 
 cleanup_pod() {
     $SDME pod rm -f "$1" 2>/dev/null || true
 }
 
 cleanup_all() {
-    echo "Cleaning up pod test artifacts..."
     local names
     names=$($SDME ps 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^(pod-|val-)' || true)
     for name in $names; do
@@ -60,24 +30,9 @@ cleanup_all() {
 
 trap cleanup_all EXIT INT TERM
 
-# -- Preflight -----------------------------------------------------------------
-
-if [[ $(id -u) -ne 0 ]]; then
-    echo "error: must run as root" >&2
-    exit 1
-fi
-
-if ! command -v "$SDME" &>/dev/null; then
-    echo "error: $SDME not found in PATH" >&2
-    exit 1
-fi
-
-# Check ubuntu rootfs exists.
-if ! "$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "ubuntu"; then
-    echo "error: rootfs 'ubuntu' not found" >&2
-    echo "import it first: sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes" >&2
-    exit 1
-fi
+ensure_root
+ensure_sdme
+ensure_base_fs ubuntu docker.io/ubuntu:24.04
 
 # ---------------------------------------------------------------------------
 # Test 1: nspawn pods (--pod)
@@ -252,8 +207,4 @@ cleanup_pod valpod
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
-echo ""
-echo "Results: $pass passed, $fail failed"
-if [[ $fail -gt 0 ]]; then
-    exit 1
-fi
+print_summary

@@ -15,6 +15,8 @@ set -uo pipefail
 #   5. Create, boot, and test the OCI app container
 #   6. Cleanup
 
+source "$(dirname "$0")/lib.sh"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_SCRIPT="$SCRIPT_DIR/nix/build-rootfs.sh"
 ROOTFS_DIR="$SCRIPT_DIR/nix/nixos-rootfs"
@@ -30,7 +32,6 @@ VOLUME_PATH="/usr/share/nginx/html"
 TEST_MARKER="sdme-nixos-test"
 
 DATADIR="/var/lib/sdme"
-KEEP=0
 REPORT_DIR="."
 
 # Timeouts (seconds)
@@ -41,9 +42,6 @@ TIMEOUT_TEST=60
 
 # Result tracking
 declare -A RESULTS
-PASS_COUNT=0
-FAIL_COUNT=0
-SKIP_COUNT=0
 
 usage() {
     cat <<EOF
@@ -53,7 +51,6 @@ End-to-end verification of NixOS rootfs import, container boot, and OCI app.
 Must be run as root. Requires nix to build the rootfs.
 
 Options:
-  --keep           Do not remove test artifacts on exit
   --report-dir DIR Write report to DIR (default: .)
   --help           Show help
 EOF
@@ -62,9 +59,6 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --keep)
-                KEEP=1
-                ;;
             --report-dir)
                 shift
                 REPORT_DIR="$1"
@@ -86,17 +80,14 @@ parse_args() {
 # -- Logging -------------------------------------------------------------------
 
 log() { echo "==> $*"; }
-log_ok() { echo "  [PASS] $*"; }
-log_fail() { echo "  [FAIL] $*"; }
-log_skip() { echo "  [SKIP] $*"; }
 
 record() {
     local key="$1" status="$2" msg="${3:-}"
     RESULTS["$key"]="$status|$msg"
     case "$status" in
-        PASS) PASS_COUNT=$((PASS_COUNT + 1)); log_ok "$key${msg:+: $msg}" ;;
-        FAIL) FAIL_COUNT=$((FAIL_COUNT + 1)); log_fail "$key${msg:+: $msg}" ;;
-        SKIP) SKIP_COUNT=$((SKIP_COUNT + 1)); log_skip "$key${msg:+: $msg}" ;;
+        PASS) ((_pass++)) || true; echo "  [PASS] $key${msg:+: $msg}" ;;
+        FAIL) ((_fail++)) || true; echo "  [FAIL] $key${msg:+: $msg}" ;;
+        SKIP) ((_skip++)) || true; echo "  [SKIP] $key${msg:+: $msg}" ;;
     esac
 }
 
@@ -112,17 +103,13 @@ result_msg() {
 # -- Cleanup -------------------------------------------------------------------
 
 cleanup() {
-    if [[ $KEEP -eq 1 ]]; then
-        log "Keeping test artifacts (--keep)"
-        return
-    fi
     log "Cleaning up vfy-nix- artifacts..."
 
     # Stop and remove containers
     local names
     names=$(sdme ps 2>/dev/null | awk 'NR>1 {print $1}' | grep '^vfy-nix-' || true)
     for name in $names; do
-        sdme stop "$name" 2>/dev/null || sdme stop --term "$name" 2>/dev/null || true
+        stop_container "$name"
         sdme rm -f "$name" 2>/dev/null || true
     done
 
@@ -139,18 +126,6 @@ cleanup() {
 }
 
 trap cleanup EXIT INT TERM
-
-# -- Helpers -------------------------------------------------------------------
-
-stop_container() {
-    local name="$1"
-    timeout 30 sdme stop "$name" 2>/dev/null || \
-        timeout 30 sdme stop --term "$name" 2>/dev/null || true
-}
-
-fs_exists() {
-    sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$1"
-}
 
 # -- Phase 1: Build NixOS rootfs -----------------------------------------------
 
@@ -448,12 +423,12 @@ generate_report() {
 
         echo "## Summary"
         echo ""
-        local total=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT))
+        local total=$((_pass + _fail + _skip))
         echo "| Result | Count |"
         echo "|--------|-------|"
-        echo "| PASS | $PASS_COUNT |"
-        echo "| FAIL | $FAIL_COUNT |"
-        echo "| SKIP | $SKIP_COUNT |"
+        echo "| PASS | $_pass |"
+        echo "| FAIL | $_fail |"
+        echo "| SKIP | $_skip |"
         echo "| Total | $total |"
         echo ""
 
@@ -509,15 +484,8 @@ generate_report() {
 main() {
     parse_args "$@"
 
-    if [[ $(id -u) -ne 0 ]]; then
-        echo "error: must run as root" >&2
-        exit 1
-    fi
-
-    if ! command -v sdme &>/dev/null; then
-        echo "error: sdme not found in PATH" >&2
-        exit 1
-    fi
+    ensure_root
+    ensure_sdme
 
     # Check nix availability early.
     local has_nix=1
@@ -551,12 +519,7 @@ main() {
     phase5_test_oci
     generate_report
 
-    echo ""
-    echo "Results: $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped"
-
-    if [[ $FAIL_COUNT -gt 0 ]]; then
-        exit 1
-    fi
+    print_summary
 }
 
 main "$@"

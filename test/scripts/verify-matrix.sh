@@ -4,6 +4,8 @@ set -uo pipefail
 # verify-matrix.sh - end-to-end verification of distro x OCI app matrix
 # Run as root. Uses vfy- prefix for all artifacts.
 
+source "$(dirname "$0")/lib.sh"
+
 DISTROS=(debian ubuntu fedora centos almalinux suse archlinux)
 APPS=(nginx-unprivileged redis postgresql)
 
@@ -31,7 +33,6 @@ declare -A APP_READY_WAIT=(
 
 NGINX_MARKER="sdme-matrix-test-$$"
 DATADIR="/var/lib/sdme"
-KEEP=0
 REPORT_DIR="."
 FILTER_DISTROS=()
 FILTER_APPS=()
@@ -57,7 +58,6 @@ Must be run as root.
 Options:
   --distro NAME    Only test this distro (repeatable)
   --app NAME       Only test this app (repeatable)
-  --keep           Do not remove test artifacts on exit
   --report-dir DIR Write report and log to DIR (default: .)
   --help           Show help
 EOF
@@ -73,9 +73,6 @@ parse_args() {
             --app)
                 shift
                 FILTER_APPS+=("$1")
-                ;;
-            --keep)
-                KEEP=1
                 ;;
             --report-dir)
                 shift
@@ -145,50 +142,9 @@ result_msg() {
 
 # -- Cleanup -------------------------------------------------------------------
 
-cleanup() {
-    if [[ $KEEP -eq 1 ]]; then
-        log "Keeping test artifacts (--keep)"
-        return
-    fi
-    log "Cleaning up vfy- artifacts..."
-
-    # Stop and remove containers
-    local names
-    names=$(sdme ps 2>/dev/null | awk 'NR>1 {print $1}' | grep '^vfy-' || true)
-    for name in $names; do
-        sdme stop "$name" 2>/dev/null || sdme stop --term "$name" 2>/dev/null || true
-        sdme rm -f "$name" 2>/dev/null || true
-    done
-
-    # Remove rootfs
-    names=$(sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep '^vfy-' || true)
-    for name in $names; do
-        sdme fs rm "$name" 2>/dev/null || true
-    done
-}
+cleanup() { cleanup_prefix vfy-; }
 
 trap cleanup EXIT INT TERM
-
-# -- Helpers -------------------------------------------------------------------
-
-stop_container() {
-    local name="$1"
-    timeout 30 sdme stop "$name" 2>/dev/null || \
-        timeout 30 sdme stop --term "$name" 2>/dev/null || true
-}
-
-fs_exists() {
-    sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$1"
-}
-
-# Derive OCI service name from image reference.
-# e.g. "docker.io/nginxinc/nginx-unprivileged" → "sdme-oci-nginx-unprivileged.service"
-oci_service_name() {
-    local image="${1%%:*}"                    # strip :tag
-    local last="${image##*/}"                 # last path component
-    local name="${last//_/-}"                 # underscores → hyphens
-    echo "sdme-oci-${name}.service"
-}
 
 # -- Phase 1: Import base OS rootfs --------------------------------------------
 
@@ -521,10 +477,10 @@ phase3c_hardened_apps() {
                 continue
             fi
 
-            # Check rootfs still exists (Phase 3 removes it unless --keep).
-            if ! sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$fs_name"; then
-                record "hardened-app/$app-on-$distro/boot" SKIP "rootfs removed (use --keep)"
-                record "hardened-app/$app-on-$distro/service" SKIP "rootfs removed (use --keep)"
+            # Check rootfs still exists from Phase 3.
+            if ! fs_exists "$fs_name"; then
+                record "hardened-app/$app-on-$distro/boot" SKIP "rootfs removed"
+                record "hardened-app/$app-on-$distro/service" SKIP "rootfs removed"
                 continue
             fi
 
@@ -577,10 +533,6 @@ phase3c_hardened_apps() {
 # -- Phase 4: Remove base rootfs -----------------------------------------------
 
 phase4_cleanup() {
-    if [[ $KEEP -eq 1 ]]; then
-        log "Phase 4: Skipping rootfs cleanup (--keep)"
-        return
-    fi
     log "Phase 4: Remove rootfs"
     # Remove app rootfs
     for distro in "${DISTROS[@]}"; do
@@ -748,16 +700,8 @@ generate_report() {
 
 main() {
     parse_args "$@"
-
-    if [[ $(id -u) -ne 0 ]]; then
-        echo "error: must run as root" >&2
-        exit 1
-    fi
-
-    if ! command -v sdme &>/dev/null; then
-        echo "error: sdme not found in PATH" >&2
-        exit 1
-    fi
+    ensure_root
+    ensure_sdme
 
     echo "Verification matrix: ${#DISTROS[@]} distros x ${#APPS[@]} apps"
     echo "Distros: ${DISTROS[*]}"

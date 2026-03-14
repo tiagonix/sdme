@@ -10,10 +10,11 @@ set -uo pipefail
 # 3. Command override with busybox
 # 4. Cleanup with sdme kube delete
 
+source "$(dirname "$0")/lib.sh"
+
 SDME="${SDME:-sdme}"
 BASE_FS="${BASE_FS:-ubuntu}"
 DATADIR="/var/lib/sdme"
-KEEP=0
 REPORT_DIR="."
 
 # Timeouts (seconds)
@@ -22,9 +23,6 @@ TIMEOUT_BOOT=120
 
 # Result tracking
 declare -A RESULTS
-PASS_COUNT=0
-FAIL_COUNT=0
-SKIP_COUNT=0
 
 usage() {
     cat <<EOF
@@ -35,7 +33,6 @@ Must be run as root.
 
 Options:
   --base-fs NAME   Base rootfs to use (default: ubuntu)
-  --keep           Do not remove test artifacts on exit
   --report-dir DIR Write report to DIR (default: .)
   --help           Show help
 EOF
@@ -47,9 +44,6 @@ parse_args() {
             --base-fs)
                 shift
                 BASE_FS="$1"
-                ;;
-            --keep)
-                KEEP=1
                 ;;
             --report-dir)
                 shift
@@ -73,18 +67,11 @@ record() {
     local test_name="$1" result="$2"
     RESULTS["$test_name"]="$result"
     case "$result" in
-        PASS) ((PASS_COUNT++)) ;;
-        FAIL) ((FAIL_COUNT++)) ;;
-        SKIP) ((SKIP_COUNT++)) ;;
+        PASS) ((_pass++)) || true ;;
+        FAIL) ((_fail++)) || true ;;
+        SKIP) ((_skip++)) || true ;;
     esac
     echo "[$result] $test_name"
-}
-
-cleanup_container() {
-    local name="$1"
-    if [[ $KEEP -eq 0 ]]; then
-        "$SDME" kube delete "$name" --force 2>/dev/null || true
-    fi
 }
 
 # --- Test 0: Validate YAML files with kubeconform ---
@@ -172,7 +159,7 @@ YAML
     echo "--- $test_name: starting pod ---"
     if ! timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -v 2>&1; then
         record "$test_name" FAIL
-        cleanup_container "$pod_name"
+        "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
         return
     fi
 
@@ -194,7 +181,7 @@ YAML
         record "$test_name" FAIL
     fi
 
-    cleanup_container "$pod_name"
+    "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
 }
 
 # --- Test 2: Command override with busybox ---
@@ -228,7 +215,7 @@ YAML
     echo "--- $test_name: starting pod ---"
     if ! timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -v 2>&1; then
         record "$test_name" FAIL
-        cleanup_container "$pod_name"
+        "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
         return
     fi
 
@@ -244,7 +231,7 @@ YAML
         record "$test_name" FAIL
     fi
 
-    cleanup_container "$pod_name"
+    "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
 }
 
 # --- Test 3: kube delete removes both container and rootfs ---
@@ -278,7 +265,7 @@ YAML
     if [[ ! -f "$DATADIR/state/$pod_name" ]]; then
         echo "state file missing before delete"
         record "$test_name" FAIL
-        cleanup_container "$pod_name"
+        "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
         return
     fi
 
@@ -345,7 +332,7 @@ YAML
     echo "--- $test_name: starting pod ---"
     if ! timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -v 2>&1; then
         record "$test_name" FAIL
-        cleanup_container "$pod_name"
+        "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
         return
     fi
 
@@ -368,7 +355,7 @@ YAML
         record "$test_name" FAIL
     fi
 
-    cleanup_container "$pod_name"
+    "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
 }
 
 # --- Test 5: sdme ps shows kube metadata ---
@@ -412,23 +399,18 @@ YAML
         record "$test_name" FAIL
     fi
 
-    cleanup_container "$pod_name"
+    "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
 }
 
 # --- Main ---
 main() {
     parse_args "$@"
 
-    if [[ $EUID -ne 0 ]]; then
-        echo "error: must be run as root" >&2
-        exit 1
-    fi
+    ensure_root
+    ensure_sdme
 
-    # Verify base-fs exists.
-    if [[ ! -d "$DATADIR/fs/$BASE_FS" ]]; then
-        echo "error: base rootfs '$BASE_FS' not found; import it first:" >&2
-        echo "  sdme fs import docker.io/$BASE_FS:latest -n $BASE_FS" >&2
-        exit 1
+    if [[ "$BASE_FS" == "ubuntu" ]]; then
+        ensure_base_fs ubuntu docker.io/ubuntu:24.04
     fi
 
     echo "=== sdme kube verification ==="
@@ -441,14 +423,6 @@ main() {
     test_kube_delete
     test_shared_volume
     test_ps_kube_column
-
-    echo ""
-    echo "=== Results ==="
-    for test_name in "${!RESULTS[@]}"; do
-        echo "  [${RESULTS[$test_name]}] $test_name"
-    done
-    echo ""
-    echo "Total: $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped"
 
     # Write report.
     local report="$REPORT_DIR/verify-kube-$(date +%Y%m%d-%H%M%S).md"
@@ -464,11 +438,11 @@ main() {
             echo "| $test_name | ${RESULTS[$test_name]} |"
         done
         echo ""
-        echo "**$PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped**"
+        echo "**$_pass passed, $_fail failed, $_skip skipped**"
     } > "$report"
     echo "Report: $report"
 
-    [[ $FAIL_COUNT -eq 0 ]]
+    print_summary
 }
 
 main "$@"

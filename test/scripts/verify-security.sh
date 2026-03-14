@@ -2,13 +2,8 @@
 set -euo pipefail
 
 # verify-security.sh - end-to-end security hardening verification
-# Must run as root. Requires a base Ubuntu rootfs imported as "ubuntu".
 # For multi-distro userns tests, also requires vfy-{debian,ubuntu,fedora,...}
-# rootfs from verify-matrix.sh --keep.
-#
-# Usage:
-#   sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
-#   sudo ./test/verify-security.sh
+# rootfs (run verify-matrix.sh first).
 #
 # Tests:
 #   1. CLI validation: bad capabilities, bad filters, contradictions
@@ -27,8 +22,9 @@ set -euo pipefail
 #  14. --userns boot: each distro boots with user namespace isolation
 #  15. --userns OCI app: nginx on ubuntu with user namespace isolation
 
-SDME="${SDME:-sdme}"
-VERBOSE="${VERBOSE:-}"
+source "$(dirname "$0")/lib.sh"
+
+# Re-declare VFLAG as an array (lib.sh sets it as a string).
 VFLAG=()
 if [[ -n "$VERBOSE" ]]; then
     VFLAG=("-v")
@@ -37,31 +33,6 @@ fi
 TIMEOUT_BOOT=120
 TIMEOUT_TEST=60
 DATADIR="/var/lib/sdme"
-
-pass=0
-fail=0
-skip=0
-
-ok() {
-    echo "  PASS: $1"
-    ((pass++)) || true
-}
-
-fail() {
-    echo "  FAIL: $1"
-    ((fail++)) || true
-}
-
-skipped() {
-    echo "  SKIP: $1"
-    ((skip++)) || true
-}
-
-cleanup_container() {
-    timeout 30 "$SDME" stop "$1" 2>/dev/null || \
-        timeout 30 "$SDME" stop --term "$1" 2>/dev/null || true
-    "$SDME" rm -f "$1" 2>/dev/null || true
-}
 
 cleanup_all() {
     echo "Cleaning up sec-/usrns- artifacts..."
@@ -77,22 +48,9 @@ trap cleanup_all EXIT INT TERM
 
 # -- Preflight -----------------------------------------------------------------
 
-if [[ $(id -u) -ne 0 ]]; then
-    echo "error: must run as root" >&2
-    exit 1
-fi
-
-if ! command -v "$SDME" &>/dev/null; then
-    echo "error: $SDME not found in PATH" >&2
-    exit 1
-fi
-
-# Check ubuntu rootfs exists.
-if ! "$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "ubuntu"; then
-    echo "error: rootfs 'ubuntu' not found" >&2
-    echo "import it first: sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes" >&2
-    exit 1
-fi
+ensure_root
+ensure_sdme
+ensure_base_fs ubuntu docker.io/ubuntu:24.04
 
 # ===========================================================================
 # Test 1: CLI validation
@@ -661,7 +619,7 @@ for distro in "${USERNS_DISTROS[@]}"; do
 
     # Check rootfs exists; skip if not.
     if ! "$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$fs_name"; then
-        skipped "$distro userns: rootfs $fs_name not found (run verify-matrix.sh --keep)"
+        skipped "$distro userns: rootfs $fs_name not found (run verify-matrix.sh first)"
         continue
     fi
 
@@ -707,7 +665,7 @@ fs_name="usrns-nginx-on-ubuntu"
 ct_name="usrns-oci-nginx"
 
 if ! "$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "vfy-ubuntu"; then
-    skipped "nginx userns OCI: rootfs vfy-ubuntu not found (run verify-matrix.sh --keep)"
+    skipped "nginx userns OCI: rootfs vfy-ubuntu not found (run verify-matrix.sh first)"
 else
     cleanup_container "$ct_name"
 
@@ -747,8 +705,4 @@ fi
 # ===========================================================================
 # Summary
 # ===========================================================================
-echo ""
-echo "Results: $pass passed, $fail failed, $skip skipped"
-if [[ $fail -gt 0 ]]; then
-    exit 1
-fi
+print_summary

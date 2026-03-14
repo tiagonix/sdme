@@ -2,11 +2,6 @@
 set -euo pipefail
 
 # verify-export.sh - end-to-end test for sdme fs export
-# Must run as root. Requires a base Ubuntu rootfs imported as "ubuntu".
-#
-# Usage:
-#   sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
-#   sudo ./test/scripts/verify-export.sh
 #
 # Tests:
 #   1. Directory export
@@ -16,27 +11,9 @@ set -euo pipefail
 #   5. Format override (-f)
 #   6. Nonexistent rootfs (error case)
 
-SDME="${SDME:-sdme}"
-VERBOSE="${VERBOSE:-}"
-VFLAG=""
-if [[ -n "$VERBOSE" ]]; then
-    VFLAG="-v"
-fi
+source "$(dirname "$0")/lib.sh"
 
 TMPDIR=$(mktemp -d /tmp/vfy-export-XXXXXX)
-
-pass=0
-fail=0
-
-ok() {
-    echo "  PASS: $1"
-    ((pass++)) || true
-}
-
-fail() {
-    echo "  FAIL: $1"
-    ((fail++)) || true
-}
 
 # Check if a tar archive contains a given path.
 # Runs in a subshell with pipefail disabled to avoid SIGPIPE failures.
@@ -48,7 +25,6 @@ tar_contains() {
 }
 
 cleanup() {
-    echo "Cleaning up export test artifacts..."
     # Unmount any leftover loop mounts under TMPDIR.
     mount | grep "$TMPDIR" | awk '{print $3}' | while read -r mp; do
         umount "$mp" 2>/dev/null || true
@@ -58,24 +34,9 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-# -- Preflight -----------------------------------------------------------------
-
-if [[ $(id -u) -ne 0 ]]; then
-    echo "error: must run as root" >&2
-    exit 1
-fi
-
-if ! command -v "$SDME" &>/dev/null; then
-    echo "error: $SDME not found in PATH" >&2
-    exit 1
-fi
-
-# Check ubuntu rootfs exists.
-if ! "$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "ubuntu"; then
-    echo "error: rootfs 'ubuntu' not found" >&2
-    echo "import it first: sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes" >&2
-    exit 1
-fi
+ensure_root
+ensure_sdme
+ensure_base_fs ubuntu docker.io/ubuntu:24.04
 
 # Check optional dependencies for some tests.
 HAS_ZSTDCAT=true
@@ -199,7 +160,7 @@ if [[ "$HAS_ZSTDCAT" == "true" ]]; then
     fi
     rm -f "$tarzst"
 else
-    echo "  SKIP: tar.zst export (zstdcat not available)"
+    skipped "tar.zst export (zstdcat not available)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -231,7 +192,7 @@ if [[ "$HAS_MKFS_EXT4" == "true" ]]; then
     fi
     rm -f "$rawimg"
 else
-    echo "  SKIP: raw export (mkfs.ext4 not available)"
+    skipped "raw export (mkfs.ext4 not available)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -258,7 +219,7 @@ if [[ "$HAS_MKFS_EXT4" == "true" ]]; then
     fi
     rm -f "$rawimg2"
 else
-    echo "  SKIP: raw export --size (mkfs.ext4 not available)"
+    skipped "raw export --size (mkfs.ext4 not available)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -318,7 +279,7 @@ if [[ "$HAS_MKFS_BTRFS" == "true" ]]; then
     fi
     rm -f "$rawbtrfs"
 else
-    echo "  SKIP: btrfs raw export (mkfs.btrfs not available)"
+    skipped "btrfs raw export (mkfs.btrfs not available)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -345,14 +306,10 @@ if [[ "$HAS_MKFS_BTRFS" == "true" ]]; then
     fi
     rm -f "$rawbtrfs2"
 else
-    echo "  SKIP: btrfs raw export --size (mkfs.btrfs not available)"
+    skipped "btrfs raw export --size (mkfs.btrfs not available)"
 fi
 
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
-echo ""
-echo "Results: $pass passed, $fail failed"
-if [[ $fail -gt 0 ]]; then
-    exit 1
-fi
+print_summary

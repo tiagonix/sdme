@@ -11,10 +11,11 @@ set -uo pipefail
 # This is the key kube networking assertion: containers in the same pod
 # share a network namespace and can communicate via localhost.
 
+source "$(dirname "$0")/lib.sh"
+
 SDME="${SDME:-sdme}"
 BASE_FS="${BASE_FS:-ubuntu}"
 DATADIR="/var/lib/sdme"
-KEEP=0
 REPORT_DIR="."
 
 POD_NAME="vfy-kube-net"
@@ -27,9 +28,6 @@ TIMEOUT_READY=90
 
 # Result tracking
 declare -A RESULTS
-PASS_COUNT=0
-FAIL_COUNT=0
-SKIP_COUNT=0
 
 # State flags
 POD_CREATED=0
@@ -44,7 +42,6 @@ Must be run as root.
 
 Options:
   --base-fs NAME   Base rootfs to use (default: ubuntu)
-  --keep           Do not remove test artifacts on exit
   --report-dir DIR Write report to DIR (default: .)
   --help           Show help
 EOF
@@ -56,9 +53,6 @@ parse_args() {
             --base-fs)
                 shift
                 BASE_FS="$1"
-                ;;
-            --keep)
-                KEEP=1
                 ;;
             --report-dir)
                 shift
@@ -82,9 +76,9 @@ record() {
     local test_name="$1" result="$2" msg="${3:-}"
     RESULTS["$test_name"]="$result|$msg"
     case "$result" in
-        PASS) ((PASS_COUNT++)); echo "  [PASS] $test_name${msg:+: $msg}" ;;
-        FAIL) ((FAIL_COUNT++)); echo "  [FAIL] $test_name${msg:+: $msg}" ;;
-        SKIP) ((SKIP_COUNT++)); echo "  [SKIP] $test_name${msg:+: $msg}" ;;
+        PASS) ((_pass++)) || true; echo "  [PASS] $test_name${msg:+: $msg}" ;;
+        FAIL) ((_fail++)) || true; echo "  [FAIL] $test_name${msg:+: $msg}" ;;
+        SKIP) ((_skip++)) || true; echo "  [SKIP] $test_name${msg:+: $msg}" ;;
     esac
 }
 
@@ -101,10 +95,6 @@ result_msg() {
 # --- Cleanup ------------------------------------------------------------------
 
 cleanup() {
-    if [[ $KEEP -eq 1 ]]; then
-        echo "==> Keeping test artifacts (--keep)"
-        return
-    fi
     echo "==> Cleaning up..."
     "$SDME" kube delete "$POD_NAME" --force 2>/dev/null || true
 }
@@ -280,12 +270,12 @@ generate_report() {
 
         echo "## Summary"
         echo ""
-        local total=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT))
+        local total=$((_pass + _fail + _skip))
         echo "| Result | Count |"
         echo "|--------|-------|"
-        echo "| PASS | $PASS_COUNT |"
-        echo "| FAIL | $FAIL_COUNT |"
-        echo "| SKIP | $SKIP_COUNT |"
+        echo "| PASS | $_pass |"
+        echo "| FAIL | $_fail |"
+        echo "| SKIP | $_skip |"
         echo "| Total | $total |"
         echo ""
 
@@ -336,15 +326,11 @@ generate_report() {
 main() {
     parse_args "$@"
 
-    if [[ $EUID -ne 0 ]]; then
-        echo "error: must be run as root" >&2
-        exit 1
-    fi
+    ensure_root
+    ensure_sdme
 
-    if [[ ! -d "$DATADIR/fs/$BASE_FS" ]]; then
-        echo "error: base rootfs '$BASE_FS' not found; import it first:" >&2
-        echo "  sdme fs import docker.io/$BASE_FS:latest -n $BASE_FS" >&2
-        exit 1
+    if [[ "$BASE_FS" == "ubuntu" ]]; then
+        ensure_base_fs ubuntu docker.io/ubuntu:24.04
     fi
 
     echo "=== sdme kube networking verification ==="
@@ -359,13 +345,9 @@ main() {
     test_ready_nginx
     test_localhost_http
 
-    echo ""
-    echo "=== Results ==="
-    echo "Total: $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped"
-
     generate_report
 
-    [[ $FAIL_COUNT -eq 0 ]]
+    print_summary
 }
 
 main "$@"
