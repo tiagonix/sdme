@@ -43,8 +43,11 @@ deb: dist/completions
 rpm: dist/completions
 	cargo generate-rpm
 
+pkg: dist/completions
+	./dist/arch/build-pkg.sh
+
 clean:
 	cargo clean
 	rm -rf dist
 
-.PHONY: all install install-extras install-man install-completions uninstall uninstall-man uninstall-completions deb rpm clean
+.PHONY: all install install-extras install-man install-completions uninstall uninstall-man uninstall-completions deb rpm pkg clean

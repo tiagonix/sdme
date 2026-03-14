@@ -1,0 +1,49 @@
+# Maintainer: Alexandre Fiori
+pkgname=sdme
+pkgver=0.3.7
+pkgrel=1
+pkgdesc='Lightweight systemd-nspawn containers with overlayfs'
+arch=('x86_64' 'aarch64')
+url='https://github.com/fiorix/sdme'
+license=('MIT')
+depends=('systemd>=252')
+optdepends=(
+    'qemu-base: QCOW2 disk image import support'
+    'apparmor: security profile support'
+)
+makedepends=('cargo')
+backup=('etc/apparmor.d/sdme-default')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/fiorix/sdme/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+install=sdme.install
+
+build() {
+    cd "$pkgname-$pkgver"
+    cargo build --release --locked
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    cargo test --locked
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    install -Dm755 target/release/sdme "$pkgdir/usr/bin/sdme"
+    install -Dm644 dist/sdme.1 "$pkgdir/usr/share/man/man1/sdme.1"
+
+    # Generate completions
+    mkdir -p "$pkgdir/usr/share/bash-completion/completions"
+    target/release/sdme config completions bash > "$pkgdir/usr/share/bash-completion/completions/sdme"
+    mkdir -p "$pkgdir/usr/share/zsh/site-functions"
+    target/release/sdme config completions zsh > "$pkgdir/usr/share/zsh/site-functions/_sdme"
+    mkdir -p "$pkgdir/usr/share/fish/vendor_completions.d"
+    target/release/sdme config completions fish > "$pkgdir/usr/share/fish/vendor_completions.d/sdme.fish"
+
+    # Generate and install AppArmor profile
+    mkdir -p "$pkgdir/etc/apparmor.d"
+    target/release/sdme config apparmor-profile > "$pkgdir/etc/apparmor.d/sdme-default"
+
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

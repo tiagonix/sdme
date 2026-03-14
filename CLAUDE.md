@@ -15,6 +15,9 @@ cargo build --release       # build the binary
 cargo test                  # run all tests
 cargo test <test_name>      # run a single test
 make                        # same as cargo build --release
+make deb                    # build .deb package
+make rpm                    # build .rpm package
+make pkg                    # build .pkg.tar.zst package (Arch Linux)
 sudo make install           # install to /usr/local (does NOT rebuild)
 ```
 
@@ -23,8 +26,8 @@ sudo make install           # install to /usr/local (does NOT rebuild)
 Static musl binaries (x86_64 + aarch64) are built with `cargo-zigbuild`. Locally:
 
 ```bash
-./scripts/build-release.sh            # build all targets to target/dist/
-./scripts/build-release.sh -v <target> # build one target, verbose
+./dist/build-release.sh            # build all targets to target/dist/
+./dist/build-release.sh -v <target> # build one target, verbose
 ```
 
 CI: pushing a `v*` tag triggers `.github/workflows/release.yml`, which runs tests, cross-compiles both targets, generates SHA256SUMS, and creates a GitHub release with all artifacts.
