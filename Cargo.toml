@@ -6,6 +6,7 @@ description = "Lightweight systemd-nspawn containers with overlayfs"
 license = "MIT"
 repository = "https://github.com/fiorix/sdme"
 homepage = "https://fiorix.github.io/sdme"
+documentation = "https://docs.rs/sdme"
 readme = "README.md"
 keywords = ["systemd", "nspawn", "containers", "overlayfs"]
 categories = ["command-line-utilities"]
@@ -42,10 +43,10 @@ depends = "systemd (>= 252), systemd-container"
 suggests = "qemu-utils, apparmor"
 section = "admin"
 priority = "optional"
-maintainer-scripts = "packaging/deb"
+maintainer-scripts = "dist/deb"
 assets = [
     ["target/release/sdme", "usr/bin/", "755"],
-    ["docs/sdme.1", "usr/share/man/man1/sdme.1", "644"],
+    ["dist/sdme.1", "usr/share/man/man1/sdme.1", "644"],
     ["dist/completions/sdme.bash", "usr/share/bash-completion/completions/sdme", "644"],
     ["dist/completions/_sdme", "usr/share/zsh/vendor-completions/_sdme", "644"],
     ["dist/completions/sdme.fish", "usr/share/fish/vendor_completions.d/sdme.fish", "644"],
@@ -55,7 +56,7 @@ assets = [
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/sdme", dest = "/usr/bin/sdme", mode = "755" },
-    { source = "docs/sdme.1", dest = "/usr/share/man/man1/sdme.1", mode = "644", doc = true },
+    { source = "dist/sdme.1", dest = "/usr/share/man/man1/sdme.1", mode = "644", doc = true },
     { source = "dist/completions/sdme.bash", dest = "/usr/share/bash-completion/completions/sdme", mode = "644" },
     { source = "dist/completions/_sdme", dest = "/usr/share/zsh/site-functions/_sdme", mode = "644" },
     { source = "dist/completions/sdme.fish", dest = "/usr/share/fish/vendor_completions.d/sdme.fish", mode = "644" },

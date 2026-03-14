@@ -50,11 +50,12 @@ well. But they are also boring for my learning experience. Do what, now?
 Sit and run something inside? Meh.
 
 Actually, half true. Convenience was my initial driver for supporting
-[OCI containers](architecture.md#8-oci-integration). We all know off the top of our head
-docker.io/ubuntu but I bet you wouldn't tell me the qcow2 URL for any
-distro outside your own maybe. Using debootstrap is fine but I wanted to
-ensure the systemd container ecosystem can be enriched by ecosystems
-that already exist but are not easily accessible from systemd-nspawn.
+[OCI containers](architecture.md#8-oci-integration). We all know
+off the top of our head docker.io/ubuntu but I bet you wouldn't tell
+me the qcow2 URL for any distro outside your own maybe. Using
+debootstrap is fine but I wanted to ensure the systemd container
+ecosystem can be enriched by ecosystems that already exist but are
+not easily accessible from systemd-nspawn.
 
 So, enabling to download from an OCI registry and strip out all but the
 rootfs was the first step. The next step was distinguishing base OS
@@ -63,8 +64,9 @@ base OS imports work like directory imports: detect the distro, install
 systemd and D-Bus, done. App images are different: sdme creates a
 systemd container with one of your existing rootfs and places the OCI
 app inside it as a chroot with its own network namespace. A systemd
-service manages the lifecycle. It was [tricky](architecture.md#8-oci-integration) to get
-right, but it works.
+service manages the lifecycle. It was
+[tricky](architecture.md#8-oci-integration) to get right, but it
+works.
 
 Once those were working, we needed pods. A pod is a shared network
 namespace. You can place the entire nspawn container in a pod, or place
@@ -149,7 +151,7 @@ Average: ~13 commits/day.
 | Total deletions                            | 13,475       |
 
 The negative net (more deletions than insertions) reflects heavy
-refactoring -- the codebase was aggressively shrunk and restructured
+refactoring: the codebase was aggressively shrunk and restructured
 over its lifetime. The gross churn of ~19.5k means roughly 1x the
 entire current codebase was rewritten/reworked.
 
@@ -238,16 +240,16 @@ verification.
 - aarch64
 
 Both get custom ELF binaries generated at compile time (isolate +
-devfd_shim -- raw machine code emitters, not cross-compiled C).
+devfd_shim, raw machine code emitters, not cross-compiled C).
 
 ### Security Tiers: 3
 
-1. **Individual flags** -- `--drop-capability`, `--capability`,
+1. **Individual flags:** `--drop-capability`, `--capability`,
    `--no-new-privileges`, `--read-only`, `--system-call-filter`,
    `--apparmor-profile`
-2. **`--hardened`** -- userns + private network + no-new-privileges +
+2. **`--hardened`:** userns + private network + no-new-privileges +
    capability drops
-3. **`--strict`** -- hardened + Docker-equivalent caps + seccomp +
+3. **`--strict`:** hardened + Docker-equivalent caps + seccomp +
    AppArmor
 
 ### Networking

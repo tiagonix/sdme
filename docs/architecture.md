@@ -267,9 +267,7 @@ returns the first unused name. If all 200 base words are taken, it
 falls back to vowel mutations: consonants stay fixed while vowels are
 randomly substituted, producing names that sound like plausible
 Tupi-Guarani words but don't appear in the original list. Up to 200
-mutation attempts before giving up. Sorry folks yet I digress,
-inspiration from MF-DOOM makes me handle these nerdy things just like
-chess.
+mutation attempts before giving up.
 
 ## 6. The fs Subsystem: Managing Root Filesystems
 

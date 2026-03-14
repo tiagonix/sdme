@@ -10,7 +10,7 @@ install:
 install-extras: install-man install-completions
 
 install-man:
-	install -Dm644 docs/sdme.1 $(DESTDIR)/share/man/man1/sdme.1
+	install -Dm644 dist/sdme.1 $(DESTDIR)/share/man/man1/sdme.1
 
 install-completions:
 	install -dm755 $(DESTDIR)/share/bash-completion/completions
