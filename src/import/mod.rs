@@ -722,6 +722,17 @@ impl ChrootGuard {
                     mount_point.display()
                 );
             }
+            // Prevent mount events inside the chroot from propagating back
+            // to the host. Without this, package managers that trigger udev
+            // or systemd inside the chroot can remount the host's /dev.
+            let status = Command::new("mount")
+                .args(["--make-rslave"])
+                .arg(&mount_point)
+                .status()
+                .with_context(|| format!("failed to make rslave: {}", mount_point.display()))?;
+            if !status.success() {
+                bail!("make-rslave failed: {}", mount_point.display());
+            }
             guard.mounts.push(mount_point);
         }
 
@@ -735,6 +746,14 @@ impl ChrootGuard {
             .context("failed to bind mount /dev/pts")?;
         if !status.success() {
             bail!("bind mount failed: /dev/pts -> {}", devpts.display());
+        }
+        let status = Command::new("mount")
+            .args(["--make-rslave"])
+            .arg(&devpts)
+            .status()
+            .context("failed to make rslave: /dev/pts")?;
+        if !status.success() {
+            bail!("make-rslave failed: {}", devpts.display());
         }
         guard.mounts.push(devpts);
 
@@ -770,7 +789,15 @@ impl ChrootGuard {
     fn cleanup(&mut self) {
         // Unmount in reverse order.
         for mount_point in self.mounts.drain(..).rev() {
-            let _ = Command::new("umount").arg(&mount_point).status();
+            match Command::new("umount").arg(&mount_point).status() {
+                Ok(s) if !s.success() => {
+                    eprintln!("warning: failed to unmount {}", mount_point.display());
+                }
+                Err(e) => {
+                    eprintln!("warning: failed to unmount {}: {e}", mount_point.display());
+                }
+                _ => {}
+            }
         }
 
         // Restore original resolv.conf.
