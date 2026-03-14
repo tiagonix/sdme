@@ -459,6 +459,23 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
     // The isolate binary uses raw execve which requires absolute paths.
     // Resolve relative command names against the app root's PATH dirs.
     let exec_start = resolve_exec_command(opts.app_root, opts.exec_start);
+
+    // Systemd unit files do not support literal newlines in ExecStart= values.
+    // When the command contains newlines (e.g. multi-line shell scripts from
+    // kube YAML), write a wrapper script and reference it from ExecStart.
+    let exec_start = if exec_start.contains('\n') {
+        let script_content = format!("#!/bin/sh\nexec {exec_start}\n");
+        let script_path = opts.app_root.join(".sdme-exec.sh");
+        fs::write(&script_path, &script_content)
+            .with_context(|| format!("failed to write {}", script_path.display()))?;
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("failed to set permissions on {}", script_path.display()))?;
+        "/bin/sh /.sdme-exec.sh".to_string()
+    } else {
+        exec_start
+    };
+
     let isolate_exec = format!(
         "/.sdme-isolate {} {} {} {}",
         uid, gid, opts.working_dir, exec_start

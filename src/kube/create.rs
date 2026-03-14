@@ -12,6 +12,22 @@ use crate::import::shell_join;
 use crate::oci::registry::OciContainerConfig;
 use crate::{check_interrupted, validate_name, State};
 
+/// Set ownership of a path to the given uid:gid.
+fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    if uid == 0 && gid == 0 {
+        return Ok(());
+    }
+    use std::ffi::CString;
+    let c_path = CString::new(path.as_os_str().as_encoded_bytes())
+        .with_context(|| format!("invalid path: {}", path.display()))?;
+    let ret = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        anyhow::bail!("failed to chown {}: {err}", path.display());
+    }
+    Ok(())
+}
+
 /// Create a kube pod: parse YAML, pull images, build combined rootfs, create container.
 ///
 /// Returns the container name on success.
@@ -41,9 +57,27 @@ pub fn kube_create(
     let staging_name = format!(".{rootfs_name}.importing");
     let staging_dir = rootfs_dir.join(&staging_name);
 
-    // Fail if rootfs already exists.
+    // If a kube pod already exists with this name, delete it first (idempotent apply).
     if final_dir.exists() {
-        bail!("rootfs already exists: {rootfs_name}; delete the existing kube pod first");
+        let state_path = datadir.join("state").join(&plan.pod_name);
+        if state_path.exists() {
+            let state = State::read_from(&state_path)?;
+            if state.is_yes("KUBE") {
+                eprintln!("replacing existing kube pod '{}'", plan.pod_name);
+                kube_delete(datadir, &plan.pod_name, false, verbose)?;
+            } else {
+                bail!(
+                    "rootfs already exists: {rootfs_name}; \
+                     a non-kube container '{}' owns it (use --force with kube delete)",
+                    plan.pod_name
+                );
+            }
+        } else {
+            bail!(
+                "rootfs already exists: {rootfs_name}; \
+                 no matching container found, remove it manually with: sdme fs rm {rootfs_name}"
+            );
+        }
     }
 
     // Clean up any leftover staging dir.
@@ -68,12 +102,18 @@ pub fn kube_create(
     fs::create_dir_all(&volumes_dir)
         .with_context(|| format!("failed to create {}", volumes_dir.display()))?;
 
+    // Resolve the pod-level owner for volume directories. When runAsUser is
+    // set, volumes must be owned by that user so the app process can read/write.
+    let vol_uid = plan.run_as_user.unwrap_or(0);
+    let vol_gid = plan.run_as_group.unwrap_or(vol_uid);
+
     // Create emptyDir volumes.
     for vol in &plan.volumes {
         if matches!(vol.kind, KubeVolumeKind::EmptyDir) {
             let vol_path = volumes_dir.join(&vol.name);
             fs::create_dir_all(&vol_path)
                 .with_context(|| format!("failed to create volume dir {}", vol_path.display()))?;
+            chown_path(&vol_path, vol_uid, vol_gid)?;
         }
     }
 
@@ -135,6 +175,7 @@ pub fn kube_create(
             let host_dir = datadir.join("volumes").join(claim_name);
             fs::create_dir_all(&host_dir)
                 .with_context(|| format!("failed to create {}", host_dir.display()))?;
+            chown_path(&host_dir, vol_uid, vol_gid)?;
             let vol_path = volumes_dir.join(&vol.name);
             fs::create_dir_all(&vol_path)
                 .with_context(|| format!("failed to create volume dir {}", vol_path.display()))?;
@@ -531,11 +572,15 @@ pub(crate) fn setup_kube_container(
     }
 
     // Create mount point directories inside the app root (needed as bind targets
-    // for sdme-kube-volumes.service).
+    // for sdme-kube-volumes.service). Owned by the container's effective user so
+    // the app process can access them.
+    let mount_uid = kc.run_as_user.or(plan.run_as_user).unwrap_or(0);
+    let mount_gid = kc.run_as_group.or(plan.run_as_group).unwrap_or(mount_uid);
     for vm in &kc.volume_mounts {
         let mount_dir = app_root.join(vm.mount_path.trim_start_matches('/'));
         fs::create_dir_all(&mount_dir)
             .with_context(|| format!("failed to create mount point {}", mount_dir.display()))?;
+        chown_path(&mount_dir, mount_uid, mount_gid)?;
     }
 
     // If there are volume mounts, add ordering dependency on the volume mount service.

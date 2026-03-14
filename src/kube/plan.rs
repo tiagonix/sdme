@@ -2030,6 +2030,52 @@ spec:
     }
 
     #[test]
+    fn test_unit_multiline_command() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let mut kc = make_test_container("app");
+        kc.command_override = Some(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo hello\necho world\n".to_string(),
+        ]);
+        kc.args_override = None;
+        let plan = make_test_plan();
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+
+        // ExecStart must not contain literal newlines (systemd rejects them).
+        // Multi-line commands should be written to a wrapper script.
+        let exec_line = unit
+            .lines()
+            .find(|l| l.starts_with("ExecStart="))
+            .expect("unit should have ExecStart");
+        assert!(
+            exec_line.lines().count() == 1,
+            "ExecStart must be a single line, got: {exec_line}"
+        );
+        assert!(
+            exec_line.contains("/.sdme-exec.sh"),
+            "multi-line command should use wrapper script, got: {exec_line}"
+        );
+    }
+
+    #[test]
+    fn test_unit_singleline_command_no_wrapper() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let kc = make_test_container("app");
+        let plan = make_test_plan();
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+
+        let exec_line = unit
+            .lines()
+            .find(|l| l.starts_with("ExecStart="))
+            .expect("unit should have ExecStart");
+        assert!(
+            !exec_line.contains("/.sdme-exec.sh"),
+            "single-line command should not use wrapper script, got: {exec_line}"
+        );
+    }
+
+    #[test]
     fn test_unit_security_context_user() {
         let _lock = UNIT_TEST_LOCK.lock().unwrap();
         let kc = make_test_container("app");
