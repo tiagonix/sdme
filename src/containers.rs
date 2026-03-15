@@ -372,6 +372,47 @@ fn do_create(
             }
         }
     }
+    // When the container's security config drops capabilities that appear in
+    // the OCI service unit's default CapabilityBoundingSet, write a systemd
+    // drop-in to adjust the bounding set. Without this, the inner service
+    // claims capabilities the container doesn't have, which causes boot
+    // failures on distros where systemd enforces the mismatch (e.g. SUSE).
+    if !opts.security.drop_caps.is_empty() {
+        let app_names = crate::oci::rootfs::detect_all_oci_app_names(rootfs);
+        if !app_names.is_empty() {
+            use crate::security::OCI_DEFAULT_CAPS;
+
+            let caps: Vec<&str> = OCI_DEFAULT_CAPS
+                .iter()
+                .copied()
+                .filter(|c| !opts.security.drop_caps.iter().any(|d| d == *c))
+                .collect();
+
+            // Always keep CAP_SYS_ADMIN for the isolate binary.
+            let mut caps_line = caps.join(" ");
+            if !caps.contains(&"CAP_SYS_ADMIN") {
+                caps_line.push_str(" CAP_SYS_ADMIN");
+            }
+
+            let dropin_content =
+                format!("[Service]\nCapabilityBoundingSet=\nCapabilityBoundingSet={caps_line}\n");
+
+            for oci_app_name in &app_names {
+                let dropin_dir = container_dir.join(format!(
+                    "upper/etc/systemd/system/sdme-oci-{oci_app_name}.service.d"
+                ));
+                fs::create_dir_all(&dropin_dir)
+                    .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
+                let dropin_path = dropin_dir.join("hardening.conf");
+                fs::write(&dropin_path, &dropin_content)
+                    .with_context(|| format!("failed to write {}", dropin_path.display()))?;
+                if verbose {
+                    eprintln!("wrote security drop-in: {}", dropin_path.display());
+                }
+            }
+        }
+    }
+
     opts.security.write_to_state(&mut state);
     if !opaque_dirs.is_empty() {
         state.set("OPAQUE_DIRS", opaque_dirs.join(","));
@@ -918,13 +959,18 @@ fn find_oci_service_cgroup(name: &str, app_name: &str) -> Result<PathBuf> {
         machine_slice.join(format!("machine-{escaped_name}.scope")),
     ];
 
-    for root in &cgroup_roots {
-        for inner in CGROUP_INNER_PATHS {
-            let candidate = root.join(inner).join(&service_name);
-            if candidate.is_dir() {
-                return Ok(candidate);
+    // Retry briefly: the cgroup directory may not be visible on the
+    // filesystem immediately after systemd reports the unit as active.
+    for _ in 0..30 {
+        for root in &cgroup_roots {
+            for inner in CGROUP_INNER_PATHS {
+                let candidate = root.join(inner).join(&service_name);
+                if candidate.is_dir() {
+                    return Ok(candidate);
+                }
             }
         }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
     bail!(
         "cgroup for {service_name} not found under {}",
