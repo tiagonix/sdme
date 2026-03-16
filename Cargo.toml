@@ -2,7 +2,7 @@
 name = "sdme"
 version = "0.4.1"
 edition = "2021"
-description = "Lightweight systemd-nspawn containers with overlayfs"
+description = "Booted systemd-nspawn containers with OCI and Kubernetes support"
 license = "MIT"
 repository = "https://github.com/fiorix/sdme"
 homepage = "https://fiorix.github.io/sdme"

@@ -1,9 +1,10 @@
 # sdme
 
-Lightweight systemd-nspawn container manager with overlayfs. A single static
-binary that creates and manages Linux containers -- each boots full systemd
-over a copy-on-write layer, keeping the base rootfs untouched. No daemon, no
-runtime dependency beyond systemd.
+Booted systemd-nspawn containers with OCI and Kubernetes support. A single
+static binary that boots full systemd using overlayfs copy-on-write layers,
+keeping the base rootfs untouched. Pull OCI images from any registry, run them
+as managed systemd services, or apply Kubernetes Pod YAML for local development
+and testing. No daemon, no runtime dependency beyond systemd.
 
 ## What you can do
 

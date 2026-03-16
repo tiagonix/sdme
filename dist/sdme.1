@@ -1,6 +1,6 @@
 .TH SDME 1 "2026-03-13" "sdme" "User Commands"
 .SH NAME
-sdme \- lightweight systemd\-nspawn containers with overlayfs
+sdme \- booted systemd\-nspawn containers with OCI and Kubernetes support
 .SH SYNOPSIS
 .B sdme
 [\fB\-v\fR] [\fB\-\-config\fR \fIpath\fR]
@@ -8,7 +8,7 @@ sdme \- lightweight systemd\-nspawn containers with overlayfs
 [\fIargs\fR...]
 .SH DESCRIPTION
 .B sdme
-manages lightweight containers using
+boots containers using
 .BR systemd\-nspawn (1)
 with overlayfs copy\-on\-write storage.
 Each container uses an imported root filesystem as its read\-only lower layer,
