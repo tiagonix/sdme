@@ -373,6 +373,28 @@ pub(crate) struct OciAppSetup<'a> {
 /// Creates the service unit, env/ports/volumes files, deploys devfd shim
 /// and isolate binary. Common logic shared by `setup_app_image()` and
 /// kube's `setup_kube_container()`.
+///
+/// # Files created inside the rootfs
+///
+/// | What | Path(s) |
+/// |------|---------|
+/// | App root | `/oci/apps/{name}/root/` (the OCI image filesystem) |
+/// | Service unit | `/etc/systemd/system/sdme-oci-{name}.service` |
+/// | Env file | `/oci/apps/{name}/env` |
+/// | Ports file | `/oci/apps/{name}/ports` |
+/// | Volumes file | `/oci/apps/{name}/volumes` |
+/// | Isolate binary | `/oci/apps/{name}/isolate` (static ELF for PID/IPC ns) |
+/// | devfd shim | `/oci/apps/{name}/devfd-shim.so` (LD_PRELOAD for /dev/fd) |
+/// | Probe binary | `/oci/.sdme-kube-probe` (kube pods only) |
+/// | Probe units | `/etc/systemd/system/sdme-probe-*-{name}.*` (kube pods) |
+/// | Volume mount svc | `/etc/systemd/system/sdme-kube-volumes.service` (kube) |
+///
+/// # TODO: package OCI app artifacts
+///
+/// All of the above are direct file writes. Ideally these should be an
+/// installable package (e.g. `sdme-oci-{name}`) built for the distro's
+/// package manager so users can cleanly inspect, override, or remove the
+/// OCI app setup from inside a running container.
 pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
     // 1. Ensure essential runtime directories.
     for (dir, mode) in [

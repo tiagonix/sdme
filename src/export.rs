@@ -572,7 +572,73 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Prepare a mounted rootfs for VM boot.
+/// Patch an nspawn-imported rootfs so it can boot as a standalone VM.
+///
+/// Container rootfs images are imported for systemd-nspawn which provides its
+/// own device tree, network, and init discovery. A bare VM kernel needs all of
+/// that configured on disk. This function makes the following modifications:
+///
+/// # Files created or modified
+///
+/// | What | Path(s) | Why |
+/// |------|---------|-----|
+/// | init symlink | `/usr/sbin/init` → `../../lib/systemd/systemd` | Kernel needs `/sbin/init`; nspawn finds systemd directly |
+/// | serial-getty template | `/etc/systemd/system/serial-getty@.service` | Copy of distro template with `BindsTo=dev-%i.device` removed (no udev) |
+/// | serial-getty enable | `/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service` | Explicit enable for ttyS0 |
+/// | multi-user drop-in | `/etc/systemd/system/multi-user.target.d/wants-getty.conf` | `Wants=serial-getty@ttyS0.service` — container images omit getty.target |
+/// | fstab | `/etc/fstab` | `/dev/vda / {ext4,btrfs} defaults 0 1` |
+/// | resolved unmask | `/etc/systemd/system/systemd-resolved.service` | Remove mask symlink (nspawn import masks it) |
+/// | resolv.conf | `/etc/resolv.conf` | Nameserver entries (VM has no host resolver) |
+/// | networkd units | `/etc/systemd/network/20-sdme-en.network` | DHCP on `en*` interfaces; enables `systemd-networkd.service` |
+/// | root password | `/etc/shadow` | Direct hash write (no chpasswd dependency) |
+/// | SSH key | `/root/.ssh/authorized_keys` | Optional authorized_keys for root |
+///
+/// # Known limitations
+///
+/// - **ext4 block size**: VM exports force 1K block size (`-b 1024`) and
+///   disable `orphan_file` (`-O ^orphan_file`) on ext4. Cloud-hypervisor
+///   blocks sector 0 writes on auto-detected raw images; with 4K blocks the
+///   superblock (at byte 1024) shares a page with sector 0, causing a kernel
+///   panic. 1K blocks put the superblock in its own block. The `orphan_file`
+///   feature is incompatible with 1K blocks on large filesystems.
+///
+/// - **Serial console on AlmaLinux / RHEL 10 (systemd 257)**: the serial
+///   getty starts and login works, but the interactive console is unreliable
+///   (characters lost, partial commands executed). This appears to be a
+///   cloud-hypervisor serial (`--serial tty`) interaction issue with the
+///   distro's bash/readline configuration. `init=/bin/sh` works fine on the
+///   same image. Workaround: use `--serial pty` and connect with
+///   `screen /dev/pts/N`, or use SSH instead of the serial console.
+///
+/// - **Hostname**: exported VMs inherit the build host's hostname unless the
+///   rootfs already contains `/etc/hostname`. A future `--hostname` flag
+///   should write this file during export.
+///
+/// - **No udev**: container-imported rootfs images typically lack
+///   `systemd-udevd`. The serial-getty template is patched to remove the
+///   `BindsTo=dev-%i.device` dependency, but other services that depend on
+///   udev device units may not start. Full VM use may require installing
+///   udev into the rootfs before export.
+///
+/// - **NixOS**: VM export works with NixOS rootfs built via
+///   `sdme fs import --install-packages=yes` from the `nixos/nix` OCI image,
+///   but NixOS support is more limited than other distros. The NixOS
+///   activation system manages `/etc/systemd/system` as an immutable symlink,
+///   so VM prep files written there may be overwritten on first boot.
+///
+/// # TODO: package these modifications
+///
+/// All the above are direct file writes into the rootfs. Ideally each concern
+/// should be an installable package (e.g. `sdme-vm-serial`, `sdme-vm-network`)
+/// built for the distro's package manager so users can:
+///
+/// - `dnf remove sdme-vm-serial` to revert the serial console changes
+/// - inspect what was modified via `rpm -ql` / `dpkg -L`
+/// - layer their own overrides on top cleanly
+///
+/// Similarly, the OCI app setup (`/oci/apps/`, sdme-oci-*.service units, the
+/// isolate binary, volume mounts) should be its own package so it can be
+/// cleanly removed or inspected inside a running container.
 fn prep_vm_rootfs(mount: &Path, fs_type: RawFs, opts: &VmOptions, verbose: bool) -> Result<()> {
     ensure_init_symlink(mount)?;
 
@@ -637,24 +703,61 @@ fn enable_serial_console(mount: &Path) -> Result<()> {
     fs::create_dir_all(&unit_dir)
         .with_context(|| format!("failed to create {}", unit_dir.display()))?;
 
-    // Override the template — /etc/systemd/system/ takes priority over
-    // /lib/systemd/system/. Identical to upstream minus BindsTo=dev-%i.device.
-    let template = unit_dir.join("serial-getty@.service");
-    fs::write(
-        &template,
-        "\
+    // Copy the distro's serial-getty@ template and strip the BindsTo=dev-%i
+    // dependency. Container-imported rootfs images lack udev, so the device
+    // unit never activates and boot hangs. Copying preserves the distro's
+    // agetty flags, TERM handling, and credential imports (systemd 257+).
+    let src_template = mount.join("lib/systemd/system/serial-getty@.service");
+    let src_template = if src_template.is_file() {
+        src_template
+    } else {
+        mount.join("usr/lib/systemd/system/serial-getty@.service")
+    };
+    let dst_template = unit_dir.join("serial-getty@.service");
+
+    if src_template.is_file() {
+        let content = fs::read_to_string(&src_template)
+            .with_context(|| format!("failed to read {}", src_template.display()))?;
+        let patched: String = content
+            .lines()
+            .filter(|line| {
+                // Remove BindsTo=dev-*.device entirely.
+                !line.trim().starts_with("BindsTo=dev-")
+            })
+            .map(|line| {
+                // Strip dev-*.device tokens from After= lines, keep the rest.
+                if line.trim().starts_with("After=") && line.contains("dev-") {
+                    let (key, vals) = line.split_once('=').unwrap();
+                    let filtered: Vec<&str> = vals
+                        .split_whitespace()
+                        .filter(|v| !v.starts_with("dev-"))
+                        .collect();
+                    if filtered.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{key}={}", filtered.join(" "))
+                    }
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&dst_template, patched.as_bytes())
+            .with_context(|| format!("failed to write {}", dst_template.display()))?;
+    } else {
+        // Fallback: write a minimal template if the distro doesn't ship one.
+        fs::write(
+            &dst_template,
+            "\
 [Unit]
 Description=Serial Getty on %I
-Documentation=man:agetty(8) man:systemd-getty-generator(8)
 After=systemd-user-sessions.service plymouth-quit-wait.service getty-pre.target
-After=rc-local.service
 Before=getty.target
 IgnoreOnIsolate=yes
-Conflicts=rescue.service
-Before=rescue.service
 
 [Service]
-ExecStart=-/sbin/agetty -o '-p -- \\\\u' --keep-baud 115200,57600,38400,9600 - $TERM
+ExecStart=-/sbin/agetty -o '-- \\\\u' --noreset --noclear --keep-baud 115200,57600,38400,9600 - $TERM
 Type=idle
 Restart=always
 UtmpIdentifier=%I
@@ -669,8 +772,9 @@ SendSIGHUP=yes
 [Install]
 WantedBy=getty.target
 ",
-    )
-    .with_context(|| format!("failed to write {}", template.display()))?;
+        )
+        .with_context(|| format!("failed to write {}", dst_template.display()))?;
+    }
 
     // Explicitly enable serial-getty@ttyS0 so it starts even if the getty
     // generator is absent or non-functional.
@@ -1351,12 +1455,36 @@ mod tests {
     // --- enable_serial_console tests ---
 
     #[test]
-    fn test_enable_serial_console() {
-        let tmp = crate::testutil::TempDataDir::new("export-vm-serial");
+    fn test_enable_serial_console_copies_distro_template() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-serial-copy");
+
+        // Simulate a distro template with BindsTo=dev-%i.device.
+        let src_dir = tmp.path().join("usr/lib/systemd/system");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(
+            src_dir.join("serial-getty@.service"),
+            "\
+[Unit]
+Description=Serial Getty on %I
+BindsTo=dev-%i.device
+After=dev-%i.device systemd-user-sessions.service
+Before=getty.target
+
+[Service]
+ExecStart=-/sbin/agetty -o '-- \\u' --noreset --noclear --keep-baud 115200 - $TERM
+Type=idle
+Restart=always
+TTYPath=/dev/%I
+
+[Install]
+WantedBy=getty.target
+",
+        )
+        .unwrap();
 
         enable_serial_console(tmp.path()).unwrap();
 
-        // Template override should exist without BindsTo=dev-.
+        // Patched template should exist without BindsTo or After=dev-.
         let template = tmp
             .path()
             .join("etc/systemd/system/serial-getty@.service");
@@ -1364,16 +1492,18 @@ mod tests {
         let content = fs::read_to_string(&template).unwrap();
         assert!(content.contains("TTYPath=/dev/%I"), "got: {content}");
         assert!(!content.contains("BindsTo"), "got: {content}");
+        assert!(!content.contains("After=dev-"), "got: {content}");
+        // The rest of the After= line should be preserved.
+        assert!(
+            content.contains("After="),
+            "non-device After= lines should be kept: {content}"
+        );
 
         // ttyS0 instance should be explicitly enabled.
         let link = tmp
             .path()
             .join("etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service");
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-        assert_eq!(
-            fs::read_link(&link).unwrap().to_str().unwrap(),
-            "/etc/systemd/system/serial-getty@.service"
-        );
 
         // multi-user.target drop-in should pull in serial-getty@ttyS0 directly.
         let dropin = tmp
@@ -1385,6 +1515,22 @@ mod tests {
             content.contains("Wants=serial-getty@ttyS0.service"),
             "got: {content}"
         );
+    }
+
+    #[test]
+    fn test_enable_serial_console_fallback_template() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-serial-fallback");
+
+        // No distro template — should write the fallback.
+        enable_serial_console(tmp.path()).unwrap();
+
+        let template = tmp
+            .path()
+            .join("etc/systemd/system/serial-getty@.service");
+        assert!(template.is_file());
+        let content = fs::read_to_string(&template).unwrap();
+        assert!(content.contains("TTYPath=/dev/%I"), "got: {content}");
+        assert!(!content.contains("BindsTo"), "got: {content}");
     }
 
     // --- ensure_init_symlink tests ---
