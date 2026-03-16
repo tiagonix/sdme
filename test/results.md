@@ -33,19 +33,13 @@ only publishes `linux/amd64` manifests.
 | App                | Image                              | deb  | ubu  | fed  | cen  | alma | arch |
 |--------------------|------------------------------------|------|------|------|------|------|------|
 | nginx-unprivileged | docker.io/nginxinc/nginx-unpriv... | PASS | PASS | PASS | PASS | PASS | PASS |
-| redis              | docker.io/redis                    | FAIL | FAIL | FAIL | FAIL | FAIL | FAIL |
-| postgresql         | docker.io/postgres                 | FAIL | FAIL | FAIL | FAIL | FAIL | FAIL |
+| redis              | docker.io/redis                    | PASS | PASS | PASS | PASS | PASS | PASS |
+| postgresql         | docker.io/postgres                 | PASS | PASS | PASS | PASS | PASS | PASS |
 
 Each cell verifies: app import with `--base-fs`, container boot,
 `sdme-oci-{name}.service` active, journal and status accessible, and
 app-specific health check (marker file served by nginx-unprivileged,
 redis-cli ping, pg_isready).
-
-redis and postgresql verify checks fail on all distros: `sdme exec --oci`
-cannot find the cgroup for the OCI service under
-`/sys/fs/cgroup/machine.slice`. Import, boot, service, logs, and status
-checks all pass. This is a cgroup lookup regression in `exec --oci`,
-not an OS detection issue.
 
 ## Pod Tests
 

@@ -974,8 +974,10 @@ fn find_oci_service_cgroup(name: &str, app_name: &str) -> Result<PathBuf> {
     let machine_slice = PathBuf::from("/sys/fs/cgroup/machine.slice");
 
     // systemd >= 257 uses machine-{name}.scope with hyphens escaped as \x2d.
+    // systemd >= 259 registers the scope directly as {name}.scope.
     let escaped_name = name.replace('-', "\\x2d");
     let cgroup_roots = [
+        machine_slice.join(format!("{name}.scope")),
         machine_slice.join(format!("sdme@{name}.service")),
         machine_slice.join(format!("machine-{escaped_name}.scope")),
     ];
