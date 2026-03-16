@@ -5,8 +5,8 @@ set -uo pipefail
 # Run as root. Requires a base-fs imported (e.g. ubuntu).
 #
 # Two-container pod proving localhost network sharing:
-#   - nginx-unprivileged serves HTTP on port 8888
-#   - busybox client fetches from 127.0.0.1:8888
+#   - nginx-unprivileged serves HTTP on port 8080
+#   - busybox client fetches from 127.0.0.1:8080
 #
 # This is the key kube networking assertion: containers in the same pod
 # share a network namespace and can communicate via localhost.
@@ -132,13 +132,13 @@ test_inject_nginx_config() {
         return
     fi
 
-    echo "--- $test_name: writing nginx config for port 8888 ---"
+    echo "--- $test_name: writing nginx config for port 8080 ---"
     local conf_dir="$DATADIR/containers/$POD_NAME/upper/oci/apps/nginx-unprivileged/root/etc/nginx/conf.d"
     mkdir -p "$conf_dir"
 
     cat > "$conf_dir/default.conf" <<'NGINXEOF'
 server {
-    listen 8888;
+    listen 8080;
     server_name _;
     location / {
         return 200 'kube-net-ok\n';
@@ -205,17 +205,17 @@ test_ready_nginx() {
         return
     fi
 
-    echo "--- $test_name: waiting for port 8888 (up to ${TIMEOUT_READY}s) ---"
+    echo "--- $test_name: waiting for port 8080 (up to ${TIMEOUT_READY}s) ---"
     if "$SDME" exec "$POD_NAME" -- /usr/bin/python3 -c "
 import socket,sys,time
 end=time.time()+${TIMEOUT_READY}
 while time.time()<end:
- try: s=socket.create_connection(('127.0.0.1',8888),2); s.close(); sys.exit(0)
+ try: s=socket.create_connection(('127.0.0.1',8080),2); s.close(); sys.exit(0)
  except: time.sleep(3)
 sys.exit(1)" 2>/dev/null; then
         record "$test_name" PASS
     else
-        record "$test_name" FAIL "port 8888 not listening after ${TIMEOUT_READY}s"
+        record "$test_name" FAIL "port 8080 not listening after ${TIMEOUT_READY}s"
     fi
 }
 
@@ -233,7 +233,7 @@ test_localhost_http() {
     echo "--- $test_name: busybox client fetching from nginx via localhost ---"
     local output
     output=$("$SDME" exec "$POD_NAME" --oci client -- \
-        /bin/wget -qO- http://127.0.0.1:8888 2>&1 || echo "")
+        /bin/wget -qO- http://127.0.0.1:8080 2>&1 || echo "")
 
     if echo "$output" | grep -q 'kube-net-ok'; then
         record "$test_name" PASS

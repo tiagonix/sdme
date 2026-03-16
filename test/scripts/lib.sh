@@ -13,6 +13,26 @@
 # Convention: every test script uses a unique prefix for all artifacts
 # (containers, rootfs, pods). The prefix is cleaned on startup so tests
 # are idempotent and don't interfere with each other or user data.
+#
+# Host ports that must be free before running the full test suite:
+#
+#   Port  Service              Used by
+#   ----  -------------------  -------------------------------------------
+#   3000  Gitea                verify-kube-L6-gitea-stack.sh (private net)
+#   3306  MySQL                verify-kube-L6-gitea-stack.sh (private net)
+#   5432  PostgreSQL           verify-matrix.sh, verify-usage.sh
+#   6379  Redis                verify-kube-L5-redis-stack.sh (private net)
+#   8080  nginx-unprivileged   verify-matrix.sh, verify-usage.sh,
+#                              verify-oci.sh, verify-nixos.sh,
+#                              verify-kube-L4-networking.sh (private net),
+#                              verify-kube-L6-gitea-stack.sh (private net),
+#                              verify-kube-L2-probes.sh (private net)
+#   9090  TCP probe target     verify-kube-L2-probes.sh (private net)
+#   9999  pod comm test        verify-pods.sh (private net)
+#
+# Ports marked "(private net)" are inside containers with their own network
+# namespace and do not actually bind on the host. The ports that MUST be
+# free on the host are: 5432, 8080.
 
 SDME="${SDME:-sdme}"
 VERBOSE="${VERBOSE:-}"

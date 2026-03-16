@@ -138,7 +138,7 @@ test_setup_nginx_config() {
 
     cat > "$conf_dir/default.conf" <<'NGINXEOF'
 server {
-    listen 8888;
+    listen 8080;
     server_name _;
     location / {
         proxy_pass http://127.0.0.1:3000;
@@ -182,7 +182,7 @@ TEST_MARKER = sys.argv[1] if len(sys.argv) > 1 else "sdme-test"
 
 GITEA_HOST = "127.0.0.1"
 GITEA_PORT = 3000
-NGINX_PORT = 8888
+NGINX_PORT = 8080
 ADMIN_USER = "admin"
 ADMIN_PASS = "adminpass123!"
 
@@ -394,7 +394,7 @@ test_ready_nginx() {
 import socket,sys,time
 end=time.time()+${TIMEOUT_NGINX}
 while time.time()<end:
- try: s=socket.create_connection(('127.0.0.1',8888),2); s.close(); sys.exit(0)
+ try: s=socket.create_connection(('127.0.0.1',8080),2); s.close(); sys.exit(0)
  except: time.sleep(3)
 sys.exit(1)" 2>/dev/null; then
         record "$test_name" PASS
