@@ -366,8 +366,16 @@ fn export_to_raw(
         .with_context(|| format!("failed to set file size for {}", output.display()))?;
     drop(file);
 
-    // Format the image.
+    // Format the image. For VM exports, force 1K block size on ext4 so that
+    // the superblock (at byte 1024) is in its own block and doesn't share a
+    // page with sector 0. Cloud-hypervisor blocks sector 0 writes on raw
+    // images, which causes a kernel panic when ext4 with 4K blocks tries to
+    // write the superblock page that spans bytes 0-4095.
     let (mkfs_args, mkfs_err): (&[&str], &str) = match fs_type {
+        RawFs::Ext4 if vm_opts.is_some() => (
+            &["-q", "-F", "-b", "1024", "-O", "^orphan_file"] as &[&str],
+            "mkfs.ext4 failed",
+        ),
         RawFs::Ext4 => (&["-q", "-F"], "mkfs.ext4 failed"),
         RawFs::Btrfs => (&["-q", "-f"], "mkfs.btrfs failed"),
     };
@@ -616,29 +624,83 @@ fn prep_vm_rootfs(mount: &Path, fs_type: RawFs, opts: &VmOptions, verbose: bool)
     Ok(())
 }
 
-/// Enable serial console login via the kernel `console=ttyS0` cmdline param.
+/// Enable serial console login via serial-getty@ttyS0.service.
 ///
-/// `systemd-getty-generator` reads `/proc/cmdline` and instantiates
-/// `serial-getty@ttyS0.service` from the template automatically. However, the
-/// upstream template has `BindsTo=dev-%i.device` which makes systemd wait for
-/// udev to tag the serial device — in minimal VMs without full udev rules
-/// this blocks boot indefinitely. A drop-in on the template clears the device
-/// dependency for all serial-getty instances.
+/// The upstream `serial-getty@.service` template has `BindsTo=dev-%i.device`,
+/// which requires udev to tag the device before the getty starts. Rootfs
+/// images imported for nspawn use typically lack `systemd-udevd`, so the
+/// device unit never activates and boot hangs. We replace the template at
+/// `/etc/systemd/system/` (highest priority) with a copy that drops the
+/// device dependency, and explicitly enable the ttyS0 instance.
 fn enable_serial_console(mount: &Path) -> Result<()> {
-    // Drop-in on the template so all instances (including generator-created
-    // ones) lose the BindsTo=dev-%i.device dependency.
-    let dropin_dir = mount.join("etc/systemd/system/serial-getty@.service.d");
+    let unit_dir = mount.join("etc/systemd/system");
+    fs::create_dir_all(&unit_dir)
+        .with_context(|| format!("failed to create {}", unit_dir.display()))?;
+
+    // Override the template — /etc/systemd/system/ takes priority over
+    // /lib/systemd/system/. Identical to upstream minus BindsTo=dev-%i.device.
+    let template = unit_dir.join("serial-getty@.service");
+    fs::write(
+        &template,
+        "\
+[Unit]
+Description=Serial Getty on %I
+Documentation=man:agetty(8) man:systemd-getty-generator(8)
+After=systemd-user-sessions.service plymouth-quit-wait.service getty-pre.target
+After=rc-local.service
+Before=getty.target
+IgnoreOnIsolate=yes
+Conflicts=rescue.service
+Before=rescue.service
+
+[Service]
+ExecStart=-/sbin/agetty -o '-p -- \\\\u' --keep-baud 115200,57600,38400,9600 - $TERM
+Type=idle
+Restart=always
+UtmpIdentifier=%I
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/%I
+TTYReset=yes
+TTYVHangup=yes
+IgnoreSIGPIPE=no
+SendSIGHUP=yes
+
+[Install]
+WantedBy=getty.target
+",
+    )
+    .with_context(|| format!("failed to write {}", template.display()))?;
+
+    // Explicitly enable serial-getty@ttyS0 so it starts even if the getty
+    // generator is absent or non-functional.
+    let wants_dir = unit_dir.join("getty.target.wants");
+    fs::create_dir_all(&wants_dir)
+        .with_context(|| format!("failed to create {}", wants_dir.display()))?;
+
+    let link = wants_dir.join("serial-getty@ttyS0.service");
+    if !link.symlink_metadata().is_ok() {
+        std::os::unix::fs::symlink(
+            "/etc/systemd/system/serial-getty@.service",
+            &link,
+        )
+        .with_context(|| format!("failed to create symlink {}", link.display()))?;
+    }
+
+    // Ensure serial-getty@ttyS0 is pulled in by multi-user.target. Container
+    // images often omit getty.target from multi-user.target.wants/ since
+    // containers don't need login gettys. Going through getty.target via
+    // drop-ins doesn't work reliably on all systemd versions (e.g. systemd 257
+    // on AlmaLinux 10 ignores drop-in Wants=getty.target). Directly wanting
+    // the serial-getty instance from multi-user.target bypasses that entirely.
+    let dropin_dir = unit_dir.join("multi-user.target.d");
     fs::create_dir_all(&dropin_dir)
         .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
 
-    let dropin = dropin_dir.join("vm-no-device-wait.conf");
+    let dropin = dropin_dir.join("wants-getty.conf");
     fs::write(
         &dropin,
-        "\
-[Unit]
-# Clear device dependency — udev may not tag serial ports in minimal VMs.
-BindsTo=
-",
+        "[Unit]\nWants=serial-getty@ttyS0.service\n",
     )
     .with_context(|| format!("failed to write {}", dropin.display()))?;
 
@@ -1294,13 +1356,35 @@ mod tests {
 
         enable_serial_console(tmp.path()).unwrap();
 
-        // Template drop-in should clear BindsTo= for all serial-getty instances.
+        // Template override should exist without BindsTo=dev-.
+        let template = tmp
+            .path()
+            .join("etc/systemd/system/serial-getty@.service");
+        assert!(template.is_file());
+        let content = fs::read_to_string(&template).unwrap();
+        assert!(content.contains("TTYPath=/dev/%I"), "got: {content}");
+        assert!(!content.contains("BindsTo"), "got: {content}");
+
+        // ttyS0 instance should be explicitly enabled.
+        let link = tmp
+            .path()
+            .join("etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(
+            fs::read_link(&link).unwrap().to_str().unwrap(),
+            "/etc/systemd/system/serial-getty@.service"
+        );
+
+        // multi-user.target drop-in should pull in serial-getty@ttyS0 directly.
         let dropin = tmp
             .path()
-            .join("etc/systemd/system/serial-getty@.service.d/vm-no-device-wait.conf");
+            .join("etc/systemd/system/multi-user.target.d/wants-getty.conf");
         assert!(dropin.is_file());
         let content = fs::read_to_string(&dropin).unwrap();
-        assert!(content.contains("BindsTo=\n"), "got: {content}");
+        assert!(
+            content.contains("Wants=serial-getty@ttyS0.service"),
+            "got: {content}"
+        );
     }
 
     // --- ensure_init_symlink tests ---
