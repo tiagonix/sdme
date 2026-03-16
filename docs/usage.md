@@ -260,11 +260,14 @@ Distribution Spec natively, so no Docker or Podman is required:
 ```bash
 sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
 sudo sdme fs import fedora quay.io/fedora/fedora:41 -v --install-packages=yes
+sudo sdme fs import mynixos docker.io/nixos/nix -v --install-packages=yes
 ```
 
 The `-v` flag shows progress. The `--install-packages=yes` flag tells sdme
 to install any missing packages needed for `machinectl shell` to work
-(things like `util-linux` and `pam` on RHEL-family distros).
+(things like `util-linux` and `pam` on RHEL-family distros). For NixOS,
+the flag triggers `nix-build` inside the chroot to produce a full NixOS
+system closure; no local nix installation is required.
 
 For a directory-based import (useful with debootstrap on Debian/Ubuntu):
 
@@ -294,9 +297,10 @@ sudo sdme new -r fedora
 After importing a rootfs, sdme detects the distribution, checks for
 systemd, and if systemd is missing, installs it via chroot. The
 `--install-packages` flag controls this behavior. Supported distro
-families: Debian (apt-get), Fedora (dnf), SUSE (zypper), Arch (pacman).
-NixOS is a special case: it must be pre-built with systemd, since there is
-no chroot-based package installation for Nix.
+families: Debian (apt-get), Fedora (dnf), SUSE (zypper), Arch (pacman),
+Nix (nix-build). The Nix family imports `docker.io/nixos/nix`, runs
+`nix-build` inside the chroot to produce a NixOS system closure, then
+rebuilds the rootfs from the closure only (discarding the base image).
 
 The following matrix is verified in the release process:
 
@@ -310,6 +314,7 @@ centos        quay.io/centos/centos:stream10               Yes
 almalinux     quay.io/almalinuxorg/almalinux:9             Yes
 opensuse      registry.opensuse.org/opensuse/tumbleweed    Yes
 archlinux     docker.io/archlinux                          Yes
+nixos         docker.io/nixos/nix                          Yes
 ```
 
 The key point: once imported, you can spin up any number of containers from
@@ -370,6 +375,114 @@ temporarily mounted.
 
 For more on how the fs subsystem works internally, see
 [architecture.md, Section 6](architecture.md#6-the-fs-subsystem-managing-root-filesystems).
+
+### 4.5 Exporting for VM boot
+
+The `--vm` flag on `sdme fs export` prepares a raw disk image that boots
+as a virtual machine. It configures the exported rootfs with a serial
+console, fstab entry for the root filesystem, systemd-networkd with DHCP,
+DNS resolvers, a hostname, and optionally a root password and SSH public
+key. If the rootfs is missing udev (common with container images),
+`--install-packages=yes` installs it.
+
+The result is a bare ext4 filesystem (no partition table, no bootloader).
+You supply your own kernel at boot time via the hypervisor's `-kernel`
+flag. This works with cloud-hypervisor and QEMU.
+
+**Finding a kernel.** Use the host's installed kernel:
+
+```bash
+ls /usr/lib/modules/*/vmlinuz       # Arch, Fedora
+ls /boot/vmlinuz-*                  # Debian, Ubuntu
+```
+
+**Example: Debian**
+
+```bash
+# Import (if not already done)
+sudo sdme fs import debian docker.io/debian:stable -v --install-packages=yes
+
+# Export as a VM image
+sudo sdme fs export debian /tmp/debian-vm.raw \
+    --vm --hostname debian --root-password test --install-packages=yes -v
+```
+
+Debian container images don't include udev, so `--install-packages=yes`
+installs it during export. Fedora and Arch container images already have
+udev.
+
+**Example: Fedora**
+
+```bash
+sudo sdme fs import fedora quay.io/fedora/fedora:41 -v --install-packages=yes
+
+sudo sdme fs export fedora /tmp/fedora-vm.raw \
+    --vm --hostname fedora --root-password test -v
+```
+
+**Example: Arch Linux**
+
+```bash
+sudo sdme fs import archlinux docker.io/archlinux -v --install-packages=yes
+
+sudo sdme fs export archlinux /tmp/archlinux-vm.raw \
+    --vm --hostname archlinux --root-password test -v
+```
+
+Arch Linux runs `systemd-firstboot` on first boot, prompting for timezone
+and locale. Press Enter at each prompt to skip, then log in normally.
+
+**Booting with cloud-hypervisor:**
+
+```bash
+cloud-hypervisor \
+    --kernel /path/to/vmlinuz \
+    --disk path=/tmp/debian-vm.raw \
+    --cmdline "root=/dev/vda rw console=ttyS0" \
+    --serial tty \
+    --console off \
+    --cpus boot=2 \
+    --memory size=2G
+```
+
+**Booting with QEMU:**
+
+```bash
+qemu-system-x86_64 \
+    -kernel /path/to/vmlinuz \
+    -drive file=/tmp/debian-vm.raw,format=raw,if=virtio \
+    -append "root=/dev/vda rw console=ttyS0" \
+    -nographic \
+    -m 2G \
+    -smp 2 \
+    -enable-kvm
+```
+
+The `if=virtio` option is required for QEMU so the disk appears as
+`/dev/vda`. cloud-hypervisor uses virtio by default. Both commands
+attach the serial console to the terminal. Exit cloud-hypervisor with
+Ctrl-A x; exit QEMU with Ctrl-A x.
+
+**Customization options:**
+
+| Flag | Effect |
+|------|--------|
+| `--dns 1.1.1.1 --dns 9.9.9.9` | Override DNS nameservers (default: 8.8.8.8, 8.8.4.4) |
+| `--net-ifaces 2` | Configure DHCP on two NICs; `0` to skip network setup |
+| `--ssh-key ~/.ssh/id_ed25519.pub` | Add SSH public key to root's authorized_keys |
+| `--filesystem btrfs` | Use btrfs instead of ext4 |
+| `--size 4G` | Override auto-calculated image size |
+| `--hostname myvm` | Set the VM hostname (default: rootfs name) |
+| `--root-password ""` | Passwordless root (empty string) |
+
+**Known limitations:**
+
+- No bootloader or partition table. The image must be booted with
+  `-kernel` (direct kernel boot).
+- ext4 images use 1024-byte blocks (required by cloud-hypervisor).
+  This is a cloud-hypervisor constraint; QEMU works with any block size.
+- `systemd-logind` fails inside the VM (no seat or input devices). This
+  is harmless and does not affect serial console login.
 
 ## 5. OCI applications
 
