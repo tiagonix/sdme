@@ -13,7 +13,8 @@ set -uo pipefail
 #   3. Boot a plain NixOS container and verify it's running
 #   4. Import nginx-unprivileged OCI app on the NixOS base
 #   5. Create, boot, and test the OCI app container
-#   6. Cleanup
+#   6. Apply a Kubernetes Pod YAML on the NixOS base and test it
+#   7. Cleanup
 #
 # NixOS note: OCI app unit files are placed in /etc/systemd/system.control/
 # instead of /etc/systemd/system/ because NixOS activation replaces the
@@ -28,6 +29,7 @@ ROOTFS_DIR="$SCRIPT_DIR/nix/nixos-rootfs"
 FS_NAME="vfy-nix-nixos"
 CT_PLAIN="vfy-nix-plain"
 CT_OCI="vfy-nix-oci"
+CT_KUBE="vfy-nix-kube"
 
 APP_IMAGE="quay.io/nginx/nginx-unprivileged"
 APP_FS="vfy-nix-nginx"
@@ -109,7 +111,10 @@ result_msg() {
 cleanup() {
     log "Cleaning up vfy-nix- artifacts..."
 
-    # Stop and remove containers
+    # Delete kube containers first (removes both container and kube rootfs).
+    sdme kube delete "$CT_KUBE" 2>/dev/null || true
+
+    # Stop and remove remaining containers.
     local names
     names=$(sdme ps 2>/dev/null | awk 'NR>1 {print $1}' | grep '^vfy-nix-' || true)
     for name in $names; do
@@ -117,8 +122,8 @@ cleanup() {
         sdme rm -f "$name" 2>/dev/null || true
     done
 
-    # Remove rootfs
-    names=$(sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep '^vfy-nix-' || true)
+    # Remove rootfs (including kube- prefixed rootfs for kube containers).
+    names=$(sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^(vfy-nix-|kube-vfy-nix-)' || true)
     for name in $names; do
         sdme fs rm "$name" 2>/dev/null || true
     done
@@ -381,6 +386,95 @@ HTMLEOF
     sdme rm -f "$CT_OCI" 2>/dev/null || true
 }
 
+# -- Phase 6: Kubernetes Pod YAML on NixOS base --------------------------------
+
+phase6_test_kube() {
+    log "Phase 6: Test Kubernetes Pod YAML on NixOS base"
+
+    if [[ "$(result_status import)" != "PASS" ]]; then
+        record "kube/create" SKIP "base import failed"
+        record "kube/boot" SKIP "base import failed"
+        record "kube/service" SKIP "base import failed"
+        record "kube/curl-port" SKIP "base import failed"
+        record "kube/delete" SKIP "base import failed"
+        return
+    fi
+
+    # Write a minimal Pod YAML with nginx-unprivileged.
+    local yaml
+    yaml=$(mktemp /tmp/vfy-nix-kube-XXXXXX.yaml)
+    cat > "$yaml" <<'YAMLEOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vfy-nix-kube
+spec:
+  containers:
+  - name: nginx-unprivileged
+    image: quay.io/nginx/nginx-unprivileged
+    ports:
+    - containerPort: 8080
+YAMLEOF
+
+    # Create the kube container (no start).
+    local output
+    if ! output=$(timeout "$TIMEOUT_BOOT" sdme kube create -f "$yaml" --base-fs "$FS_NAME" -v 2>&1); then
+        record "kube/create" FAIL "$output"
+        record "kube/boot" SKIP "create failed"
+        record "kube/service" SKIP "create failed"
+        record "kube/curl-port" SKIP "create failed"
+        record "kube/delete" SKIP "create failed"
+        rm -f "$yaml"
+        sdme kube delete "$CT_KUBE" 2>/dev/null || true
+        return
+    fi
+    record "kube/create" PASS
+    rm -f "$yaml"
+
+    # Start the container.
+    if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$CT_KUBE" -t 120 2>&1); then
+        record "kube/boot" FAIL "start failed: $output"
+        record "kube/service" SKIP "start failed"
+        record "kube/curl-port" SKIP "start failed"
+        record "kube/delete" SKIP "start failed"
+        sdme kube delete "$CT_KUBE" 2>/dev/null || true
+        return
+    fi
+    record "kube/boot" PASS
+
+    # Check the OCI app service inside the container.
+    if output=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_KUBE" \
+            /run/current-system/sw/bin/systemctl is-active sdme-oci-nginx-unprivileged.service 2>&1); then
+        record "kube/service" PASS
+    else
+        record "kube/service" FAIL "$output"
+    fi
+
+    # Curl nginx from inside the container's network namespace.
+    sleep 3
+    local leader
+    leader=$(machinectl show "$CT_KUBE" -p Leader --value 2>/dev/null) || true
+    if [[ -n "$leader" ]] && [[ -d "/proc/$leader" ]]; then
+        local http_code
+        http_code=$(timeout 10 nsenter -t "$leader" -n curl -s -o /dev/null -w '%{http_code}' \
+            "http://127.0.0.1:${APP_PORT}" 2>&1) || true
+        if [[ "$http_code" == "200" ]]; then
+            record "kube/curl-port" PASS "HTTP $http_code via nsenter localhost"
+        else
+            record "kube/curl-port" FAIL "HTTP $http_code via nsenter localhost"
+        fi
+    else
+        record "kube/curl-port" FAIL "could not find container leader PID"
+    fi
+
+    # Delete the kube container.
+    if output=$(timeout "$TIMEOUT_TEST" sdme kube delete "$CT_KUBE" 2>&1); then
+        record "kube/delete" PASS
+    else
+        record "kube/delete" FAIL "$output"
+    fi
+}
+
 # -- Report generation ---------------------------------------------------------
 
 generate_report() {
@@ -425,7 +519,8 @@ generate_report() {
         echo "|------|--------|---------|"
         for key in build import plain/create plain/boot plain/exec \
                    oci/import oci/create oci/state-ports oci/volume-dir \
-                   oci/boot oci/service oci/logs oci/curl-port oci/curl-content; do
+                   oci/boot oci/service oci/logs oci/curl-port oci/curl-content \
+                   kube/create kube/boot kube/service kube/curl-port kube/delete; do
             if [[ -n "${RESULTS[$key]+x}" ]]; then
                 local st msg
                 st=$(result_status "$key")
@@ -496,7 +591,7 @@ main() {
         exit 1
     fi
 
-    echo "NixOS verification: rootfs build, import, boot, OCI nginx"
+    echo "NixOS verification: rootfs build, import, boot, OCI nginx, kube"
     echo ""
 
     phase1_build
@@ -504,6 +599,7 @@ main() {
     phase3_boot_plain
     phase4_import_oci
     phase5_test_oci
+    phase6_test_kube
     generate_report
 
     print_summary

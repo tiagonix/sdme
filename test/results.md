@@ -16,7 +16,7 @@ See [README.md](README.md) for how to run the tests and known limitations.
 | 4 | verify-pods.sh | PASS | 9 | 0 | 0 | 9 |
 | 5 | verify-export.sh | PASS | 12 | 0 | 0 | 12 |
 | 6 | verify-matrix.sh | FAIL | 225 | 3 | 3 | 231 |
-| 7 | verify-nixos.sh | PASS | 14 | 0 | 0 | 14 |
+| 7 | verify-nixos.sh | PASS | 19 | 0 | 0 | 19 |
 | 8 | verify-kube-L1-basic.sh | PASS | 14 | 0 | 0 | 14 |
 | 9 | verify-kube-L2-spec.sh | PASS | 12 | 0 | 0 | 12 |
 | 10 | verify-kube-L2-probes.sh | PASS | 41 | 0 | 0 | 41 |
@@ -27,7 +27,7 @@ See [README.md](README.md) for how to run the tests and known limitations.
 | 15 | verify-kube-L5-redis-stack.sh | PASS | 6 | 0 | 0 | 6 |
 | 16 | verify-kube-L6-gitea-stack.sh | PASS | 15 | 0 | 0 | 15 |
 
-**Totals: 517 passed, 3 failed, 13 skipped (533 tests) — 15/16 suites pass**
+**Totals: 522 passed, 3 failed, 13 skipped (538 tests) — 15/16 suites pass**
 
 ## Remaining Failures
 
