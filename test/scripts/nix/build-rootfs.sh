@@ -41,8 +41,8 @@ fi
 # Ensure NIX_PATH includes nixpkgs. If no channel is configured, fetch
 # the nixos-24.11 release tarball so <nixpkgs> resolves.
 if ! nix-instantiate --eval -E '<nixpkgs>' &>/dev/null; then
-    echo "No nixpkgs channel found, using nixos-24.11 tarball..."
-    export NIX_PATH="nixpkgs=https://github.com/NixOS/nixpkgs/archive/refs/heads/nixos-24.11.tar.gz${NIX_PATH:+:$NIX_PATH}"
+    echo "No nixpkgs channel found, using nixos-unstable tarball..."
+    export NIX_PATH="nixpkgs=https://github.com/NixOS/nixpkgs/archive/refs/heads/nixos-unstable.tar.gz${NIX_PATH:+:$NIX_PATH}"
 fi
 
 echo "Building NixOS system closure..."

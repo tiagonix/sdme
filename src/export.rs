@@ -1541,6 +1541,7 @@ mod tests {
         assert!(cmds[0].contains("zypper"), "got: {}", cmds[0]);
 
         assert!(udev_install_commands(&DistroFamily::NixOS).is_empty());
+        assert!(udev_install_commands(&DistroFamily::Nix).is_empty());
         assert!(udev_install_commands(&DistroFamily::Unknown).is_empty());
     }
 

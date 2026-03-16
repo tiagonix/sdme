@@ -75,6 +75,10 @@ pub struct Config {
     /// Maximum download size for rootfs imports and OCI pulls (e.g. "50G", "0" = unlimited).
     #[serde(default = "default_max_download_size")]
     pub max_download_size: String,
+
+    /// Nixpkgs channel for NixOS rootfs builds (e.g. "nixos-unstable").
+    #[serde(default = "default_nixpkgs_channel")]
+    pub nixpkgs_channel: String,
 }
 
 fn default_interactive() -> bool {
@@ -125,6 +129,10 @@ fn default_max_download_size() -> String {
     "50G".to_string()
 }
 
+fn default_nixpkgs_channel() -> String {
+    "nixos-unstable".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -144,6 +152,7 @@ impl Default for Config {
             http_timeout: default_http_timeout(),
             http_body_timeout: default_http_body_timeout(),
             max_download_size: default_max_download_size(),
+            nixpkgs_channel: default_nixpkgs_channel(),
         }
     }
 }
@@ -203,6 +212,7 @@ impl Config {
         println!("http_timeout = {}", self.http_timeout);
         println!("http_body_timeout = {}", self.http_body_timeout);
         println!("max_download_size = {}", self.max_download_size);
+        println!("nixpkgs_channel = {}", self.nixpkgs_channel);
     }
 }
 

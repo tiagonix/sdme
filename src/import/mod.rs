@@ -86,6 +86,10 @@ pub struct ImportOptions<'a> {
     pub cache: &'a crate::oci::cache::BlobCache,
     /// HTTP configuration for downloads and OCI pulls.
     pub http: crate::config::HttpConfig,
+    /// Optional path to a user NixOS configuration file for nix-build imports.
+    pub nix_config: Option<&'a Path>,
+    /// Nixpkgs channel for NixOS rootfs builds (e.g. "nixos-unstable").
+    pub nixpkgs_channel: &'a str,
 }
 
 // --- Source detection ---
@@ -618,14 +622,32 @@ fn detect_systemd_presence(rootfs: &Path) -> SystemdPresence {
 }
 
 /// Check for systemd in NixOS-specific paths.
+///
+/// After a nix-build, `/sbin/init` is symlinked to the NixOS toplevel init
+/// in the nix store. This is the most reliable indicator that systemd is
+/// present because the NixOS system closure always includes systemd.
+/// Falls back to scanning the nix store for `lib/systemd/systemd` (the
+/// standard NixOS path) or `bin/systemd`.
 fn detect_systemd_nixos(rootfs: &Path) -> bool {
+    // Booted NixOS system profile.
     if rootfs.join("run/current-system/sw/bin/systemd").exists() {
         return true;
     }
-    scan_nix_store(rootfs, "bin/systemd")
+    // /sbin/init created by nix-build — follows symlink into nix store.
+    for init in &["sbin/init", "usr/sbin/init"] {
+        let p = rootfs.join(init);
+        if p.exists() || p.is_symlink() {
+            return true;
+        }
+    }
+    scan_nix_store(rootfs, "lib/systemd/systemd")
+        || scan_nix_store(rootfs, "bin/systemd")
 }
 
 /// Check for dbus in NixOS-specific paths.
+///
+/// NixOS system closures with `services.dbus.enable = true` always include
+/// dbus. Checks the booted profile first, then scans the nix store.
 fn detect_dbus_nixos(rootfs: &Path) -> bool {
     if rootfs
         .join("run/current-system/sw/bin/dbus-daemon")
@@ -634,10 +656,11 @@ fn detect_dbus_nixos(rootfs: &Path) -> bool {
         return true;
     }
     scan_nix_store(rootfs, "bin/dbus-daemon")
+        || scan_nix_store(rootfs, "bin/dbus-broker")
 }
 
 /// Scan the nix store for a binary matching the given suffix.
-fn scan_nix_store(rootfs: &Path, suffix: &str) -> bool {
+pub(crate) fn scan_nix_store(rootfs: &Path, suffix: &str) -> bool {
     let store = rootfs.join("nix/store");
     if let Ok(entries) = fs::read_dir(&store) {
         for entry in entries.flatten() {
@@ -867,8 +890,38 @@ pub(crate) fn run_chroot_commands(rootfs: &Path, commands: &[String], verbose: b
 /// already running as root in a throwaway chroot, disabling the sandbox is safe.
 pub(crate) const APT_NO_SANDBOX: &str = r#"-o APT::Sandbox::User="""#;
 
+/// Embedded NixOS container configuration for nix-build imports.
+///
+/// Produces a bootable NixOS system closure with systemd, dbus, and a minimal
+/// set of tools. Supports an optional user config via NixOS `imports`.
+const DEFAULT_NIXOS_CONFIG: &str = r#"{ pkgs ? import <nixpkgs> {} }:
+let
+  userConfig = /tmp/sdme-nixos-extra.nix;
+  hasUserConfig = builtins.pathExists userConfig;
+  nixos = import "${pkgs.path}/nixos" {
+    configuration = { config, lib, pkgs, ... }: {
+      imports = lib.optionals hasUserConfig [ userConfig ];
+      boot.isContainer = true;
+      services.dbus.enable = true;
+      users.users.root.initialHashedPassword = "";
+      networking.useNetworkd = true;
+      environment.systemPackages = with pkgs; [
+        bashInteractive coreutils util-linux iproute2
+        less procps findutils gnugrep gnused curl
+      ];
+      fileSystems."/" = { device = "none"; fsType = "tmpfs"; };
+      boot.loader.grub.enable = false;
+      services.resolved.enable = false;
+      services.getty.autologinUser = "root";
+      system.stateVersion = lib.trivial.release;
+      nix.nixPath = [ "nixpkgs=${pkgs.path}" ];
+    };
+  };
+in nixos.config.system.build.toplevel
+"#;
+
 /// Return the shell commands that would be run to install systemd packages.
-fn install_commands(family: &DistroFamily) -> Vec<String> {
+fn install_commands(family: &DistroFamily, nixpkgs_channel: &str) -> Vec<String> {
     let s = APT_NO_SANDBOX;
     match family {
         DistroFamily::Debian => vec![
@@ -889,18 +942,60 @@ fn install_commands(family: &DistroFamily) -> Vec<String> {
         DistroFamily::Suse => {
             vec!["zypper --non-interactive install systemd dbus-1 && zypper clean --all".into()]
         }
+        DistroFamily::Nix => {
+            let channel = if nixpkgs_channel.is_empty() {
+                "nixos-unstable"
+            } else {
+                nixpkgs_channel
+            };
+            vec![format!(
+                "export PATH=/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH && \
+                 export NIX_REMOTE= && \
+                 export NIX_PATH='nixpkgs=https://github.com/NixOS/nixpkgs/archive/refs/heads/{channel}.tar.gz' && \
+                 TOPLEVEL=$(nix-build /tmp/sdme-nixos.nix --no-out-link --option sandbox false --option filter-syscalls false) && \
+                 mkdir -p /sbin && \
+                 ln -sf \"$TOPLEVEL/init\" /sbin/init"
+            )]
+        }
         _ => vec![],
     }
 }
 
 /// Install systemd packages into a rootfs via chroot.
-fn install_systemd_packages(rootfs: &Path, family: &DistroFamily, verbose: bool) -> Result<()> {
-    let commands = install_commands(family);
+fn install_systemd_packages(
+    rootfs: &Path,
+    family: &DistroFamily,
+    nixpkgs_channel: &str,
+    nix_config: Option<&Path>,
+    verbose: bool,
+) -> Result<()> {
+    let commands = install_commands(family, nixpkgs_channel);
     if commands.is_empty() {
         bail!(
             "no package installation commands available for distro family {:?}",
             family
         );
+    }
+
+    // For Nix family: write embedded container.nix and optional user config
+    // into the rootfs before entering the chroot.
+    if *family == DistroFamily::Nix {
+        let tmp_dir = rootfs.join("tmp");
+        fs::create_dir_all(&tmp_dir)
+            .with_context(|| format!("failed to create {}", tmp_dir.display()))?;
+        fs::write(tmp_dir.join("sdme-nixos.nix"), DEFAULT_NIXOS_CONFIG)
+            .context("failed to write embedded container.nix")?;
+        if let Some(config_path) = nix_config {
+            fs::copy(config_path, tmp_dir.join("sdme-nixos-extra.nix")).with_context(|| {
+                format!("failed to copy nix config from {}", config_path.display())
+            })?;
+        }
+        if verbose {
+            eprintln!(
+                "wrote nix build config to {}/tmp/sdme-nixos.nix",
+                rootfs.display()
+            );
+        }
     }
 
     if verbose {
@@ -910,7 +1005,24 @@ fn install_systemd_packages(rootfs: &Path, family: &DistroFamily, verbose: bool)
     let mut chroot_guard = ChrootGuard::setup(rootfs, verbose)?;
     let result = run_chroot_commands(rootfs, &commands, verbose);
     chroot_guard.cleanup();
-    result
+    result?;
+
+    // For Nix family: write os-release after successful build so sdme
+    // detects the rootfs as NixOS on subsequent operations.
+    if *family == DistroFamily::Nix {
+        let etc_dir = rootfs.join("etc");
+        fs::create_dir_all(&etc_dir)?;
+        fs::write(
+            etc_dir.join("os-release"),
+            "NAME=\"NixOS\"\nID=nixos\nPRETTY_NAME=\"NixOS (sdme)\"\n",
+        )
+        .context("failed to write os-release")?;
+        // Clean up build config files.
+        let _ = fs::remove_file(rootfs.join("tmp/sdme-nixos.nix"));
+        let _ = fs::remove_file(rootfs.join("tmp/sdme-nixos-extra.nix"));
+    }
+
+    Ok(())
 }
 
 /// Patch systemd services in an imported rootfs for nspawn compatibility.
@@ -1007,8 +1119,9 @@ fn prompt_install_systemd(
     presence: &SystemdPresence,
     family: &DistroFamily,
     distro_name: &str,
+    nixpkgs_channel: &str,
 ) -> Result<bool> {
-    let commands = install_commands(family);
+    let commands = install_commands(family, nixpkgs_channel);
     let missing = presence.missing();
     eprintln!("warning: {missing} not found in rootfs (detected: {distro_name})");
     eprintln!("Install packages via chroot? The following commands will run:");
@@ -1052,6 +1165,8 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         docker_credentials,
         cache,
         ref http,
+        nix_config,
+        nixpkgs_channel,
     } = *opts;
 
     validate_name(name)?;
@@ -1234,7 +1349,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         let install_result = (|| -> Result<()> {
             match install_packages {
                 InstallPackages::Yes => {
-                    if family == DistroFamily::Unknown || family == DistroFamily::NixOS {
+                    if family == DistroFamily::Unknown {
                         if force {
                             eprintln!(
                                 "warning: {missing} not found in rootfs; \
@@ -1247,10 +1362,16 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                             family
                         );
                     }
-                    install_systemd_packages(&staging_dir, &family, verbose)?;
+                    install_systemd_packages(
+                        &staging_dir,
+                        &family,
+                        nixpkgs_channel,
+                        nix_config,
+                        verbose,
+                    )?;
                 }
                 InstallPackages::Auto => {
-                    if family == DistroFamily::Unknown || family == DistroFamily::NixOS {
+                    if family == DistroFamily::Unknown {
                         if force {
                             eprintln!(
                                 "warning: {missing} not found in rootfs; \
@@ -1266,8 +1387,19 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                         );
                     }
                     if interactive {
-                        if prompt_install_systemd(&presence, &family, &distro_name)? {
-                            install_systemd_packages(&staging_dir, &family, verbose)?;
+                        if prompt_install_systemd(
+                            &presence,
+                            &family,
+                            &distro_name,
+                            nixpkgs_channel,
+                        )? {
+                            install_systemd_packages(
+                                &staging_dir,
+                                &family,
+                                nixpkgs_channel,
+                                nix_config,
+                                verbose,
+                            )?;
                         } else {
                             bail!("{missing} not found in rootfs; import aborted by user");
                         }
@@ -1445,6 +1577,8 @@ pub(crate) mod tests {
                     body_timeout: cfg.http_body_timeout,
                     max_download_size: 0,
                 },
+                nix_config: None,
+                nixpkgs_channel: "",
             },
         )
     }
@@ -2373,6 +2507,8 @@ pub(crate) mod tests {
                     body_timeout: cfg.http_body_timeout,
                     max_download_size: 0,
                 },
+                nix_config: None,
+                nixpkgs_channel: "",
             },
         )
         .unwrap();

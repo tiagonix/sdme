@@ -48,7 +48,8 @@ let
       # Allow root login on the console.
       services.getty.autologinUser = "root";
 
-      system.stateVersion = "24.11";
+      system.stateVersion = lib.trivial.release;
+      nix.nixPath = [ "nixpkgs=${pkgs.path}" ];
     };
   };
 in

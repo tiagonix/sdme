@@ -2,7 +2,7 @@
 set -uo pipefail
 
 # verify-nixos.sh - end-to-end verification of NixOS rootfs import, container boot,
-# and OCI nginx-unprivileged on a NixOS base.
+# OCI nginx-unprivileged on a NixOS base, and nix-build import from docker.io/nixos/nix.
 #
 # Run as root. Requires nix (with daemon running) to build the rootfs.
 # Uses vfy-nix- prefix for all artifacts.
@@ -14,7 +14,8 @@ set -uo pipefail
 #   4. Import nginx-unprivileged OCI app on the NixOS base
 #   5. Create, boot, and test the OCI app container
 #   6. Apply a Kubernetes Pod YAML on the NixOS base and test it
-#   7. Cleanup
+#   7. Import NixOS rootfs via nix-build (docker.io/nixos/nix), boot, exec
+#   8. Cleanup
 #
 # NixOS note: OCI app unit files are placed in /etc/systemd/system.control/
 # instead of /etc/systemd/system/ because NixOS activation replaces the
@@ -30,6 +31,8 @@ FS_NAME="vfy-nix-nixos"
 CT_PLAIN="vfy-nix-plain"
 CT_OCI="vfy-nix-oci"
 CT_KUBE="vfy-nix-kube"
+CT_NIXBUILD="vfy-nix-nixbuild"
+FS_NAME_NIX="vfy-nix-nixbuild"
 
 APP_IMAGE="quay.io/nginx/nginx-unprivileged"
 APP_FS="vfy-nix-nginx"
@@ -122,7 +125,7 @@ cleanup() {
         sdme rm -f "$name" 2>/dev/null || true
     done
 
-    # Remove rootfs (including kube- prefixed rootfs for kube containers).
+    # Remove rootfs (including kube- prefixed rootfs for kube and nix-build containers).
     names=$(sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^(vfy-nix-|kube-vfy-nix-)' || true)
     for name in $names; do
         sdme fs rm "$name" 2>/dev/null || true
@@ -475,6 +478,54 @@ YAMLEOF
     fi
 }
 
+# -- Phase 7: NixOS rootfs via nix-build import --------------------------------
+
+phase7_nixbuild_import() {
+    log "Phase 7: NixOS rootfs via nix-build import (docker.io/nixos/nix)"
+
+    if fs_exists "$FS_NAME_NIX"; then
+        log "  $FS_NAME_NIX already exists, skipping import"
+        record "nixbuild/import" PASS "exists"
+    else
+        local output
+        if output=$(timeout "$TIMEOUT_BUILD" sdme fs import "$FS_NAME_NIX" docker.io/nixos/nix \
+                -v --install-packages=yes -f 2>&1); then
+            record "nixbuild/import" PASS
+        else
+            record "nixbuild/import" FAIL "$output"
+            record "nixbuild/boot" SKIP "import failed"
+            record "nixbuild/exec" SKIP "import failed"
+            return
+        fi
+    fi
+
+    # Create and boot a container from the nix-build rootfs.
+    local output
+    if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$FS_NAME_NIX" "$CT_NIXBUILD" 2>&1); then
+        record "nixbuild/boot" FAIL "create failed: $output"
+        record "nixbuild/exec" SKIP "create failed"
+        return
+    fi
+
+    if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$CT_NIXBUILD" -t 120 2>&1); then
+        record "nixbuild/boot" FAIL "start failed: $output"
+        record "nixbuild/exec" SKIP "start failed"
+        sdme rm -f "$CT_NIXBUILD" 2>/dev/null || true
+        return
+    fi
+    record "nixbuild/boot" PASS
+
+    # Exec a basic command to verify the container works.
+    if output=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_NIXBUILD" /run/current-system/sw/bin/uname -a 2>&1); then
+        record "nixbuild/exec" PASS "$output"
+    else
+        record "nixbuild/exec" FAIL "$output"
+    fi
+
+    stop_container "$CT_NIXBUILD"
+    sdme rm -f "$CT_NIXBUILD" 2>/dev/null || true
+}
+
 # -- Report generation ---------------------------------------------------------
 
 generate_report() {
@@ -520,7 +571,8 @@ generate_report() {
         for key in build import plain/create plain/boot plain/exec \
                    oci/import oci/create oci/state-ports oci/volume-dir \
                    oci/boot oci/service oci/logs oci/curl-port oci/curl-content \
-                   kube/create kube/boot kube/service kube/curl-port kube/delete; do
+                   kube/create kube/boot kube/service kube/curl-port kube/delete \
+                   nixbuild/import nixbuild/boot nixbuild/exec; do
             if [[ -n "${RESULTS[$key]+x}" ]]; then
                 local st msg
                 st=$(result_status "$key")
@@ -600,6 +652,7 @@ main() {
     phase4_import_oci
     phase5_test_oci
     phase6_test_kube
+    phase7_nixbuild_import
     generate_report
 
     print_summary

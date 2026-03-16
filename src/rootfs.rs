@@ -84,6 +84,8 @@ pub(crate) enum DistroFamily {
     Suse,
     /// NixOS (declarative; no imperative package install).
     NixOS,
+    /// Has nix package manager, can build NixOS (e.g. nixos/nix Docker image).
+    Nix,
     /// Unrecognized distribution.
     Unknown,
 }
@@ -131,6 +133,12 @@ pub(crate) fn detect_distro_family(rootfs: &Path) -> DistroFamily {
             .any(|w| w == "suse" || w == "opensuse")
     {
         return DistroFamily::Suse;
+    }
+
+    // Check for nix tooling (e.g. nixos/nix Docker image).
+    // This catches images that have the nix package manager but aren't NixOS yet.
+    if crate::import::scan_nix_store(rootfs, "bin/nix-build") {
+        return DistroFamily::Nix;
     }
 
     DistroFamily::Unknown
@@ -300,6 +308,8 @@ mod tests {
                     body_timeout: cfg.http_body_timeout,
                     max_download_size: 0,
                 },
+                nix_config: None,
+                nixpkgs_channel: "",
             },
         )
     }
@@ -571,6 +581,18 @@ mod tests {
         fs::create_dir_all(tmp.path().join("etc")).unwrap();
         fs::write(tmp.path().join("etc/os-release"), "ID=gentoo\n").unwrap();
         assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Unknown);
+    }
+
+    #[test]
+    fn test_detect_distro_family_nix() {
+        let tmp = TempSourceDir::new("family-nix");
+        // Simulate nixos/nix Docker image: Alpine os-release + nix-build in store.
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(tmp.path().join("etc/os-release"), "ID=alpine\n").unwrap();
+        let store_pkg = tmp.path().join("nix/store/abc123-nix-2.18.1/bin");
+        fs::create_dir_all(&store_pkg).unwrap();
+        fs::write(store_pkg.join("nix-build"), "").unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Nix);
     }
 
     #[test]
