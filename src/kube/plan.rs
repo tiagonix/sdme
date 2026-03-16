@@ -3331,15 +3331,9 @@ spec:
         assert!(unit.contains("CAP_CHOWN"), "should have added cap");
         // CAP_SETUID, CAP_SETGID, CAP_SETPCAP are always kept for isolate binary.
         for required in ["CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP"] {
-            assert!(
-                unit.contains(required),
-                "must keep {required} for isolate"
-            );
+            assert!(unit.contains(required), "must keep {required} for isolate");
         }
-        assert!(
-            !unit.contains("CAP_NET_RAW"),
-            "defaults should be dropped"
-        );
+        assert!(!unit.contains("CAP_NET_RAW"), "defaults should be dropped");
     }
 
     #[test]

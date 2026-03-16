@@ -289,13 +289,9 @@ fn do_create(
                 .with_context(|| format!("failed to create {}", wants_dir.display()))?;
             let link = wants_dir.join("systemd-networkd.service");
             if !link.exists() {
-                symlink(
-                    "/usr/lib/systemd/system/systemd-networkd.service",
-                    &link,
-                )
-                .with_context(|| {
-                    format!("failed to enable systemd-networkd at {}", link.display())
-                })?;
+                symlink("/usr/lib/systemd/system/systemd-networkd.service", &link).with_context(
+                    || format!("failed to enable systemd-networkd at {}", link.display()),
+                )?;
                 if verbose {
                     eprintln!("enabled systemd-networkd for --network-veth");
                 }

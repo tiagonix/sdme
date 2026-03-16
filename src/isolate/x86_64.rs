@@ -9,7 +9,7 @@
 //!     5. Parent: ignore signals (SIGTERM, SIGINT, SIGHUP, SIGQUIT),
 //!        wait4(child), exit with child's status
 //!     6. Child: mount("proc", "/proc", "proc", MS_NOSUID|MS_NODEV|MS_NOEXEC, NULL)
-//!     7. Child: prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN)
+//!     7. Child: prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN) (best-effort)
 //!     8. Child: if uid > 0: setgroups(0, NULL) -> setgid(gid) -> setuid(uid)
 //!     9. Child: chdir(argv[3])
 //!    10. Child: execve(argv[4], &argv[4..], envp)
@@ -76,7 +76,6 @@ const MSG_NUMBER: &[u8] = b"bad number\n";
 const MSG_UNSHARE: &[u8] = b"unshare\n";
 const MSG_FORK: &[u8] = b"fork\n";
 const MSG_MOUNT: &[u8] = b"mount\n";
-const MSG_PRCTL: &[u8] = b"prctl\n";
 const MSG_SETGROUPS: &[u8] = b"setgroups\n";
 const MSG_SETGID: &[u8] = b"setgid\n";
 const MSG_SETUID: &[u8] = b"setuid\n";
@@ -281,7 +280,6 @@ pub fn generate() -> Vec<u8> {
     let err_unshare = a.label();
     let err_fork = a.label();
     let err_mount = a.label();
-    let err_prctl = a.label();
     let err_setgroups = a.label();
     let err_setgid = a.label();
     let err_setuid = a.label();
@@ -300,7 +298,6 @@ pub fn generate() -> Vec<u8> {
     let lbl_msg_unshare = a.label();
     let lbl_msg_fork = a.label();
     let lbl_msg_mount = a.label();
-    let lbl_msg_prctl = a.label();
     let lbl_msg_setgroups = a.label();
     let lbl_msg_setgid = a.label();
     let lbl_msg_setuid = a.label();
@@ -421,7 +418,7 @@ pub fn generate() -> Vec<u8> {
     a.emit(&CAP_SYS_ADMIN.to_le_bytes());
     // syscall
     a.emit(&[0x0F, 0x05]);
-    // (ignore return value — best-effort drop)
+    // (ignore return value; best-effort drop)
 
     // --- Conditional privilege drop: skip if uid == 0 ---
     // test r12d, r12d                 ; uid == 0?
@@ -503,12 +500,6 @@ pub fn generate() -> Vec<u8> {
     a.lea_rsi_rip(lbl_msg_mount);
     a.emit(&[0xBA]);
     a.emit(&(MSG_MOUNT.len() as u32).to_le_bytes());
-    a.jmp_short(error_exit);
-
-    a.bind(err_prctl);
-    a.lea_rsi_rip(lbl_msg_prctl);
-    a.emit(&[0xBA]);
-    a.emit(&(MSG_PRCTL.len() as u32).to_le_bytes());
     a.jmp_short(error_exit);
 
     a.bind(err_setgroups);
@@ -751,9 +742,6 @@ pub fn generate() -> Vec<u8> {
     a.bind(lbl_msg_mount);
     a.data(MSG_MOUNT);
 
-    a.bind(lbl_msg_prctl);
-    a.data(MSG_PRCTL);
-
     a.bind(lbl_msg_setgroups);
     a.data(MSG_SETGROUPS);
 
@@ -800,7 +788,7 @@ mod tests {
     fn code_contains_syscall_instructions() {
         let code = generate();
         let count = code.windows(2).filter(|w| w == &[0x0F, 0x05]).count();
-        // unshare, fork, mount, prctl, setgroups, setgid, setuid, chdir, execve,
+        // unshare, fork, mount, prctl (best-effort), setgroups, setgid, setuid, chdir, execve,
         // 4x rt_sigaction, wait4, write, exit (error_exit),
         // 3x exit (parent: unknown/exited/signaled)
         // = 9 + 4 + 1 + 2 + 3 = 19
@@ -817,7 +805,6 @@ mod tests {
         assert!(code_str.contains("unshare\n"));
         assert!(code_str.contains("fork\n"));
         assert!(code_str.contains("mount\n"));
-        assert!(code_str.contains("prctl\n"));
         assert!(code_str.contains("setgroups\n"));
         assert!(code_str.contains("setgid\n"));
         assert!(code_str.contains("setuid\n"));
@@ -851,7 +838,6 @@ mod tests {
         assert_eq!(MSG_UNSHARE.len(), 8);
         assert_eq!(MSG_FORK.len(), 5);
         assert_eq!(MSG_MOUNT.len(), 6);
-        assert_eq!(MSG_PRCTL.len(), 6);
         assert_eq!(MSG_SETGROUPS.len(), 10);
         assert_eq!(MSG_SETGID.len(), 7);
         assert_eq!(MSG_SETUID.len(), 7);

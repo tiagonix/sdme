@@ -58,7 +58,6 @@ const MSG_NUMBER: &[u8] = b"bad number\n";
 const MSG_UNSHARE: &[u8] = b"unshare\n";
 const MSG_FORK: &[u8] = b"fork\n";
 const MSG_MOUNT: &[u8] = b"mount\n";
-const MSG_PRCTL: &[u8] = b"prctl\n";
 const MSG_SETGROUPS: &[u8] = b"setgroups\n";
 const MSG_SETGID: &[u8] = b"setgid\n";
 const MSG_SETUID: &[u8] = b"setuid\n";
@@ -437,7 +436,6 @@ pub fn generate() -> Vec<u8> {
     let err_unshare = a.label();
     let err_fork = a.label();
     let err_mount = a.label();
-    let err_prctl = a.label();
     let err_setgroups = a.label();
     let err_setgid = a.label();
     let err_setuid = a.label();
@@ -456,7 +454,6 @@ pub fn generate() -> Vec<u8> {
     let lbl_msg_unshare = a.label();
     let lbl_msg_fork = a.label();
     let lbl_msg_mount = a.label();
-    let lbl_msg_prctl = a.label();
     let lbl_msg_setgroups = a.label();
     let lbl_msg_setgid = a.label();
     let lbl_msg_setuid = a.label();
@@ -534,7 +531,7 @@ pub fn generate() -> Vec<u8> {
     a.movz_x(X0, PR_CAPBSET_DROP);
     a.movz_x(X1, CAP_SYS_ADMIN);
     a.svc();
-    // (ignore return value — best-effort drop)
+    // (ignore return value; best-effort drop)
 
     // --- Conditional privilege drop: skip if uid == 0 ---
     a.cbz_x(X21, skip_privdrop);
@@ -600,11 +597,6 @@ pub fn generate() -> Vec<u8> {
     a.bind(err_mount);
     a.adr(X1, lbl_msg_mount);
     a.movz_x(X2, MSG_MOUNT.len() as u16);
-    a.b(error_exit);
-
-    a.bind(err_prctl);
-    a.adr(X1, lbl_msg_prctl);
-    a.movz_x(X2, MSG_PRCTL.len() as u16);
     a.b(error_exit);
 
     a.bind(err_setgroups);
@@ -782,9 +774,6 @@ pub fn generate() -> Vec<u8> {
     a.bind(lbl_msg_mount);
     a.data(MSG_MOUNT);
 
-    a.bind(lbl_msg_prctl);
-    a.data(MSG_PRCTL);
-
     a.bind(lbl_msg_setgroups);
     a.data(MSG_SETGROUPS);
 
@@ -840,7 +829,7 @@ mod tests {
             .chunks_exact(4)
             .filter(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]) == 0xD4000001)
             .count();
-        // unshare, clone, mount, prctl, setgroups, setgid, setuid, chdir, execve,
+        // unshare, clone, mount, prctl (best-effort), setgroups, setgid, setuid, chdir, execve,
         // 4x rt_sigaction, wait4, write, exit (error_exit),
         // 3x exit (parent: unknown/exited/signaled)
         assert!(
@@ -856,7 +845,6 @@ mod tests {
         assert!(code_str.contains("unshare\n"));
         assert!(code_str.contains("fork\n"));
         assert!(code_str.contains("mount\n"));
-        assert!(code_str.contains("prctl\n"));
         assert!(code_str.contains("setgroups\n"));
         assert!(code_str.contains("setgid\n"));
         assert!(code_str.contains("setuid\n"));
@@ -901,7 +889,6 @@ mod tests {
         assert_eq!(MSG_UNSHARE.len(), 8);
         assert_eq!(MSG_FORK.len(), 5);
         assert_eq!(MSG_MOUNT.len(), 6);
-        assert_eq!(MSG_PRCTL.len(), 6);
         assert_eq!(MSG_SETGROUPS.len(), 10);
         assert_eq!(MSG_SETGID.len(), 7);
         assert_eq!(MSG_SETUID.len(), 7);
