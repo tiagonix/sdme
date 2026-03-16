@@ -209,6 +209,45 @@ sudo ./test/scripts/verify-kube-L5-redis-stack.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L6-gitea-stack.sh --base-fs ubuntu
 ```
 
+## Prerequisites
+
+- **Root access**: all integration tests require root.
+- **systemd-nspawn**: version 252+ with `machinectl`, `journalctl`, `busctl`.
+- **systemd-networkd**: must be running on the host for `--network-veth` tests
+  (verify-oci.sh). The veth pair requires networkd's DHCP server to assign IPs.
+- **AppArmor**: verify-usage.sh (`--strict`) and verify-kube-L2-security.sh
+  require AppArmor enabled in the kernel and the `sdme-default` profile loaded
+  (`sdme config apparmor-profile | sudo tee /etc/apparmor.d/sdme-default &&
+  sudo apparmor_parser -r /etc/apparmor.d/sdme-default`).
+- **Free host ports**: `8080` (nginx-unprivileged, used by verify-matrix.sh and
+  verify-usage.sh with host-network containers) and `5432` (PostgreSQL health
+  checks). See `lib.sh` for the full port inventory.
+- **Docker Hub credentials** (optional): long test runs may hit Docker Hub rate
+  limits. Configure with `sdme config set docker_user` / `docker_token`.
+
+## Known limitations
+
+### openSUSE + user namespaces (--hardened, --userns)
+
+`--private-users-ownership=auto` uses kernel idmapped mounts, which fail when
+the rootfs contains files with `security.capability` xattrs. openSUSE
+Tumbleweed ships `/usr/bin/newuidmap` and `/usr/bin/newgidmap` with file
+capabilities (`CAP_SETUID`, `CAP_SETGID`) instead of the setuid bit used by
+other distros. The kernel refuses to create an idmapped mount because
+`security.capability` xattrs cannot be safely remapped across user namespace
+boundaries. Error: `Failed to adjust UID/GID shift of OS tree: Operation not
+permitted`. Fix: strip `security.capability` xattrs during rootfs import.
+
+### NixOS + OCI apps
+
+NixOS manages `/etc` entirely via its activation script, which replaces
+`/etc/systemd/system` with a symlink to the Nix store. sdme's OCI app setup
+writes unit files (`sdme-oci-*.service`) into `/etc/systemd/system` in the
+overlayfs upper layer. The NixOS activation script fails with `could not create
+symlink /etc/systemd/system`, and systemd can't find `default.target`, crashing
+the container. Plain (non-OCI) NixOS containers work fine. Supporting OCI apps
+on NixOS would require a NixOS-specific unit placement strategy.
+
 ## Running a full test pass
 
 Before tagging a release, run everything from a clean state. Each script
