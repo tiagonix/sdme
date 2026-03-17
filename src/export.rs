@@ -18,8 +18,9 @@ use crate::{check_interrupted, containers, copy, system_check, systemd, validate
 pub struct VmOptions {
     /// Hostname written to `/etc/hostname` inside the image.
     pub hostname: String,
-    /// DNS nameservers written to `/etc/resolv.conf`.
-    pub nameservers: Vec<String>,
+    /// DNS nameservers for `/etc/resolv.conf`.
+    /// `None` = don't touch, `Some(empty)` = copy host's, `Some(values)` = write those.
+    pub nameservers: Option<Vec<String>>,
     /// Number of network interfaces to configure via `systemd-networkd`.
     pub net_ifaces: u32,
     /// SHA-512 crypt hash for the root password in `/etc/shadow`.
@@ -914,7 +915,7 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 /// | multi-user drop-in | `/etc/systemd/system/multi-user.target.d/wants-getty.conf` | `Wants=serial-getty@ttyS0.service`; container images omit getty.target |
 /// | fstab | `/etc/fstab` | `/dev/vda1 / {ext4,btrfs} defaults 0 1` |
 /// | resolved unmask | `/etc/systemd/system/systemd-resolved.service` | Remove mask symlink (nspawn import masks it) |
-/// | resolv.conf | `/etc/resolv.conf` | Nameserver entries (VM has no host resolver) |
+/// | resolv.conf | `/etc/resolv.conf` | Only when `--dns` is passed: explicit nameservers or host copy |
 /// | networkd units | `/etc/systemd/network/20-sdme-en.network` | DHCP on `en*` interfaces; enables `systemd-networkd.service` |
 /// | hostname | `/etc/hostname` | VM hostname (defaults to rootfs/container name) |
 /// | root password | `/etc/shadow` | Direct hash write (no chpasswd dependency) |
@@ -983,9 +984,24 @@ fn prep_vm_rootfs(mount: &Path, fs_type: RawFs, opts: &VmOptions, verbose: bool)
         eprintln!("unmasked systemd-resolved");
     }
 
-    write_resolv_conf(mount, &opts.nameservers)?;
-    if verbose {
-        eprintln!("wrote /etc/resolv.conf");
+    match &opts.nameservers {
+        Some(ns) if !ns.is_empty() => {
+            write_resolv_conf(mount, ns)?;
+            if verbose {
+                eprintln!("wrote /etc/resolv.conf");
+            }
+        }
+        Some(_) => {
+            copy_host_resolv_conf(mount)?;
+            if verbose {
+                eprintln!("copied host /etc/resolv.conf");
+            }
+        }
+        None => {
+            if verbose {
+                eprintln!("skipping /etc/resolv.conf (no --dns specified)");
+            }
+        }
     }
 
     if opts.net_ifaces > 0 {
@@ -1244,6 +1260,19 @@ fn unmask_resolved(mount: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Copy the host's /etc/resolv.conf into the mounted rootfs.
+fn copy_host_resolv_conf(mount: &Path) -> Result<()> {
+    let host_resolv = Path::new("/etc/resolv.conf");
+    let content = fs::read_to_string(host_resolv)
+        .with_context(|| format!("failed to read {}", host_resolv.display()))?;
+    let resolv = mount.join("etc/resolv.conf");
+    // Remove if it's a symlink (e.g. to ../run/systemd/resolve/stub-resolv.conf).
+    if resolv.symlink_metadata().is_ok() {
+        let _ = fs::remove_file(&resolv);
+    }
+    fs::write(&resolv, content).with_context(|| format!("failed to write {}", resolv.display()))
 }
 
 /// Write /etc/resolv.conf with the given nameservers.

@@ -474,7 +474,8 @@ cloud-hypervisor with Ctrl-A x; exit QEMU with Ctrl-A x.
 
 | Flag | Effect |
 |------|--------|
-| `--dns 1.1.1.1 --dns 9.9.9.9` | Override DNS nameservers (default: 8.8.8.8, 8.8.4.4) |
+| `--dns` | Copy host's `/etc/resolv.conf` into the image |
+| `--dns 1.1.1.1 --dns 9.9.9.9` | Write explicit nameservers (omit `--dns` entirely to leave resolv.conf untouched) |
 | `--net-ifaces 2` | Configure DHCP on two NICs; `0` to skip network setup |
 | `--ssh-key ~/.ssh/id_ed25519.pub` | Add SSH public key to root's authorized_keys |
 | `--filesystem btrfs` | Use btrfs instead of ext4 |

@@ -527,9 +527,9 @@ EXAMPLE:
         /// Prepare raw disk image for VM boot (serial console, fstab, DHCP, etc.)
         #[arg(long)]
         vm: bool,
-        /// DNS nameserver(s) for --vm (repeatable; default: 8.8.8.8, 8.8.4.4)
-        #[arg(long = "dns", requires = "vm")]
-        dns: Vec<String>,
+        /// DNS nameserver(s) for --vm (repeatable; without value copies host resolv.conf)
+        #[arg(long = "dns", requires = "vm", num_args = 0..)]
+        dns: Option<Vec<String>>,
         /// Number of network interfaces to configure for DHCP (default: 1; 0 to skip)
         #[arg(long, requires = "vm", default_value_t = 1)]
         net_ifaces: u32,
@@ -2366,11 +2366,6 @@ fn main() -> Result<()> {
                     if !matches!(fmt, export::ExportFormat::Raw(_)) {
                         bail!("--vm only applies to raw disk image format");
                     }
-                    let nameservers = if dns.is_empty() {
-                        vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()]
-                    } else {
-                        dns
-                    };
                     let ssh_key = match ssh_key {
                         Some(key) => {
                             let path = std::path::Path::new(&key);
@@ -2387,7 +2382,7 @@ fn main() -> Result<()> {
                     let hostname = hostname.unwrap_or_else(|| name.clone());
                     Some(export::VmOptions {
                         hostname,
-                        nameservers,
+                        nameservers: dns,
                         net_ifaces,
                         root_password,
                         ssh_key,

@@ -621,10 +621,8 @@ enables serial console login via
 .BR serial\-getty@ttyS0.service ,
 writes
 .BR /etc/fstab ,
-configures
+unmasks
 .BR systemd\-resolved ,
-writes
-.BR /etc/resolv.conf ,
 and sets the hostname.
 The GPT layout places the filesystem at a 1\ MiB offset, avoiding sector\ 0
 conflicts with hypervisors such as cloud\-hypervisor.
@@ -632,11 +630,15 @@ conflicts with hypervisors such as cloud\-hypervisor.
 VM\-specific options (only valid with
 .BR \-\-vm ):
 .TP
-.BR \-\-dns " " \fIip\fR
-Nameserver IP address for
+.BR \-\-dns " " [\fIip\fR]...
+Configure DNS in
 .IR /etc/resolv.conf .
-Repeatable; defaults to
-.BR "8.8.8.8, 8.8.4.4" .
+Without a value, copies the host's
+.IR /etc/resolv.conf .
+With one or more IPs, writes those as nameserver entries.
+If omitted entirely,
+.I /etc/resolv.conf
+is left untouched.
 .TP
 .BR \-\-net\-ifaces " " \fIn\fR
 Number of network interfaces to configure with DHCP via
