@@ -102,6 +102,7 @@ pub fn export_rootfs(
     output: &Path,
     format: &ExportFormat,
     size: Option<&str>,
+    free_space: u64,
     vm_opts: Option<&VmOptions>,
     verbose: bool,
 ) -> Result<()> {
@@ -110,7 +111,7 @@ pub fn export_rootfs(
     if !rootfs_dir.is_dir() {
         bail!("rootfs not found: {name}");
     }
-    export_from_dir(&rootfs_dir, output, format, size, vm_opts, verbose)
+    export_from_dir(&rootfs_dir, output, format, size, free_space, vm_opts, verbose)
 }
 
 /// Export a container's merged rootfs to the given output path.
@@ -124,6 +125,7 @@ pub fn export_container(
     output: &Path,
     format: &ExportFormat,
     size: Option<&str>,
+    free_space: u64,
     vm_opts: Option<&VmOptions>,
     verbose: bool,
 ) -> Result<()> {
@@ -139,7 +141,7 @@ pub fn export_container(
             "warning: container '{name}' is running; filesystem is live and \
              consistency is not guaranteed"
         );
-        export_from_dir(&merged_dir, output, format, size, vm_opts, verbose)
+        export_from_dir(&merged_dir, output, format, size, free_space, vm_opts, verbose)
     } else {
         // Read state to find the rootfs.
         let state_file = datadir.join("state").join(name);
@@ -155,7 +157,7 @@ pub fn export_container(
         )?;
 
         mount_overlay(&rootfs_dir, &container_dir)?;
-        let result = export_from_dir(&merged_dir, output, format, size, vm_opts, verbose);
+        let result = export_from_dir(&merged_dir, output, format, size, free_space, vm_opts, verbose);
         unmount_overlay(&container_dir);
         result
     }
@@ -168,6 +170,7 @@ fn export_from_dir(
     output: &Path,
     format: &ExportFormat,
     size: Option<&str>,
+    free_space: u64,
     vm_opts: Option<&VmOptions>,
     verbose: bool,
 ) -> Result<()> {
@@ -178,7 +181,9 @@ fn export_from_dir(
         | ExportFormat::TarBz2
         | ExportFormat::TarXz
         | ExportFormat::TarZst => export_to_tar(src, output, format, verbose),
-        ExportFormat::Raw(fs_type) => export_to_raw(src, output, *fs_type, size, vm_opts, verbose),
+        ExportFormat::Raw(fs_type) => {
+            export_to_raw(src, output, *fs_type, size, free_space, vm_opts, verbose)
+        }
     }
 }
 
@@ -316,6 +321,7 @@ fn export_to_raw(
     output: &Path,
     fs_type: RawFs,
     size: Option<&str>,
+    free_space: u64,
     vm_opts: Option<&VmOptions>,
     verbose: bool,
 ) -> Result<()> {
@@ -327,20 +333,30 @@ fn export_to_raw(
         RawFs::Ext4 => ("mkfs.ext4", "e2fsprogs"),
         RawFs::Btrfs => ("mkfs.btrfs", "btrfs-progs"),
     };
-    system_check::check_dependencies(&[(mkfs_bin, mkfs_pkg)], verbose)?;
+    let mut deps: Vec<(&str, &str)> = vec![(mkfs_bin, mkfs_pkg)];
+    if vm_opts.is_some() {
+        deps.push(("sfdisk", "util-linux"));
+    }
+    system_check::check_dependencies(&deps, verbose)?;
 
     // Calculate or parse image size.
-    let image_size = match size {
+    let mut image_size = match size {
         Some(s) => crate::parse_size(s)?,
         None => {
             let total = dir_size(src)?;
             // At least 256 MiB, otherwise 150% of content for filesystem
-            // metadata overhead.
+            // metadata overhead, plus guaranteed free space.
             let min_size = 256 * 1024 * 1024;
-            let padded = (total as f64 * 1.5) as u64;
+            let padded = (total as f64 * 1.5) as u64 + free_space;
             std::cmp::max(min_size, padded)
         }
     };
+
+    // VM exports use a GPT partition table; add 2 MiB for the protective MBR,
+    // primary GPT header, partition alignment gap, and backup GPT header.
+    if vm_opts.is_some() {
+        image_size += 2 * 1024 * 1024;
+    }
 
     if verbose {
         eprintln!(
@@ -357,80 +373,15 @@ fn export_to_raw(
         .with_context(|| format!("failed to set file size for {}", output.display()))?;
     drop(file);
 
-    // Format the image. For VM exports, force 1K block size on ext4 so that
-    // the superblock (at byte 1024) is in its own block and doesn't share a
-    // page with sector 0. Cloud-hypervisor blocks sector 0 writes on raw
-    // images, which causes a kernel panic when ext4 with 4K blocks tries to
-    // write the superblock page that spans bytes 0-4095.
-    let (mkfs_args, mkfs_err): (&[&str], &str) = match fs_type {
-        RawFs::Ext4 if vm_opts.is_some() => (
-            &["-q", "-F", "-b", "1024", "-O", "^orphan_file"] as &[&str],
-            "mkfs.ext4 failed",
-        ),
-        RawFs::Ext4 => (&["-q", "-F"], "mkfs.ext4 failed"),
-        RawFs::Btrfs => (&["-q", "-f"], "mkfs.btrfs failed"),
-    };
-    let status = std::process::Command::new(mkfs_bin)
-        .args(mkfs_args)
-        .arg(output)
-        .status()
-        .with_context(|| format!("failed to run {mkfs_bin}"))?;
-    if !status.success() {
-        let _ = fs::remove_file(output);
-        bail!("{mkfs_err}");
-    }
-
-    // Mount, copy, unmount.
     let mount_dir = std::env::temp_dir().join(format!("sdme-export-mount-{}", std::process::id()));
-    fs::create_dir_all(&mount_dir)
-        .with_context(|| format!("failed to create mount point {}", mount_dir.display()))?;
 
-    let mount_status = std::process::Command::new("mount")
-        .args(["-o", "loop"])
-        .arg(output)
-        .arg(&mount_dir)
-        .status()
-        .context("failed to run mount")?;
-
-    if !mount_status.success() {
-        let _ = fs::remove_dir(&mount_dir);
-        let _ = fs::remove_file(output);
-        bail!("failed to mount raw image");
-    }
-
-    // Remove lost+found created by mkfs.ext4 (btrfs doesn't create one).
-    if fs_type == RawFs::Ext4 {
-        let lost_found = mount_dir.join("lost+found");
-        if lost_found.exists() {
-            let _ = fs::remove_dir(&lost_found);
-        }
-    }
-
-    let copy_result = (|| -> Result<()> {
-        copy::copy_metadata(src, &mount_dir)?;
-        copy::copy_tree(src, &mount_dir, verbose)?;
-        if let Some(opts) = vm_opts {
-            prep_vm_rootfs(&mount_dir, fs_type, opts, verbose)?;
-        }
-        Ok(())
-    })();
-
-    // Always unmount. Use -R (recursive) because VM prep or copy_tree
-    // may create submounts (matching ChrootGuard::cleanup behaviour).
-    match std::process::Command::new("umount")
-        .arg("-R")
-        .arg(&mount_dir)
-        .status()
-    {
-        Ok(s) if !s.success() => {
-            eprintln!("warning: failed to unmount {}", mount_dir.display());
-        }
-        Err(e) => {
-            eprintln!("warning: failed to unmount {}: {e}", mount_dir.display());
-        }
-        _ => {}
-    }
-    let _ = fs::remove_dir(&mount_dir);
+    // VM exports: GPT partition table via sfdisk, then losetup --partscan.
+    // Non-VM exports: bare filesystem on the whole image file.
+    let copy_result = if vm_opts.is_some() {
+        export_raw_gpt(output, &mount_dir, mkfs_bin, fs_type, src, vm_opts, verbose)
+    } else {
+        export_raw_bare(output, &mount_dir, mkfs_bin, fs_type, src, verbose)
+    };
 
     if let Err(e) = copy_result {
         let _ = fs::remove_file(output);
@@ -441,6 +392,246 @@ fn export_to_raw(
     align_disk_image(output)?;
 
     Ok(())
+}
+
+/// RAII guard for a loop device. Detaches on drop.
+struct LoopGuard {
+    device: std::path::PathBuf,
+    active: bool,
+}
+
+impl LoopGuard {
+    fn new() -> Self {
+        Self {
+            device: std::path::PathBuf::new(),
+            active: false,
+        }
+    }
+
+    fn set_active(&mut self, device: std::path::PathBuf) {
+        self.device = device;
+        self.active = true;
+    }
+
+    fn detach(&mut self) {
+        if self.active {
+            let _ = std::process::Command::new("losetup")
+                .args(["--detach"])
+                .arg(&self.device)
+                .status();
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for LoopGuard {
+    fn drop(&mut self) {
+        self.detach();
+    }
+}
+
+/// Export a bare (unpartitioned) raw disk image. The entire image is one filesystem.
+fn export_raw_bare(
+    output: &Path,
+    mount_dir: &Path,
+    mkfs_bin: &str,
+    fs_type: RawFs,
+    src: &Path,
+    verbose: bool,
+) -> Result<()> {
+    let (mkfs_args, mkfs_err): (&[&str], &str) = match fs_type {
+        RawFs::Ext4 => (&["-q", "-F"], "mkfs.ext4 failed"),
+        RawFs::Btrfs => (&["-q", "-f"], "mkfs.btrfs failed"),
+    };
+    let status = std::process::Command::new(mkfs_bin)
+        .args(mkfs_args)
+        .arg(output)
+        .status()
+        .with_context(|| format!("failed to run {mkfs_bin}"))?;
+    if !status.success() {
+        bail!("{mkfs_err}");
+    }
+
+    fs::create_dir_all(mount_dir)
+        .with_context(|| format!("failed to create mount point {}", mount_dir.display()))?;
+
+    let mount_status = std::process::Command::new("mount")
+        .args(["-o", "loop"])
+        .arg(output)
+        .arg(mount_dir)
+        .status()
+        .context("failed to run mount")?;
+    if !mount_status.success() {
+        let _ = fs::remove_dir(mount_dir);
+        bail!("failed to mount raw image");
+    }
+
+    if fs_type == RawFs::Ext4 {
+        let lost_found = mount_dir.join("lost+found");
+        if lost_found.exists() {
+            let _ = fs::remove_dir(&lost_found);
+        }
+    }
+
+    let result = (|| -> Result<()> {
+        copy::copy_metadata(src, mount_dir)?;
+        copy::copy_tree(src, mount_dir, verbose)?;
+        Ok(())
+    })();
+
+    unmount_and_cleanup(mount_dir);
+    result
+}
+
+/// Export a GPT-partitioned raw disk image for VM boot.
+///
+/// Creates a GPT partition table with a single Linux partition starting at
+/// 1 MiB (standard alignment). The filesystem lives on the partition, not
+/// the whole device. This avoids sector 0 conflicts with hypervisors like
+/// cloud-hypervisor.
+fn export_raw_gpt(
+    output: &Path,
+    mount_dir: &Path,
+    mkfs_bin: &str,
+    fs_type: RawFs,
+    src: &Path,
+    vm_opts: Option<&VmOptions>,
+    verbose: bool,
+) -> Result<()> {
+    // Write a GPT partition table with one Linux partition.
+    let sfdisk_input = "label: gpt\ntype=linux\n";
+    let mut sfdisk = std::process::Command::new("sfdisk")
+        .arg("--quiet")
+        .arg(output)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(if verbose {
+            std::process::Stdio::inherit()
+        } else {
+            std::process::Stdio::null()
+        })
+        .spawn()
+        .context("failed to run sfdisk")?;
+    {
+        use std::io::Write;
+        sfdisk
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(sfdisk_input.as_bytes())
+            .context("failed to write to sfdisk stdin")?;
+    }
+    let sfdisk_status = sfdisk.wait().context("failed to wait for sfdisk")?;
+    if !sfdisk_status.success() {
+        bail!("sfdisk failed to create GPT partition table");
+    }
+
+    // Attach via losetup with partition scanning.
+    let lo_output = std::process::Command::new("losetup")
+        .args(["--partscan", "--find", "--show"])
+        .arg(output)
+        .output()
+        .context("failed to run losetup")?;
+    if !lo_output.status.success() {
+        let stderr = String::from_utf8_lossy(&lo_output.stderr);
+        bail!("losetup failed: {stderr}");
+    }
+    let loop_dev =
+        std::path::PathBuf::from(String::from_utf8_lossy(&lo_output.stdout).trim().to_string());
+
+    let mut loop_guard = LoopGuard::new();
+    loop_guard.set_active(loop_dev.clone());
+
+    if verbose {
+        eprintln!("attached loop device: {}", loop_dev.display());
+    }
+
+    // Wait for the kernel to create the partition device (e.g. /dev/loop0p1).
+    let part_dev = std::path::PathBuf::from(format!("{}p1", loop_dev.display()));
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !part_dev.exists() {
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "partition device {} did not appear within 2 seconds",
+                part_dev.display()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    if verbose {
+        eprintln!("partition device: {}", part_dev.display());
+    }
+
+    // Format the partition (standard mkfs flags — no 1K block hack needed).
+    let (mkfs_args, mkfs_err): (&[&str], &str) = match fs_type {
+        RawFs::Ext4 => (&["-q", "-F"], "mkfs.ext4 failed"),
+        RawFs::Btrfs => (&["-q", "-f"], "mkfs.btrfs failed"),
+    };
+    let status = std::process::Command::new(mkfs_bin)
+        .args(mkfs_args)
+        .arg(&part_dev)
+        .status()
+        .with_context(|| format!("failed to run {mkfs_bin}"))?;
+    if !status.success() {
+        bail!("{mkfs_err}");
+    }
+
+    // Mount the partition.
+    fs::create_dir_all(mount_dir)
+        .with_context(|| format!("failed to create mount point {}", mount_dir.display()))?;
+
+    let mount_status = std::process::Command::new("mount")
+        .arg(&part_dev)
+        .arg(mount_dir)
+        .status()
+        .context("failed to run mount")?;
+    if !mount_status.success() {
+        let _ = fs::remove_dir(mount_dir);
+        bail!("failed to mount partition {}", part_dev.display());
+    }
+
+    // Remove lost+found created by mkfs.ext4.
+    if fs_type == RawFs::Ext4 {
+        let lost_found = mount_dir.join("lost+found");
+        if lost_found.exists() {
+            let _ = fs::remove_dir(&lost_found);
+        }
+    }
+
+    let result = (|| -> Result<()> {
+        copy::copy_metadata(src, mount_dir)?;
+        copy::copy_tree(src, mount_dir, verbose)?;
+        if let Some(opts) = vm_opts {
+            prep_vm_rootfs(mount_dir, fs_type, opts, verbose)?;
+        }
+        Ok(())
+    })();
+
+    // Unmount, then detach loop device (order matters).
+    unmount_and_cleanup(mount_dir);
+    loop_guard.detach();
+
+    result
+}
+
+/// Unmount a mount point (recursive) and remove the directory.
+fn unmount_and_cleanup(mount_dir: &Path) {
+    match std::process::Command::new("umount")
+        .arg("-R")
+        .arg(mount_dir)
+        .status()
+    {
+        Ok(s) if !s.success() => {
+            eprintln!("warning: failed to unmount {}", mount_dir.display());
+        }
+        Err(e) => {
+            eprintln!("warning: failed to unmount {}: {e}", mount_dir.display());
+        }
+        _ => {}
+    }
+    let _ = fs::remove_dir(mount_dir);
 }
 
 /// Recursively walk a directory tree summing regular file sizes.
@@ -592,7 +783,7 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 /// | serial-getty template | `/etc/systemd/system/serial-getty@.service` | Copy of distro template with `BindsTo=dev-%i.device` removed (no udev) |
 /// | serial-getty enable | `/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service` | Explicit enable for ttyS0 |
 /// | multi-user drop-in | `/etc/systemd/system/multi-user.target.d/wants-getty.conf` | `Wants=serial-getty@ttyS0.service` — container images omit getty.target |
-/// | fstab | `/etc/fstab` | `/dev/vda / {ext4,btrfs} defaults 0 1` |
+/// | fstab | `/etc/fstab` | `/dev/vda1 / {ext4,btrfs} defaults 0 1` |
 /// | resolved unmask | `/etc/systemd/system/systemd-resolved.service` | Remove mask symlink (nspawn import masks it) |
 /// | resolv.conf | `/etc/resolv.conf` | Nameserver entries (VM has no host resolver) |
 /// | networkd units | `/etc/systemd/network/20-sdme-en.network` | DHCP on `en*` interfaces; enables `systemd-networkd.service` |
@@ -602,12 +793,10 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 ///
 /// # Known limitations
 ///
-/// - **ext4 block size**: VM exports force 1K block size (`-b 1024`) and
-///   disable `orphan_file` (`-O ^orphan_file`) on ext4. Cloud-hypervisor
-///   blocks sector 0 writes on auto-detected raw images; with 4K blocks the
-///   superblock (at byte 1024) shares a page with sector 0, causing a kernel
-///   panic. 1K blocks put the superblock in its own block. The `orphan_file`
-///   feature is incompatible with 1K blocks on large filesystems.
+/// - **GPT partition table**: VM exports create a GPT partition table via
+///   `sfdisk` with a single Linux partition at 1 MiB offset. The filesystem
+///   is on the partition (not the whole device), avoiding sector 0 conflicts
+///   with hypervisors like cloud-hypervisor. Non-VM exports remain bare.
 ///
 /// - **Serial console on AlmaLinux / RHEL 10 (systemd 257)**: the serial
 ///   getty starts and login works, but the interactive console is unreliable
@@ -903,7 +1092,7 @@ WantedBy=getty.target
 /// Write /etc/fstab with the root device entry.
 fn write_vm_fstab(mount: &Path, fs_type: RawFs) -> Result<()> {
     let fstab = mount.join("etc/fstab");
-    let content = format!("/dev/vda / {fs_type} defaults 0 1\n");
+    let content = format!("/dev/vda1 / {fs_type} defaults 0 1\n");
     fs::write(&fstab, content).with_context(|| format!("failed to write {}", fstab.display()))
 }
 
@@ -1424,6 +1613,7 @@ mod tests {
             &output,
             &ExportFormat::Dir,
             None,
+            0,
             None,
             false,
         )
@@ -1442,6 +1632,7 @@ mod tests {
             &output,
             &ExportFormat::Dir,
             None,
+            0,
             None,
             false,
         )
@@ -1464,6 +1655,7 @@ mod tests {
             &output,
             &ExportFormat::Dir,
             None,
+            0,
             None,
             false,
         )
@@ -1759,7 +1951,7 @@ WantedBy=getty.target
         write_vm_fstab(tmp.path(), RawFs::Ext4).unwrap();
 
         let content = fs::read_to_string(tmp.path().join("etc/fstab")).unwrap();
-        assert_eq!(content, "/dev/vda / ext4 defaults 0 1\n");
+        assert_eq!(content, "/dev/vda1 / ext4 defaults 0 1\n");
     }
 
     #[test]
@@ -1770,7 +1962,7 @@ WantedBy=getty.target
         write_vm_fstab(tmp.path(), RawFs::Btrfs).unwrap();
 
         let content = fs::read_to_string(tmp.path().join("etc/fstab")).unwrap();
-        assert_eq!(content, "/dev/vda / btrfs defaults 0 1\n");
+        assert_eq!(content, "/dev/vda1 / btrfs defaults 0 1\n");
     }
 
     // --- unmask_resolved tests ---

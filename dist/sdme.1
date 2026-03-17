@@ -521,7 +521,7 @@ Use a different path (e.g.\&
 Lines starting with
 .B #
 and blank lines are ignored.
-.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f \fIformat\fR] [\-s \fIsize\fR] [\-\-filesystem \fItype\fR] [\-\-vm] [\-\-dns \fIip\fR]... [\-\-net\-ifaces \fIn\fR] [\-\-root\-password \fIpass\fR] [\-\-ssh\-key \fIpath\fR] [\-\-install\-packages \fImode\fR]
+.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f \fIformat\fR] [\-s \fIsize\fR] [\-\-free\-space \fIsize\fR] [\-\-filesystem \fItype\fR] [\-\-vm] [\-\-dns \fIip\fR]... [\-\-net\-ifaces \fIn\fR] [\-\-root\-password \fIpass\fR] [\-\-ssh\-key \fIpath\fR] [\-\-install\-packages \fImode\fR]
 Export a root filesystem or container to a directory, tarball, or disk image.
 The output format is auto\-detected from the file extension:
 .RS
@@ -564,9 +564,27 @@ Use
 .B \-s
 to override the disk image size for raw format (e.g.\&
 .IR 2G ", " 500M ).
+When
+.B \-s
+is specified,
+.B \-\-free\-space
+is ignored and a warning is printed.
 If omitted, the size is auto\-calculated as
-.RI max(256M, " content \(mu 1.5" )
-to accommodate filesystem metadata overhead.
+.RI max(256M, " content \(mu 1.5 + free\-space" )
+to accommodate filesystem metadata overhead and guaranteed free space.
+.PP
+Use
+.B \-\-free\-space
+to set the amount of extra free space added to the auto\-calculated disk
+image size (default: config
+.BR default_export_free_space ,
+initially
+.BR 100M ).
+Accepts size suffixes (e.g.\&
+.IR 256M ", " 1G ).
+Only effective when
+.B \-s
+is not specified.
 .PP
 Use
 .B \-\-filesystem
@@ -583,7 +601,10 @@ Use
 .B \-\-vm
 to prepare a raw disk image for booting as a virtual machine.
 This flag only applies to raw disk image exports and performs the following
-modifications: enables serial console login via
+modifications: creates a GPT partition table with a single Linux partition
+(via
+.BR sfdisk (8)),
+enables serial console login via
 .BR serial\-getty@ttyS0.service ,
 writes
 .BR /etc/fstab ,
@@ -592,9 +613,8 @@ configures
 writes
 .BR /etc/resolv.conf ,
 and sets the hostname.
-The ext4 block size is set to 1024 and the
-.B orphan_file
-feature is disabled for compatibility with hypervisors such as cloud\-hypervisor.
+The GPT layout places the filesystem at a 1\ MiB offset, avoiding sector\ 0
+conflicts with hypervisors such as cloud\-hypervisor.
 .PP
 VM\-specific options (only valid with
 .BR \-\-vm ):
@@ -1097,6 +1117,18 @@ or
 .BR btrfs .
 Default:
 .BR ext4 .
+.TP
+.B default_export_free_space
+String.
+Extra free space added to the auto\-calculated raw disk image size.
+Accepts size suffixes (e.g.\&
+.IR 100M ", " 1G ).
+Used when
+.B \-s
+is not specified on
+.BR "sdme fs export" .
+Default:
+.BR 100M .
 .TP
 .B docker_user
 String.

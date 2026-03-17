@@ -368,8 +368,13 @@ Supported tarball formats: `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`,
 Raw disk images are bare ext4 (default) or btrfs filesystems (no partition
 table), selectable with `--filesystem`. The default can be changed with
 `sdme config set default_export_fs btrfs`. The size
-is auto-calculated as `max(256M, content * 1.5)` unless overridden with
-`--size`. Container exports: running containers are exported from the live
+is auto-calculated as `max(256M, content * 1.5 + free_space)` unless
+overridden with `--size`. The `--free-space` flag controls how much extra
+space is guaranteed in the image (default from config
+`default_export_free_space`, initially `100M`). When `--size` is set,
+`--free-space` is ignored. Change the default with
+`sdme config set default_export_free_space 256M`.
+Container exports: running containers are exported from the live
 filesystem (with a consistency warning); stopped containers have overlayfs
 temporarily mounted.
 
@@ -385,9 +390,10 @@ DNS resolvers, a hostname, and optionally a root password and SSH public
 key. If the rootfs is missing udev (common with container images),
 `--install-packages=yes` installs it.
 
-The result is a bare ext4 filesystem (no partition table, no bootloader).
-You supply your own kernel at boot time via the hypervisor's `-kernel`
-flag. This works with cloud-hypervisor and QEMU.
+The result is a GPT-partitioned raw disk image with a single Linux
+partition (no bootloader). You supply your own kernel at boot time via
+the hypervisor's `-kernel` flag. This works with cloud-hypervisor and
+QEMU.
 
 **Finding a kernel.** Use the host's installed kernel:
 
@@ -438,7 +444,7 @@ and locale. Press Enter at each prompt to skip, then log in normally.
 cloud-hypervisor \
     --kernel /path/to/vmlinuz \
     --disk path=/tmp/debian-vm.raw \
-    --cmdline "root=/dev/vda rw console=ttyS0" \
+    --cmdline "root=/dev/vda1 rw console=ttyS0" \
     --serial tty \
     --console off \
     --cpus boot=2 \
@@ -451,7 +457,7 @@ cloud-hypervisor \
 qemu-system-x86_64 \
     -kernel /path/to/vmlinuz \
     -drive file=/tmp/debian-vm.raw,format=raw,if=virtio \
-    -append "root=/dev/vda rw console=ttyS0" \
+    -append "root=/dev/vda1 rw console=ttyS0" \
     -nographic \
     -m 2G \
     -smp 2 \
@@ -459,9 +465,10 @@ qemu-system-x86_64 \
 ```
 
 The `if=virtio` option is required for QEMU so the disk appears as
-`/dev/vda`. cloud-hypervisor uses virtio by default. Both commands
-attach the serial console to the terminal. Exit cloud-hypervisor with
-Ctrl-A x; exit QEMU with Ctrl-A x.
+`/dev/vda`. cloud-hypervisor uses virtio by default. The VM image
+contains a GPT partition table, so the root filesystem is on `/dev/vda1`.
+Both commands attach the serial console to the terminal. Exit
+cloud-hypervisor with Ctrl-A x; exit QEMU with Ctrl-A x.
 
 **Customization options:**
 
@@ -472,15 +479,14 @@ Ctrl-A x; exit QEMU with Ctrl-A x.
 | `--ssh-key ~/.ssh/id_ed25519.pub` | Add SSH public key to root's authorized_keys |
 | `--filesystem btrfs` | Use btrfs instead of ext4 |
 | `--size 4G` | Override auto-calculated image size |
+| `--free-space 256M` | Extra free space in the image (default: 100M) |
 | `--hostname myvm` | Set the VM hostname (default: rootfs name) |
 | `--root-password ""` | Passwordless root (empty string) |
 
 **Known limitations:**
 
-- No bootloader or partition table. The image must be booted with
-  `-kernel` (direct kernel boot).
-- ext4 images use 1024-byte blocks (required by cloud-hypervisor).
-  This is a cloud-hypervisor constraint; QEMU works with any block size.
+- No bootloader. The image has a GPT partition table but must be booted
+  with `-kernel` (direct kernel boot).
 - `systemd-logind` fails inside the VM (no seat or input devices). This
   is harmless and does not affect serial console login.
 

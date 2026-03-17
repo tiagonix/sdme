@@ -512,9 +512,12 @@ EXAMPLE:
         /// Output format: dir, tar, tar.gz, tar.bz2, tar.xz, tar.zst, raw
         #[arg(short, long)]
         format: Option<String>,
-        /// Override disk image size for raw format (auto-calculated if omitted; e.g. "2G")
+        /// Override disk image size for raw format (e.g. "2G"); ignores --free-space
         #[arg(short, long)]
         size: Option<String>,
+        /// Extra free space added to auto-calculated image size (default: config default_export_free_space; ignored when --size is set)
+        #[arg(long)]
+        free_space: Option<String>,
         /// Filesystem type for raw disk images (ext4 or btrfs; default: config default_export_fs)
         #[arg(long)]
         filesystem: Option<String>,
@@ -2321,6 +2324,7 @@ fn main() -> Result<()> {
                 container,
                 format,
                 size,
+                free_space,
                 filesystem,
                 vm,
                 dns,
@@ -2387,6 +2391,16 @@ fn main() -> Result<()> {
                 };
 
                 let output_path = std::path::PathBuf::from(&output);
+                let free_space_str =
+                    free_space.as_deref().unwrap_or(&cfg.default_export_free_space);
+                let free_space = sdme::parse_size(free_space_str)
+                    .context("invalid --free-space value")?;
+                if size.is_some() && free_space > 0 {
+                    eprintln!(
+                        "warning: --size overrides auto-calculation; \
+                         --free-space is ignored"
+                    );
+                }
                 if container {
                     export::export_container(
                         &cfg.datadir,
@@ -2394,6 +2408,7 @@ fn main() -> Result<()> {
                         &output_path,
                         &fmt,
                         size.as_deref(),
+                        free_space,
                         vm_opts.as_ref(),
                         cli.verbose,
                     )?;
@@ -2404,6 +2419,7 @@ fn main() -> Result<()> {
                         &output_path,
                         &fmt,
                         size.as_deref(),
+                        free_space,
                         vm_opts.as_ref(),
                         cli.verbose,
                     )?;

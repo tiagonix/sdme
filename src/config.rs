@@ -52,6 +52,10 @@ pub struct Config {
     #[serde(default = "default_export_fs")]
     pub default_export_fs: String,
 
+    /// Default extra free space for auto-calculated raw disk image size (e.g. "100M").
+    #[serde(default = "default_export_free_space")]
+    pub default_export_free_space: String,
+
     /// Maximum number of tasks (processes/threads) per container.
     #[serde(default = "default_tasks_max")]
     pub tasks_max: u32,
@@ -109,6 +113,10 @@ fn default_export_fs() -> String {
     "ext4".to_string()
 }
 
+fn default_export_free_space() -> String {
+    "100M".to_string()
+}
+
 fn default_tasks_max() -> u32 {
     16384
 }
@@ -144,6 +152,7 @@ impl Default for Config {
             hardened_drop_caps: default_hardened_drop_caps(),
             default_base_fs: String::new(),
             default_export_fs: default_export_fs(),
+            default_export_free_space: default_export_free_space(),
             tasks_max: default_tasks_max(),
             docker_user: String::new(),
             docker_token: String::new(),
@@ -190,6 +199,10 @@ impl Config {
         println!("hardened_drop_caps = {}", self.hardened_drop_caps);
         println!("default_base_fs = {}", self.default_base_fs);
         println!("default_export_fs = {}", self.default_export_fs);
+        println!(
+            "default_export_free_space = {}",
+            self.default_export_free_space
+        );
         println!("tasks_max = {}", self.tasks_max);
         println!("docker_user = {}", self.docker_user);
         let docker_token_display = if self.docker_token.is_empty() {
