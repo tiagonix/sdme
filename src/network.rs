@@ -436,8 +436,8 @@ mod tests {
         let parsed = State::parse(&serialized).unwrap();
         let restored = NetworkConfig::from_state(&parsed);
 
-        assert_eq!(restored.private_network, true);
-        assert_eq!(restored.network_veth, true);
+        assert!(restored.private_network);
+        assert!(restored.network_veth);
         assert_eq!(restored.network_bridge, Some("br0".to_string()));
         assert_eq!(restored.network_zone, None);
         assert_eq!(restored.ports, vec!["8080:80", "443:443"]);

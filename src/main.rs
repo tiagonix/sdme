@@ -2391,38 +2391,28 @@ fn main() -> Result<()> {
                 };
 
                 let output_path = std::path::PathBuf::from(&output);
-                let free_space_str =
-                    free_space.as_deref().unwrap_or(&cfg.default_export_free_space);
-                let free_space = sdme::parse_size(free_space_str)
-                    .context("invalid --free-space value")?;
+                let free_space_str = free_space
+                    .as_deref()
+                    .unwrap_or(&cfg.default_export_free_space);
+                let free_space =
+                    sdme::parse_size(free_space_str).context("invalid --free-space value")?;
                 if size.is_some() && free_space > 0 {
                     eprintln!(
                         "warning: --size overrides auto-calculation; \
                          --free-space is ignored"
                     );
                 }
+                let export_opts = export::ExportOptions {
+                    format: &fmt,
+                    size: size.as_deref(),
+                    free_space,
+                    vm_opts: vm_opts.as_ref(),
+                    verbose: cli.verbose,
+                };
                 if container {
-                    export::export_container(
-                        &cfg.datadir,
-                        &name,
-                        &output_path,
-                        &fmt,
-                        size.as_deref(),
-                        free_space,
-                        vm_opts.as_ref(),
-                        cli.verbose,
-                    )?;
+                    export::export_container(&cfg.datadir, &name, &output_path, &export_opts)?;
                 } else {
-                    export::export_rootfs(
-                        &cfg.datadir,
-                        &name,
-                        &output_path,
-                        &fmt,
-                        size.as_deref(),
-                        free_space,
-                        vm_opts.as_ref(),
-                        cli.verbose,
-                    )?;
+                    export::export_rootfs(&cfg.datadir, &name, &output_path, &export_opts)?;
                 }
                 println!("{}", output_path.display());
             }

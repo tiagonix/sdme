@@ -42,6 +42,15 @@ impl std::fmt::Display for RawFs {
     }
 }
 
+/// Grouped options for rootfs/container export.
+pub struct ExportOptions<'a> {
+    pub format: &'a ExportFormat,
+    pub size: Option<&'a str>,
+    pub free_space: u64,
+    pub vm_opts: Option<&'a VmOptions>,
+    pub verbose: bool,
+}
+
 /// Output format for rootfs export.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExportFormat {
@@ -100,18 +109,14 @@ pub fn export_rootfs(
     datadir: &Path,
     name: &str,
     output: &Path,
-    format: &ExportFormat,
-    size: Option<&str>,
-    free_space: u64,
-    vm_opts: Option<&VmOptions>,
-    verbose: bool,
+    opts: &ExportOptions,
 ) -> Result<()> {
     validate_name(name).context("invalid rootfs name")?;
     let rootfs_dir = datadir.join("fs").join(name);
     if !rootfs_dir.is_dir() {
         bail!("rootfs not found: {name}");
     }
-    export_from_dir(&rootfs_dir, output, format, size, free_space, vm_opts, verbose)
+    export_from_dir(&rootfs_dir, output, opts)
 }
 
 /// Export a container's merged rootfs to the given output path.
@@ -123,11 +128,7 @@ pub fn export_container(
     datadir: &Path,
     name: &str,
     output: &Path,
-    format: &ExportFormat,
-    size: Option<&str>,
-    free_space: u64,
-    vm_opts: Option<&VmOptions>,
-    verbose: bool,
+    opts: &ExportOptions,
 ) -> Result<()> {
     validate_name(name)?;
     containers::ensure_exists(datadir, name)?;
@@ -141,7 +142,7 @@ pub fn export_container(
             "warning: container '{name}' is running; filesystem is live and \
              consistency is not guaranteed"
         );
-        export_from_dir(&merged_dir, output, format, size, free_space, vm_opts, verbose)
+        export_from_dir(&merged_dir, output, opts)
     } else {
         // Read state to find the rootfs.
         let state_file = datadir.join("state").join(name);
@@ -157,7 +158,7 @@ pub fn export_container(
         )?;
 
         mount_overlay(&rootfs_dir, &container_dir)?;
-        let result = export_from_dir(&merged_dir, output, format, size, free_space, vm_opts, verbose);
+        let result = export_from_dir(&merged_dir, output, opts);
         unmount_overlay(&container_dir);
         result
     }
@@ -165,25 +166,23 @@ pub fn export_container(
 
 /// Core dispatcher: export from a source directory to the output in the
 /// requested format.
-fn export_from_dir(
-    src: &Path,
-    output: &Path,
-    format: &ExportFormat,
-    size: Option<&str>,
-    free_space: u64,
-    vm_opts: Option<&VmOptions>,
-    verbose: bool,
-) -> Result<()> {
-    match format {
-        ExportFormat::Dir => export_to_dir(src, output, verbose),
+fn export_from_dir(src: &Path, output: &Path, opts: &ExportOptions) -> Result<()> {
+    match opts.format {
+        ExportFormat::Dir => export_to_dir(src, output, opts.verbose),
         ExportFormat::Tar
         | ExportFormat::TarGz
         | ExportFormat::TarBz2
         | ExportFormat::TarXz
-        | ExportFormat::TarZst => export_to_tar(src, output, format, verbose),
-        ExportFormat::Raw(fs_type) => {
-            export_to_raw(src, output, *fs_type, size, free_space, vm_opts, verbose)
-        }
+        | ExportFormat::TarZst => export_to_tar(src, output, opts.format, opts.verbose),
+        ExportFormat::Raw(fs_type) => export_to_raw(
+            src,
+            output,
+            *fs_type,
+            opts.size,
+            opts.free_space,
+            opts.vm_opts,
+            opts.verbose,
+        ),
     }
 }
 
@@ -536,8 +535,11 @@ fn export_raw_gpt(
         let stderr = String::from_utf8_lossy(&lo_output.stderr);
         bail!("losetup failed: {stderr}");
     }
-    let loop_dev =
-        std::path::PathBuf::from(String::from_utf8_lossy(&lo_output.stdout).trim().to_string());
+    let loop_dev = std::path::PathBuf::from(
+        String::from_utf8_lossy(&lo_output.stdout)
+            .trim()
+            .to_string(),
+    );
 
     let mut loop_guard = LoopGuard::new();
     loop_guard.set_active(loop_dev.clone());
@@ -548,8 +550,7 @@ fn export_raw_gpt(
 
     // Wait for the kernel to create the partition device (e.g. /dev/loop0p1).
     let part_dev = std::path::PathBuf::from(format!("{}p1", loop_dev.display()));
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while !part_dev.exists() {
         if std::time::Instant::now() >= deadline {
             bail!(
@@ -1607,17 +1608,14 @@ mod tests {
         fs::create_dir_all(tmp.path().join("fs")).unwrap();
         let output = tmp.path().join("out");
 
-        let err = export_rootfs(
-            tmp.path(),
-            "nonexistent",
-            &output,
-            &ExportFormat::Dir,
-            None,
-            0,
-            None,
-            false,
-        )
-        .unwrap_err();
+        let opts = ExportOptions {
+            format: &ExportFormat::Dir,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+        };
+        let err = export_rootfs(tmp.path(), "nonexistent", &output, &opts).unwrap_err();
         assert!(err.to_string().contains("rootfs not found"), "got: {err}");
     }
 
@@ -1626,17 +1624,14 @@ mod tests {
         let tmp = crate::testutil::TempDataDir::new("export-rootfs-badname");
         let output = tmp.path().join("out");
 
-        let err = export_rootfs(
-            tmp.path(),
-            "../escape",
-            &output,
-            &ExportFormat::Dir,
-            None,
-            0,
-            None,
-            false,
-        )
-        .unwrap_err();
+        let opts = ExportOptions {
+            format: &ExportFormat::Dir,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+        };
+        let err = export_rootfs(tmp.path(), "../escape", &output, &opts).unwrap_err();
         assert!(err.to_string().contains("name"), "got: {err}");
     }
 
@@ -1649,17 +1644,14 @@ mod tests {
         fs::write(rootfs_dir.join("hello"), "world").unwrap();
 
         let output = tmp.path().join("exported");
-        export_rootfs(
-            tmp.path(),
-            "myfs",
-            &output,
-            &ExportFormat::Dir,
-            None,
-            0,
-            None,
-            false,
-        )
-        .unwrap();
+        let opts = ExportOptions {
+            format: &ExportFormat::Dir,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+        };
+        export_rootfs(tmp.path(), "myfs", &output, &opts).unwrap();
 
         assert!(output.join("hello").is_file());
         assert_eq!(fs::read_to_string(output.join("hello")).unwrap(), "world");
