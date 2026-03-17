@@ -549,6 +549,8 @@ EXAMPLE:
     /// Manage the OCI blob cache
     #[command(subcommand)]
     Cache(CacheCommand),
+    /// Clean up stale transaction artifacts from interrupted operations
+    Gc,
 }
 
 #[derive(Subcommand)]
@@ -1777,8 +1779,8 @@ fn main() -> Result<()> {
 
             if let Err(e) = boot_result {
                 sdme::reset_interrupt();
-                eprintln!("boot failed, removing '{name}'");
-                let _ = containers::remove(&cfg.datadir, &name, cli.verbose);
+                eprintln!("boot failed, stopping '{name}'");
+                let _ = containers::stop(&name, containers::StopMode::Terminate, cli.verbose);
                 return Err(e);
             }
 
@@ -2030,6 +2032,7 @@ fn main() -> Result<()> {
                         oci_pod: oci_pod.as_deref(),
                         verbose: cli.verbose,
                         http: &cfg.http_config()?,
+                        auto_gc: cfg.auto_fs_gc,
                     },
                 )?;
                 eprintln!("starting '{name}'");
@@ -2042,8 +2045,8 @@ fn main() -> Result<()> {
                 })();
                 if let Err(e) = boot_result {
                     sdme::reset_interrupt();
-                    eprintln!("boot failed, removing '{name}'");
-                    let _ = kube::kube_delete(&cfg.datadir, &name, true, cli.verbose);
+                    eprintln!("boot failed, stopping '{name}'");
+                    let _ = containers::stop(&name, containers::StopMode::Terminate, cli.verbose);
                     return Err(e);
                 }
                 eprintln!("joining '{name}'");
@@ -2091,6 +2094,7 @@ fn main() -> Result<()> {
                         oci_pod: oci_pod.as_deref(),
                         verbose: cli.verbose,
                         http: &cfg.http_config()?,
+                        auto_gc: cfg.auto_fs_gc,
                     },
                 )?;
                 println!("{name}");
@@ -2242,6 +2246,7 @@ fn main() -> Result<()> {
                         http: cfg.http_config()?,
                         nix_config: nix_config_path,
                         nixpkgs_channel: &cfg.nixpkgs_channel,
+                        auto_gc: cfg.auto_fs_gc,
                     },
                 )?;
                 println!("{name}");
@@ -2295,7 +2300,8 @@ fn main() -> Result<()> {
                 };
                 let mut failed = false;
                 for name in &targets {
-                    if let Err(e) = rootfs::remove(&cfg.datadir, name, cli.verbose) {
+                    if let Err(e) = rootfs::remove(&cfg.datadir, name, cfg.auto_fs_gc, cli.verbose)
+                    {
                         eprintln!("error: {name}: {e}");
                         failed = true;
                     } else {
@@ -2321,6 +2327,7 @@ fn main() -> Result<()> {
                     boot_timeout,
                     cfg.tasks_max,
                     force,
+                    cfg.auto_fs_gc,
                     cli.verbose,
                 )?;
                 println!("{name}");
@@ -2470,6 +2477,15 @@ fn main() -> Result<()> {
                     }
                 }
             },
+            RootfsCommand::Gc => {
+                let fs_dir = cfg.datadir.join("fs");
+                let count = sdme::txn::gc(&fs_dir, cli.verbose)?;
+                if count == 0 {
+                    eprintln!("no stale transactions found");
+                } else {
+                    eprintln!("cleaned {count} stale transaction(s)");
+                }
+            }
         },
     }
 

@@ -577,6 +577,7 @@ fn export_raw_bare(
         .arg(output)
         .status()
         .with_context(|| format!("failed to run {mkfs_bin}"))?;
+    crate::check_interrupted()?;
     if !status.success() {
         bail!("{mkfs_err}");
     }
@@ -590,6 +591,7 @@ fn export_raw_bare(
         .arg(mount_dir)
         .status()
         .context("failed to run mount")?;
+    crate::check_interrupted()?;
     if !mount_status.success() {
         let _ = fs::remove_dir(mount_dir);
         bail!("failed to mount raw image");
@@ -661,6 +663,7 @@ fn export_raw_gpt(
         .arg(output)
         .output()
         .context("failed to run losetup")?;
+    crate::check_interrupted()?;
     if !lo_output.status.success() {
         let stderr = String::from_utf8_lossy(&lo_output.stderr);
         bail!("losetup failed: {stderr}");
@@ -705,6 +708,7 @@ fn export_raw_gpt(
         .arg(&part_dev)
         .status()
         .with_context(|| format!("failed to run {mkfs_bin}"))?;
+    crate::check_interrupted()?;
     if !status.success() {
         bail!("{mkfs_err}");
     }
@@ -718,6 +722,7 @@ fn export_raw_gpt(
         .arg(mount_dir)
         .status()
         .context("failed to run mount")?;
+    crate::check_interrupted()?;
     if !mount_status.success() {
         let _ = fs::remove_dir(mount_dir);
         bail!("failed to mount partition {}", part_dev.display());
@@ -806,6 +811,7 @@ fn mount_overlay(rootfs_dir: &Path, container_dir: &Path) -> Result<()> {
         .arg(&merged_dir)
         .status()
         .context("failed to run mount")?;
+    crate::check_interrupted()?;
 
     if !status.success() {
         bail!("failed to mount overlayfs for export");

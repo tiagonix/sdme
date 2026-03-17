@@ -207,7 +207,7 @@ pub fn import(datadir: &Path, opts: &crate::import::ImportOptions) -> Result<()>
 /// first rename the fs directory to a staging name (atomic on the same
 /// filesystem), then verify no container was created referencing it. If a
 /// reference appeared, we rename it back and bail.
-pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
+pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Result<()> {
     validate_name(name)?;
 
     let rootfs_path = datadir.join("fs").join(name);
@@ -221,18 +221,24 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     // Atomically rename the fs entry to a staging name so that any concurrent
     // `sdme create --fs <name>` will fail with "fs not found" instead
     // of creating a container with a dangling reference.
-    let removing_path = datadir.join("fs").join(format!(".{name}.removing"));
-
-    // Clean up a leftover staging dir from a previous failed removal.
-    if removing_path.exists() {
-        crate::copy::safe_remove_dir(&removing_path)?;
+    let rootfs_dir = datadir.join("fs");
+    let mut txn = crate::txn::Txn::new(
+        &rootfs_dir,
+        name,
+        crate::txn::TxnKind::Remove,
+        auto_gc,
+        verbose,
+    );
+    // Clean up stale transactions (but don't create a staging dir — we rename into it).
+    if auto_gc {
+        crate::txn::cleanup_stale_txns(&rootfs_dir, name, verbose)?;
     }
 
-    fs::rename(&rootfs_path, &removing_path).with_context(|| {
+    fs::rename(&rootfs_path, txn.path()).with_context(|| {
         format!(
             "failed to rename {} to {}",
             rootfs_path.display(),
-            removing_path.display()
+            txn.path().display()
         )
     })?;
 
@@ -240,11 +246,12 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     // and the rename, we need to restore the fs entry.
     if let Err(e) = check_rootfs_in_use(datadir, name) {
         // Restore the rootfs directory.
-        let _ = fs::rename(&removing_path, &rootfs_path);
+        let _ = fs::rename(txn.path(), &rootfs_path);
         return Err(e);
     }
 
-    crate::copy::safe_remove_dir(&removing_path)?;
+    crate::copy::safe_remove_dir(txn.path())?;
+    txn.done();
 
     let meta_path = datadir.join("fs").join(format!(".{name}.meta"));
     let _ = fs::remove_file(meta_path);
@@ -312,6 +319,7 @@ mod tests {
                 },
                 nix_config: None,
                 nixpkgs_channel: "",
+                auto_gc: true,
             },
         )
     }
@@ -449,7 +457,7 @@ mod tests {
         assert!(tmp.path().join("fs/rmme").is_dir());
         assert!(tmp.path().join("fs/.rmme.meta").exists());
 
-        remove(tmp.path(), "rmme", false).unwrap();
+        remove(tmp.path(), "rmme", true, false).unwrap();
         assert!(!tmp.path().join("fs/rmme").exists());
         assert!(!tmp.path().join("fs/.rmme.meta").exists());
     }
@@ -457,7 +465,7 @@ mod tests {
     #[test]
     fn test_remove_not_found() {
         let tmp = tmp();
-        let err = remove(tmp.path(), "nonexistent", false).unwrap_err();
+        let err = remove(tmp.path(), "nonexistent", true, false).unwrap_err();
         assert!(
             err.to_string().contains("not found"),
             "unexpected error: {err}"
@@ -478,7 +486,7 @@ mod tests {
         state.set("ROOTFS", "inuse");
         state.write_to(&state_dir.join("mycontainer")).unwrap();
 
-        let err = remove(tmp.path(), "inuse", false).unwrap_err();
+        let err = remove(tmp.path(), "inuse", true, false).unwrap_err();
         assert!(
             err.to_string().contains("in use"),
             "unexpected error: {err}"
@@ -497,8 +505,8 @@ mod tests {
         test_import(tmp.path(), src_b.path().to_str().unwrap(), "beta").unwrap();
         assert_eq!(list(tmp.path()).unwrap().len(), 2);
 
-        remove(tmp.path(), "alpha", false).unwrap();
-        remove(tmp.path(), "beta", false).unwrap();
+        remove(tmp.path(), "alpha", true, false).unwrap();
+        remove(tmp.path(), "beta", true, false).unwrap();
 
         assert!(list(tmp.path()).unwrap().is_empty());
         assert!(!tmp.path().join("fs/alpha").exists());

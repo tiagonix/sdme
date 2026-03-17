@@ -98,6 +98,8 @@ pub struct ImportOptions<'a> {
     pub nix_config: Option<&'a Path>,
     /// Nixpkgs channel for NixOS rootfs builds (e.g. "nixos-unstable").
     pub nixpkgs_channel: &'a str,
+    /// Automatically clean up stale transactions before importing.
+    pub auto_gc: bool,
 }
 
 // --- Source detection ---
@@ -511,7 +513,7 @@ fn import_url(
     verbose: bool,
     http: &crate::config::HttpConfig,
 ) -> Result<()> {
-    let temp_file = rootfs_dir.join(format!(".{name}.download"));
+    let temp_file = rootfs_dir.join(format!(".{name}.download-txn-{}", std::process::id()));
 
     let result = (|| -> Result<()> {
         let content_type = download_file(url, &temp_file, verbose, http)?;
@@ -548,32 +550,6 @@ fn import_url(
 }
 
 // --- Shared helpers ---
-
-/// Remove a leftover staging directory from a previous failed import.
-///
-/// When `force` is true, attempts to fix permissions and remove the directory.
-/// When `force` is false and the directory exists, returns an error telling
-/// the user to retry with `-f`.
-fn cleanup_staging(staging_dir: &Path, force: bool, verbose: bool) -> Result<()> {
-    if !staging_dir.exists() {
-        return Ok(());
-    }
-    if !force {
-        bail!(
-            "staging directory already exists: {}\n\
-             a previous import may have failed; re-run with -f to remove it and try again",
-            staging_dir.display()
-        );
-    }
-    if verbose {
-        eprintln!(
-            "removing leftover staging directory: {}",
-            staging_dir.display()
-        );
-    }
-    crate::copy::safe_remove_dir(staging_dir)?;
-    Ok(())
-}
 
 // --- Systemd detection and package installation ---
 
@@ -737,6 +713,7 @@ impl ChrootGuard {
                 .arg(&mount_point)
                 .status()
                 .with_context(|| format!("failed to bind mount {}", source.display()))?;
+            crate::check_interrupted()?;
             if !status.success() {
                 bail!(
                     "bind mount failed: {} -> {}",
@@ -752,6 +729,7 @@ impl ChrootGuard {
                 .arg(&mount_point)
                 .status()
                 .with_context(|| format!("failed to make rslave: {}", mount_point.display()))?;
+            crate::check_interrupted()?;
             if !status.success() {
                 bail!("make-rslave failed: {}", mount_point.display());
             }
@@ -766,6 +744,7 @@ impl ChrootGuard {
             .arg(&devpts)
             .status()
             .context("failed to bind mount /dev/pts")?;
+        crate::check_interrupted()?;
         if !status.success() {
             bail!("bind mount failed: /dev/pts -> {}", devpts.display());
         }
@@ -774,6 +753,7 @@ impl ChrootGuard {
             .arg(&devpts)
             .status()
             .context("failed to make rslave: /dev/pts")?;
+        crate::check_interrupted()?;
         if !status.success() {
             bail!("make-rslave failed: {}", devpts.display());
         }
@@ -1284,6 +1264,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         ref http,
         nix_config,
         nixpkgs_channel,
+        auto_gc,
     } = *opts;
 
     validate_name(name)?;
@@ -1306,14 +1287,18 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         let _ = fs::remove_file(env_path);
     }
 
-    let staging_name = format!(".{name}.importing");
-    let staging_dir = rootfs_dir.join(&staging_name);
-
-    // Clean up any leftover staging dir from a previous failed attempt.
-    cleanup_staging(&staging_dir, force, verbose)?;
-
     fs::create_dir_all(&rootfs_dir)
         .with_context(|| format!("failed to create {}", rootfs_dir.display()))?;
+
+    let mut txn = crate::txn::Txn::new(
+        &rootfs_dir,
+        name,
+        crate::txn::TxnKind::Import,
+        auto_gc,
+        verbose,
+    );
+    txn.prepare()?;
+    let staging_dir = txn.path().to_path_buf();
 
     let mut oci_config = None;
     let result = match kind {
@@ -1340,10 +1325,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         }
     };
 
-    if let Err(e) = result {
-        let _ = crate::copy::safe_remove_dir(&staging_dir);
-        return Err(e);
-    }
+    result?;
 
     // --- OCI application image handling ---
     // If this was a registry pull, check if it's an application image.
@@ -1382,10 +1364,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                         source,
                         verbose,
                     );
-                    if let Err(e) = setup_result {
-                        let _ = crate::copy::safe_remove_dir(&staging_dir);
-                        return Err(e);
-                    }
+                    setup_result?;
                     true // skip systemd detection; base already has it
                 }
                 None => {
@@ -1406,7 +1385,6 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                             .as_ref()
                             .map(|v| shell_join(v))
                             .unwrap_or_else(|| "(none)".to_string());
-                        let _ = crate::copy::safe_remove_dir(&staging_dir);
                         bail!(
                             "image appears to be an application container \
                              (Entrypoint: {ep_str}, Cmd: {cmd_str}); \
@@ -1549,15 +1527,11 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
             Ok(())
         })();
 
-        if let Err(e) = install_result {
-            let _ = crate::copy::safe_remove_dir(&staging_dir);
-            return Err(e);
-        }
+        install_result?;
 
         // Re-scan after installation.
         presence = detect_systemd_presence(&staging_dir);
         if !presence.is_bootable() && !force {
-            let _ = crate::copy::safe_remove_dir(&staging_dir);
             bail!(
                 "{} still not found after package installation",
                 presence.missing()
@@ -1577,13 +1551,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
 
     // --- Atomic rename to final location ---
 
-    fs::rename(&staging_dir, &final_dir).with_context(|| {
-        format!(
-            "failed to rename {} to {}",
-            staging_dir.display(),
-            final_dir.display()
-        )
-    })?;
+    txn.commit(&final_dir)?;
 
     // Write distro and OCI config metadata sidecar.
     let distro = crate::rootfs::detect_distro(&final_dir);
@@ -1698,6 +1666,7 @@ pub(crate) mod tests {
                 },
                 nix_config: None,
                 nixpkgs_channel: "",
+                auto_gc: true,
             },
         )
     }
@@ -2628,6 +2597,7 @@ pub(crate) mod tests {
                 },
                 nix_config: None,
                 nixpkgs_channel: "",
+                auto_gc: true,
             },
         )
         .unwrap();

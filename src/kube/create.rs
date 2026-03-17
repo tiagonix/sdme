@@ -53,6 +53,8 @@ pub struct KubeCreateOptions<'a> {
     pub verbose: bool,
     /// HTTP configuration for downloads and OCI pulls.
     pub http: &'a crate::config::HttpConfig,
+    /// Automatically clean up stale transactions before creating.
+    pub auto_gc: bool,
 }
 
 /// Create a kube pod: parse YAML, pull images, build combined rootfs, create container.
@@ -71,8 +73,6 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
     let rootfs_name = format!("kube-{}", plan.pod_name);
     let rootfs_dir = datadir.join("fs");
     let final_dir = rootfs_dir.join(&rootfs_name);
-    let staging_name = format!(".{rootfs_name}.importing");
-    let staging_dir = rootfs_dir.join(&staging_name);
 
     // If a kube pod already exists with this name, delete it first (idempotent apply).
     if final_dir.exists() {
@@ -97,20 +97,21 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
         }
     }
 
-    // Clean up any leftover staging dir.
-    if staging_dir.exists() {
-        let _ = make_removable(&staging_dir);
-        fs::remove_dir_all(&staging_dir)
-            .with_context(|| format!("failed to remove {}", staging_dir.display()))?;
-    }
-
     // 1. Copy base rootfs to staging dir.
+    let mut txn = crate::txn::Txn::new(
+        &rootfs_dir,
+        &rootfs_name,
+        crate::txn::TxnKind::Import,
+        opts.auto_gc,
+        opts.verbose,
+    );
+    txn.prepare()?;
+    let staging_dir = txn.path().to_path_buf();
+
     eprintln!(
         "copying base rootfs '{}' to staging directory",
         opts.base_fs
     );
-    fs::create_dir_all(&staging_dir)
-        .with_context(|| format!("failed to create {}", staging_dir.display()))?;
     crate::copy::copy_tree(&base_dir, &staging_dir, opts.verbose)
         .with_context(|| format!("failed to copy base rootfs from {}", base_dir.display()))?;
 
@@ -377,13 +378,7 @@ WantedBy=multi-user.target
     }
 
     // 5. Atomic rename.
-    fs::rename(&staging_dir, &final_dir).with_context(|| {
-        format!(
-            "failed to rename {} to {}",
-            staging_dir.display(),
-            final_dir.display()
-        )
-    })?;
+    txn.commit(&final_dir)?;
 
     eprintln!("created rootfs: {rootfs_name}");
 

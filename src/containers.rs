@@ -1169,6 +1169,7 @@ pub fn exec_oci(
     }
 
     let status = cmd.status().context("failed to run nsenter")?;
+    crate::check_interrupted()?;
     Ok(status)
 }
 
@@ -1219,6 +1220,7 @@ fn machinectl_shell(
         );
     }
     let status = cmd.status().context("failed to run machinectl")?;
+    crate::check_interrupted()?;
     Ok(status)
 }
 

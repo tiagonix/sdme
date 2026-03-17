@@ -180,11 +180,16 @@ type in the code uses a `BTreeMap<String, String>` for deterministic
 key ordering.
 
 **Transactional operations** follow a staging pattern throughout sdme.
-Rootfs imports write to a `.{name}.importing` staging directory, then
-do an atomic `rename()` to the final path on success. If the import
-fails or is interrupted, the staging directory is cleaned up, and if
-it's left behind (power failure, OOM kill), the next import detects it
-and offers to clean up with `--force`.
+Mutating filesystem operations write to enumerated staging directories
+named `.{name}.{kind}-txn-{pid}` (e.g. `.ubuntu.import-txn-42195`),
+then do an atomic `rename()` to the final path on success. If the
+operation fails or is interrupted, the staging directory is left behind;
+no cleanup runs during signal handling. On the next mutating
+operation, `cleanup_stale_txns()` detects dead PIDs via `/proc/{pid}`
+and removes their artifacts automatically (controlled by the
+`auto_fs_gc` config key, default `true`). Manual cleanup is available
+via `sdme fs gc`. The `Txn` type in `src/txn.rs` encodes the operation
+kind and creator PID.
 
 **Health detection** in `sdme ps` checks that a container's expected
 directories actually exist and that its rootfs (if specified) is
@@ -281,11 +286,13 @@ crash or unclean shutdown:
    contents that were visible through a stale bind mount.
 
 **Boot failure cleanup** differs between `sdme new` and `sdme start`.
-If `sdme new` fails to boot or join the container (or is interrupted
-with Ctrl+C), it removes the just-created container entirely (the user
-never asked for a stopped container, they asked for a running one). If
-`sdme start` fails, it stops the container but preserves it on disk for
-debugging.
+If `sdme new` or `sdme kube apply` fails to boot or join the container
+(or is interrupted with Ctrl+C or SIGTERM), it stops the container but
+preserves it on disk for debugging or manual cleanup via `sdme rm`.
+`sdme start` behaves the same way: it stops the container on boot
+failure or interrupt and preserves it on disk. All paths reset the
+interrupt flag before the stop operation so that `check_interrupted()`
+in the stop path does not short-circuit.
 
 ## 5. Container Names
 
@@ -383,15 +390,22 @@ a working environment without overlayfs-level fixups.
 
 **Staging areas and atomic operations** ensure that a failed import
 doesn't leave a half-written rootfs. The staging directory
-`.{name}.importing` is renamed to the final location only on complete
-success. If sdme finds a leftover staging directory on the next run, it
-reports it and the `--force` flag cleans it up.
+`.{name}.{kind}-txn-{pid}` is renamed to the final location only on
+complete success. If the operation is interrupted, the staging directory
+is left behind. On the next mutating operation, stale staging from dead
+PIDs is automatically cleaned up (when `auto_fs_gc` is enabled), or
+manually via `sdme fs gc`.
 
-**Cooperative Ctrl+C** runs throughout the import pipeline. A global
-`INTERRUPTED` flag is set by a POSIX signal handler (installed with
-`sigaction`, deliberately without `SA_RESTART` so blocking reads return
-`EINTR`). The import loop checks this flag between operations, allowing
-clean cancellation of multi-gigabyte downloads and extractions.
+**Cooperative interrupt handling** runs throughout the import pipeline.
+A global `INTERRUPTED` flag is set by a POSIX signal handler for both
+SIGINT and SIGTERM (installed with `sigaction`, deliberately without
+`SA_RESTART` so blocking reads return `EINTR`). `INTERRUPT_SIGNAL`
+records which signal fired for correct exit codes (128+signum).
+`check_interrupted()` is called after every subprocess `.status()`
+wait, not just between loop iterations, allowing clean cancellation of
+multi-gigabyte downloads and extractions. Second delivery of the same
+signal force-kills the process (the handler restores `SIG_DFL` after
+the first press).
 
 ## 7. fs build: Building Root Filesystems
 
@@ -455,7 +469,7 @@ instead of magic bytes (since we are creating, not reading):
 | `.tar.bz2`, `.tbz2`       | bzip2 tar           |
 | `.tar.xz`, `.txz`         | xz tar              |
 | `.tar.zst`, `.tzst`       | zstandard tar       |
-| `.img`, `.raw`            | bare ext4 raw image (default; `--filesystem btrfs` for btrfs) |
+| `.img`, `.raw`            | raw disk image      |
 | anything else              | directory copy      |
 
 The `-f` flag overrides detection. Format names match the extension
@@ -1051,33 +1065,40 @@ the host filesystem through sdme, please open an issue.
 Multi-step operations in sdme are designed to fail cleanly rather than
 leave broken state behind.
 
-**Transactional imports** use a staging directory
-(`.{name}.importing`) that is atomically renamed on success. Partial
-imports are either cleaned up immediately or detected and reported on
-the next run.
+**Transactional staging** uses enumerated staging directories named
+`.{name}.{kind}-txn-{pid}` (e.g. `.ubuntu.import-txn-42195`) that are
+atomically renamed on success. On interruption or error, the staging
+directory is left behind; no cleanup runs during signal handling.
+Stale staging from dead PIDs is automatically cleaned up on the next
+mutating operation when `auto_fs_gc` is enabled (default), or manually
+via `sdme fs gc`. The `Txn` type in `src/txn.rs` encodes the operation
+kind and creator PID.
 
 **Cooperative interrupt handling** uses a global `AtomicBool` flag set
-by a POSIX `SIGINT` handler. The handler is installed without
-`SA_RESTART`, so blocking system calls (file reads, network I/O) return
-`EINTR` immediately. Import loops, boot-wait loops, and build
-operations check the flag between steps, allowing Ctrl+C to cancel
-cleanly at any point. The handler also restores the default `SIGINT`
-disposition after the first press, so a second Ctrl+C force-kills the
+by a POSIX handler for both `SIGINT` and `SIGTERM`. The handler is
+installed without `SA_RESTART`, so blocking system calls (file reads,
+network I/O) return `EINTR` immediately. `INTERRUPT_SIGNAL` records
+which signal fired for correct exit codes (128+signum).
+`check_interrupted()` is called after every subprocess `.status()`
+wait, not just between loop iterations, allowing Ctrl+C or SIGTERM to
+cancel cleanly at any point. The handler restores `SIG_DFL` after the
+first delivery, so a second press of the same signal force-kills the
 process. This covers cases where Rust's stdlib retries
 `poll()`/`connect()` on EINTR, preventing cooperative cancellation
 during blocked DNS resolution or TCP connection attempts.
 
-**Boot failure cleanup** differs by intent: `sdme new` removes the
-container on boot or join failure (the user wanted a running container,
-not a broken one), while `sdme start` (from previous `sdme create`)
-preserves it for debugging.
+**Boot failure cleanup**: `sdme new` and `sdme kube apply` stop (but do
+not remove) the container on boot failure or interrupt, leaving it on
+disk for debugging or manual cleanup. `sdme start` behaves the same
+way. All paths reset the interrupt flag before the stop operation so
+that `check_interrupted()` in the stop path does not short-circuit.
 
 **Health checks** in `sdme ps` detect containers with missing
 directories or missing rootfs and report them as `broken` rather than
 crashing or silently hiding them.
 
-**Build failure cleanup** removes the staging container and any partial
-rootfs on error, regardless of which build step failed.
+**Build failure cleanup** stops the staging container on error. Any
+partial rootfs is left behind for cleanup via `sdme fs gc`.
 
 If you find a way to leave sdme's state inconsistent (a container that
 can't be listed, removed, or recovered), please open an issue.

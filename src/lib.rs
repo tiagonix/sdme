@@ -27,6 +27,7 @@
 //! | [`security`] | Capability, seccomp, AppArmor config |
 //! | [`system_check`] | Version and dependency checks |
 //! | [`pod`] | Shared network namespace management |
+//! | [`txn`] | Enumerated transaction staging and gc |
 
 pub mod build;
 pub mod config;
@@ -47,6 +48,7 @@ pub mod rootfs;
 pub mod security;
 pub mod system_check;
 pub mod systemd;
+pub mod txn;
 
 pub use mounts::{BindConfig, EnvConfig};
 pub use network::NetworkConfig;
@@ -57,12 +59,15 @@ use std::ffi::CString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use anyhow::{bail, Context, Result};
 
-/// Global flag set by the SIGINT handler; checked by [`check_interrupted`].
+/// Global flag set by the SIGINT/SIGTERM handler; checked by [`check_interrupted`].
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// The signal number that triggered the interruption (for exit code selection).
+static INTERRUPT_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 /// Read a line from stdin, returning `ErrorKind::Interrupted` if a signal
 /// interrupts the read.
@@ -93,7 +98,7 @@ pub fn read_line_interruptible(buf: &mut String) -> std::io::Result<usize> {
     Ok(len)
 }
 
-/// Return `Err` if the global SIGINT flag is set.
+/// Return `Err` if the global SIGINT/SIGTERM flag is set.
 pub fn check_interrupted() -> Result<()> {
     if INTERRUPTED.load(Ordering::Relaxed) {
         bail!("interrupted");
@@ -101,9 +106,21 @@ pub fn check_interrupted() -> Result<()> {
     Ok(())
 }
 
+/// Return the exit code appropriate for signal-terminated processes.
+///
+/// Convention: 128 + signal_number (e.g. 130 for SIGINT, 143 for SIGTERM).
+pub fn interrupt_exit_code() -> i32 {
+    let sig = INTERRUPT_SIGNAL.load(Ordering::Relaxed);
+    if sig > 0 {
+        128 + sig
+    } else {
+        130 // default: 128 + SIGINT
+    }
+}
+
 /// Reset the interrupt flag and re-install the signal handler.
 ///
-/// Called before cleanup operations (e.g. removing a container after a
+/// Called before cleanup operations (e.g. stopping a container after a
 /// failed boot in `sdme new`). Without this, a prior Ctrl+C leaves
 /// `INTERRUPTED == true` and the cleanup code (which also calls
 /// `check_interrupted()`) would bail immediately, skipping the undo.
@@ -113,10 +130,11 @@ pub fn check_interrupted() -> Result<()> {
 /// first invocation).
 pub fn reset_interrupt() {
     INTERRUPTED.store(false, Ordering::Relaxed);
+    INTERRUPT_SIGNAL.store(0, Ordering::Relaxed);
     install_interrupt_handler();
 }
 
-/// Install the SIGINT handler that sets the global [`INTERRUPTED`] flag.
+/// Install the SIGINT and SIGTERM handler that sets the global [`INTERRUPTED`] flag.
 pub fn install_interrupt_handler() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
@@ -126,21 +144,24 @@ pub fn install_interrupt_handler() {
         // (e.g. read() during interactive prompts) return EINTR on Ctrl+C
         // instead of silently restarting.
         //
-        // The handler sets INTERRUPTED and restores the default SIGINT
-        // disposition, so a second Ctrl+C force-kills the process. This
-        // is needed because Rust's stdlib retries poll()/connect() on
-        // EINTR, preventing cooperative check_interrupted() from running
-        // during blocked connection attempts.
+        // The handler sets INTERRUPTED and restores the default disposition
+        // for the received signal, so a second delivery force-kills the
+        // process. This is needed because Rust's stdlib retries
+        // poll()/connect() on EINTR, preventing cooperative
+        // check_interrupted() from running during blocked connection
+        // attempts.
         sa.sa_flags = 0;
         libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
     }
 }
 
-extern "C" fn signal_handler(_sig: libc::c_int) {
+extern "C" fn signal_handler(sig: libc::c_int) {
     INTERRUPTED.store(true, Ordering::Relaxed);
-    // Restore default handler: next SIGINT terminates the process.
+    INTERRUPT_SIGNAL.store(sig, Ordering::Relaxed);
+    // Restore default handler for this signal: next delivery terminates.
     unsafe {
-        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::signal(sig, libc::SIG_DFL);
     }
 }
 

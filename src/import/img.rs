@@ -104,6 +104,7 @@ pub(super) fn import_qcow2(image: &Path, staging_dir: &Path, verbose: bool) -> R
         .args(["nbd", "max_part=16"])
         .status()
         .context("failed to run modprobe nbd")?;
+    check_interrupted()?;
     if !status.success() {
         bail!("modprobe nbd failed (is the nbd kernel module available?)");
     }
@@ -166,6 +167,7 @@ pub(super) fn import_qcow2(image: &Path, staging_dir: &Path, verbose: bool) -> R
         .arg(&mount_dir)
         .status()
         .context("failed to run mount")?;
+    check_interrupted()?;
     if !status.success() {
         let _ = fs::remove_dir(&mount_dir);
         bail!("mount failed for {}", part_dev.display());
@@ -357,6 +359,7 @@ pub(super) fn import_raw(image: &Path, staging_dir: &Path, verbose: bool) -> Res
             .arg(&decompressed)
             .output()
             .context("failed to run losetup")?;
+        check_interrupted()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("losetup failed: {stderr}");
@@ -399,6 +402,7 @@ pub(super) fn import_raw(image: &Path, staging_dir: &Path, verbose: bool) -> Res
             .arg(&mount_dir)
             .status()
             .context("failed to run mount")?;
+        check_interrupted()?;
         if !status.success() {
             let _ = fs::remove_dir(&mount_dir);
             bail!("mount failed for {}", part_dev.display());

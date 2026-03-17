@@ -135,8 +135,8 @@ see
 .B SECURITY HARDENING
 below.
 .PP
-If boot fails or is interrupted (Ctrl+C), the just\-created container is
-automatically removed.
+If boot fails or is interrupted (Ctrl+C or SIGTERM), the container is
+automatically stopped but preserved on disk for debugging or manual cleanup.
 .SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-oci\-env \fIKEY=VALUE\fR]... [\-\-enable] [\-\-no\-oci\-ports] [\-\-no\-oci\-volumes]
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
@@ -453,9 +453,14 @@ OCI container images are auto\-detected after extraction and their filesystem
 layers are applied in order with whiteout handling.
 .RE
 .PP
+Stale staging directories from interrupted imports are automatically cleaned up
+on the next operation (controlled by the
+.B auto_fs_gc
+config key), or manually via
+.BR "sdme fs gc" .
 Use
 .B \-f
-to remove a leftover staging directory from a previous failed import.
+to force overwrite of an existing rootfs with the same name.
 .SS sdme fs ls
 List imported root filesystems with distro detection and paths.
 .SS sdme fs rm [\-a] [\-f] \fIname\fR...
@@ -678,6 +683,20 @@ By default, removes only expired blobs (based on LRU eviction policy).
 Use
 .B \-\-all
 to remove all cached blobs.
+.SS sdme fs gc
+Clean up stale transaction artifacts from interrupted operations.
+Scans the rootfs directory for staging directories (named
+.BI . name . kind \-txn\- pid\fR)
+whose creator PID is no longer running, and removes them.
+.PP
+This runs automatically before mutating operations when the
+.B auto_fs_gc
+config key is
+.B true
+(the default).
+Use this command for manual cleanup when
+.B auto_fs_gc
+is disabled or to reclaim disk space immediately.
 .SS sdme pod new \fIname\fR
 Create a new pod network namespace.
 Allocates a network namespace with loopback up, bind\-mounts it to
@@ -734,8 +753,8 @@ see
 .B SECURITY HARDENING
 below.
 .PP
-If boot fails or is interrupted (Ctrl+C), the just\-created container is
-automatically removed.
+If boot fails or is interrupted (Ctrl+C or SIGTERM), the container is
+automatically stopped but preserved on disk for debugging or manual cleanup.
 .SS sdme kube create \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\fIsecurity\fR]
 Create a container from a Kubernetes Pod YAML file without starting it.
 .PP
@@ -1261,6 +1280,18 @@ String.
 Nixpkgs channel used for NixOS rootfs builds via nix\-build.
 Default:
 .BR nixos\-unstable .
+.TP
+.B auto_fs_gc
+Boolean.
+Automatically clean up stale transaction staging directories from
+interrupted operations before mutating filesystem operations.
+When
+.BR false ,
+only
+.B sdme fs gc
+cleans up stale artifacts.
+Default:
+.BR true .
 .SH FILES
 .TP
 .I /var/lib/sdme/

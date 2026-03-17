@@ -163,6 +163,7 @@ fn run_in_container(name: &str, command: &str, verbose: bool) -> Result<()> {
         ])
         .status()
         .context("failed to run systemd-run")?;
+    crate::check_interrupted()?;
     if !status.success() {
         bail!(
             "command failed with exit code {}",
@@ -320,6 +321,7 @@ fn execute_build(
 // --- Main entry point ---
 
 /// Build a root filesystem from a Dockerfile-like configuration file.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     datadir: &Path,
     name: &str,
@@ -327,6 +329,7 @@ pub fn build(
     boot_timeout: u64,
     tasks_max: u32,
     force: bool,
+    auto_gc: bool,
     verbose: bool,
 ) -> Result<()> {
     validate_name(name)?;
@@ -338,7 +341,7 @@ pub fn build(
             bail!("fs already exists: {name}");
         }
         eprintln!("removing existing fs '{name}'");
-        rootfs::remove(datadir, name, verbose)?;
+        rootfs::remove(datadir, name, auto_gc, verbose)?;
     }
 
     let config = parse_build_config(config_path)?;
@@ -372,8 +375,8 @@ pub fn build(
         verbose,
     ) {
         crate::reset_interrupt();
-        eprintln!("build failed, removing '{staging_name}'");
-        let _ = containers::remove(datadir, &staging_name, verbose);
+        eprintln!("build failed, stopping '{staging_name}'");
+        let _ = containers::stop(&staging_name, containers::StopMode::Terminate, verbose);
         return Err(e);
     }
 
@@ -399,6 +402,7 @@ pub fn build(
         .arg(&merged_dir)
         .status()
         .context("failed to run mount")?;
+    crate::check_interrupted()?;
 
     if !mount_status.success() {
         eprintln!("build failed (mount), removing '{staging_name}'");
@@ -407,10 +411,11 @@ pub fn build(
     }
 
     // Copy merged to staging rootfs, then atomic rename.
-    let staging_rootfs = fs_dir.join(format!(".{name}.importing"));
+    let mut txn = crate::txn::Txn::new(&fs_dir, name, crate::txn::TxnKind::Build, auto_gc, verbose);
+    txn.prepare()?;
+    let staging_rootfs = txn.path().to_path_buf();
+
     let copy_result = (|| -> Result<()> {
-        fs::create_dir_all(&staging_rootfs)
-            .with_context(|| format!("failed to create {}", staging_rootfs.display()))?;
         copy::copy_metadata(&merged_dir, &staging_rootfs)?;
         copy::copy_xattrs(&merged_dir, &staging_rootfs)?;
         if verbose {
@@ -428,26 +433,10 @@ pub fn build(
         .arg(&merged_dir)
         .status();
 
-    if let Err(e) = copy_result {
-        let _ = copy::make_removable(&staging_rootfs);
-        let _ = fs::remove_dir_all(&staging_rootfs);
-        let _ = containers::remove(datadir, &staging_name, verbose);
-        return Err(e).context("failed to copy merged filesystem");
-    }
+    copy_result.context("failed to copy merged filesystem")?;
 
     // Atomic rename to final location.
-    if let Err(e) = fs::rename(&staging_rootfs, &final_dir) {
-        let _ = copy::make_removable(&staging_rootfs);
-        let _ = fs::remove_dir_all(&staging_rootfs);
-        let _ = containers::remove(datadir, &staging_name, verbose);
-        return Err(e).with_context(|| {
-            format!(
-                "failed to rename {} to {}",
-                staging_rootfs.display(),
-                final_dir.display()
-            )
-        });
-    }
+    txn.commit(&final_dir)?;
 
     // Write distro metadata sidecar.
     let distro = rootfs::detect_distro(&final_dir);

@@ -84,6 +84,14 @@ pub struct Config {
     /// Nixpkgs channel for NixOS rootfs builds (e.g. "nixos-unstable").
     #[serde(default = "default_nixpkgs_channel")]
     pub nixpkgs_channel: String,
+
+    /// Automatically clean up stale transactions before mutating operations.
+    ///
+    /// When `true` (default), operations like `import`, `build`, and `export`
+    /// clean up leftover staging directories from previously interrupted runs.
+    /// Set to `false` to skip auto-cleanup; use `sdme fs gc` to clean manually.
+    #[serde(default = "default_auto_fs_gc")]
+    pub auto_fs_gc: bool,
 }
 
 fn default_interactive() -> bool {
@@ -142,6 +150,10 @@ fn default_nixpkgs_channel() -> String {
     "nixos-unstable".to_string()
 }
 
+fn default_auto_fs_gc() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -163,6 +175,7 @@ impl Default for Config {
             http_body_timeout: default_http_body_timeout(),
             max_download_size: default_max_download_size(),
             nixpkgs_channel: default_nixpkgs_channel(),
+            auto_fs_gc: default_auto_fs_gc(),
         }
     }
 }
@@ -227,6 +240,8 @@ impl Config {
         println!("http_body_timeout = {}", self.http_body_timeout);
         println!("max_download_size = {}", self.max_download_size);
         println!("nixpkgs_channel = {}", self.nixpkgs_channel);
+        let auto_fs_gc = if self.auto_fs_gc { "yes" } else { "no" };
+        println!("auto_fs_gc = {auto_fs_gc}");
     }
 }
 
