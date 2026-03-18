@@ -24,8 +24,9 @@ The unit is considered active only after
 .BR systemd\-nspawn (1)
 sends its readiness notification, and sdme waits up to 60 seconds (configurable via
 .BR boot_timeout )
-for the container to boot, with a 2\-minute backstop timeout in the
-systemd unit.
+for the container to boot, with a backstop timeout of
+.I boot_timeout + 30
+seconds in the systemd unit.
 Interactive access uses
 .BR machinectl (1).
 .PP
@@ -292,16 +293,22 @@ Single\-container pods auto\-select the only app.
 .SS sdme stop [\-a] [\-\-term] [\-\-kill] \fIname\fR...
 Stop one or more running containers.
 The default mode sends SIGRTMIN+4 to the container leader for a clean
-shutdown (90 second timeout).
+shutdown (configurable via
+.BR stop_timeout_graceful ,
+default 90 seconds).
 Use
 .B \-a
 to stop all running containers (cannot be combined with names).
 .TP
 .B \-\-term
-Terminate mode: sends SIGTERM to the nspawn leader process (30 second timeout).
+Terminate mode: sends SIGTERM to the nspawn leader process (configurable via
+.BR stop_timeout_terminate ,
+default 30 seconds).
 .TP
 .B \-\-kill
-Force-kill mode: sends SIGKILL to all container processes (15 second timeout).
+Force-kill mode: sends SIGKILL to all container processes (configurable via
+.BR stop_timeout_kill ,
+default 15 seconds).
 .PP
 .B \-\-term
 and
@@ -996,6 +1003,24 @@ Values: positive integer.
 Default:
 .BR 60 .
 .TP
+.B stop_timeout_graceful
+Graceful stop timeout in seconds (SIGRTMIN+4 to leader).
+Values: positive integer.
+Default:
+.BR 90 .
+.TP
+.B stop_timeout_terminate
+Terminate stop timeout in seconds (SIGTERM to nspawn leader).
+Values: positive integer.
+Default:
+.BR 30 .
+.TP
+.B stop_timeout_kill
+Force\-kill stop timeout in seconds (SIGKILL to all).
+Values: positive integer.
+Default:
+.BR 15 .
+.TP
 .B join_as_sudo_user
 Automatically join host\-rootfs containers as the
 .B SUDO_USER
@@ -1164,8 +1189,34 @@ Integer.
 Number of seconds to wait for a container to finish booting before giving up.
 Can be overridden per\-command with
 .BR \-t / \-\-timeout .
+The systemd unit's
+.B TimeoutStartSec
+is set to
+.I boot_timeout + 30
+seconds as a backstop.
 Default:
 .BR 60 .
+.TP
+.B stop_timeout_graceful
+Integer.
+Number of seconds to wait for a graceful shutdown (SIGRTMIN+4 to the container
+leader) before giving up.
+Default:
+.BR 90 .
+.TP
+.B stop_timeout_terminate
+Integer.
+Number of seconds to wait for a terminate shutdown (SIGTERM to the nspawn
+leader process) before giving up.
+Default:
+.BR 30 .
+.TP
+.B stop_timeout_kill
+Integer.
+Number of seconds to wait for a force\-kill (SIGKILL to all container
+processes) before giving up.
+Default:
+.BR 15 .
 .TP
 .B join_as_sudo_user
 Boolean.
