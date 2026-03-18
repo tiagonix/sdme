@@ -2158,12 +2158,11 @@ fn main() -> Result<()> {
                 timeout,
                 pod,
                 oci_pod,
-                // Known limitation: security flags (--strict, --hardened, etc.)
-                // are not yet wired into kube containers.
-                security: _,
+                security: security_args,
             } => {
                 system_check::check_systemd_version(252)?;
-                validate_pod_args(&cfg.datadir, pod.as_deref(), false)?;
+                let (sec, hardened) = parse_security(security_args, &cfg)?;
+                validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
                 validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref())?;
                 let yaml_content = std::fs::read_to_string(&file)
                     .with_context(|| format!("failed to read {file}"))?;
@@ -2191,6 +2190,8 @@ fn main() -> Result<()> {
                         verbose: cli.verbose,
                         http: &cfg.http_config()?,
                         auto_gc: cfg.auto_fs_gc,
+                        security: sec,
+                        hardened,
                     },
                 )?;
                 eprintln!("starting '{name}'");
@@ -2231,12 +2232,11 @@ fn main() -> Result<()> {
                 base_fs,
                 pod,
                 oci_pod,
-                // Known limitation: security flags (--strict, --hardened, etc.)
-                // are not yet wired into kube containers.
-                security: _,
+                security: security_args,
             } => {
                 system_check::check_systemd_version(252)?;
-                validate_pod_args(&cfg.datadir, pod.as_deref(), false)?;
+                let (sec, hardened) = parse_security(security_args, &cfg)?;
+                validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
                 validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref())?;
                 let yaml_content = std::fs::read_to_string(&file)
                     .with_context(|| format!("failed to read {file}"))?;
@@ -2264,6 +2264,8 @@ fn main() -> Result<()> {
                         verbose: cli.verbose,
                         http: &cfg.http_config()?,
                         auto_gc: cfg.auto_fs_gc,
+                        security: sec,
+                        hardened,
                     },
                 )?;
                 println!("{name}");

@@ -2054,10 +2054,17 @@ state file as
 .BR USERNS=yes .
 .SH SECURITY HARDENING
 Security hardening flags are available on
-.B sdme create
+.BR "sdme create" ,
+.BR "sdme new" ,
+.BR "sdme kube apply" ,
 and
-.BR "sdme new" .
+.BR "sdme kube create" .
 They are stored in the container's state file and applied at start time.
+These flags operate at the nspawn container level (outer sandbox).
+For kube pods, the Pod YAML
+.B securityContext
+operates at the OCI app service level (inner systemd units).
+Both layers are complementary and can be used together.
 .TP
 .B \-\-strict
 Maximum security.

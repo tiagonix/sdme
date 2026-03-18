@@ -647,7 +647,15 @@ The security model is additive: nspawn container isolation (Part 1)
 plus OCI workload isolation (Part 2) plus kube-specific features
 (this section).
 
-## 18. Pod-Level Security Context
+CLI security flags (`--strict`, `--hardened`, `--userns`,
+`--drop-capability`, `--capability`, `--no-new-privileges`,
+`--read-only`, `--system-call-filter`, `--apparmor-profile`) apply at
+the **nspawn container level** (outer sandbox), exactly as they do on
+`sdme create` and `sdme new`. Pod YAML `securityContext` applies at the
+**OCI app service level** (inner systemd units). Both layers are
+complementary and can be used together.
+
+## 18. Pod and Container Security Context
 
 Kubernetes `securityContext` fields supported at the pod level:
 
@@ -660,7 +668,22 @@ runAsNonRoot    Yes        Validated at create time (fails
                            if runAsUser is 0 or unset)
 ```
 
-Per-container `securityContext` is not supported; only pod-level.
+Per-container `securityContext` fields override pod-level settings:
+
+```
+Field                      Supported  Enforcement
+-------------------------  ---------  ----------------------------------
+runAsUser                  Yes        Overrides pod-level uid
+runAsGroup                 Yes        Overrides pod-level gid
+runAsNonRoot               Yes        Validated at create time
+capabilities.add           Yes        Added to OCI bounding set
+capabilities.drop          Yes        Dropped from OCI bounding set
+allowPrivilegeEscalation   Yes        NoNewPrivileges= in service unit
+readOnlyRootFilesystem     Yes        ReadOnlyPaths= in service unit
+seccompProfile             Yes        SystemCallFilter= in service unit
+appArmorProfile            Yes        AppArmorProfile= in service unit
+```
+
 The `runAsUser`/`runAsGroup` values are passed to the `isolate` binary,
 which performs the privilege drop via raw syscalls (`setgroups`,
 `setgid`, `setuid`) before exec'ing the workload.
@@ -704,7 +727,8 @@ Feature               sdme OCI         sdme kube
 Apps per container    1                1 or more
 Init containers      No               Yes
 Volume sharing        No               Yes (emptyDir)
-Security context      OCI User field   runAsUser/Group
+Security context      OCI User field   Pod + per-container
+CLI security flags    Yes              Yes
 Secrets/ConfigMaps    No               Yes
 Resource limits       Via sdme set     Via K8s spec
 Restart policy        systemd default  K8s mapping

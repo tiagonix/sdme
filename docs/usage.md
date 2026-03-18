@@ -1009,7 +1009,10 @@ sudo sdme kube delete nginx
 
 Security flags (`--hardened`, `--strict`, `--userns`, `--drop-capability`,
 `--capability`, `--no-new-privileges`, `--read-only`, `--system-call-filter`,
-`--apparmor-profile`) are available on both `kube apply` and `kube create`:
+`--apparmor-profile`) are available on both `kube apply` and `kube create`.
+These operate at the **nspawn container level** (outer sandbox), while Pod
+YAML `securityContext` operates at the **OCI app service level** (inner
+systemd units). Both layers are complementary:
 
 ```bash
 sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu --hardened

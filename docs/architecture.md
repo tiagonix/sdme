@@ -1859,6 +1859,30 @@ sdme-probe-liveness-nginx.service   # runs /oci/.sdme-kube-probe
 The timer binds to the main service (`BindsTo=sdme-oci-nginx.service`)
 and stops automatically when the app stops.
 
+### Two-layer security model
+
+Kube pods support security at two independent layers:
+
+- **Nspawn container level (outer sandbox)**: CLI flags `--strict`,
+  `--hardened`, `--userns`, `--drop-capability`, `--capability`,
+  `--no-new-privileges`, `--read-only`, `--system-call-filter`, and
+  `--apparmor-profile` apply to the nspawn container itself. These are
+  the same flags available on `sdme create` and `sdme new`. They are
+  stored in the container state file and applied at start time.
+  `--hardened` and `--strict` force `--private-network` on kube pods
+  just as they do on regular containers.
+
+- **OCI app service level (inner units)**: Pod YAML `securityContext`
+  fields (`runAsUser`, `runAsGroup`, `runAsNonRoot`, capabilities,
+  seccomp, AppArmor) apply to individual OCI app service units inside
+  the container. These are enforced by systemd directives and the
+  `isolate` binary.
+
+Both layers are complementary. For example, `--strict` on the CLI
+hardens the nspawn sandbox (user namespace, private network, reduced
+caps, seccomp, AppArmor), while the Pod YAML can independently set
+`runAsUser: 1000` and drop `CAP_NET_RAW` on individual app services.
+
 ### State management
 
 Kube pods are tracked with additional state fields:
@@ -1875,4 +1899,3 @@ Kube pods are tracked with additional state fields:
 
 - No idempotent re-apply: `kube apply` on an existing pod fails; delete
   first, then re-apply
-- No per-container securityContext (only pod-level `runAsUser`/`runAsGroup`)

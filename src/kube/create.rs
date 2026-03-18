@@ -55,6 +55,10 @@ pub struct KubeCreateOptions<'a> {
     pub http: &'a crate::config::HttpConfig,
     /// Automatically clean up stale transactions before creating.
     pub auto_gc: bool,
+    /// Security hardening configuration (nspawn container level).
+    pub security: crate::SecurityConfig,
+    /// Whether `--hardened` or `--strict` was specified (forces private network).
+    pub hardened: bool,
 }
 
 /// Create a kube pod: parse YAML, pull images, build combined rootfs, create container.
@@ -423,6 +427,11 @@ WantedBy=multi-user.target
         network.private_network = true;
     }
 
+    // --hardened/--strict forces private network.
+    if opts.hardened && !network.private_network {
+        network.private_network = true;
+    }
+
     let create_opts = crate::containers::CreateOptions {
         name: Some(plan.pod_name.clone()),
         rootfs: Some(rootfs_name.clone()),
@@ -430,6 +439,7 @@ WantedBy=multi-user.target
         binds,
         pod: opts.pod.map(String::from),
         oci_pod: opts.oci_pod.map(String::from),
+        security: opts.security.clone(),
         ..Default::default()
     };
     let name = crate::containers::create(datadir, &create_opts, opts.verbose)?;
