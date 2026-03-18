@@ -22,8 +22,10 @@ with
 and controlled via D\-Bus.
 The unit is considered active only after
 .BR systemd\-nspawn (1)
-sends its readiness notification, and a 2\-minute startup timeout
-catches hung boots.
+sends its readiness notification, and sdme waits up to 60 seconds (configurable via
+.BR boot_timeout )
+for the container to boot, with a 2\-minute backstop timeout in the
+systemd unit.
 Interactive access uses
 .BR machinectl (1).
 .PP
@@ -1104,6 +1106,37 @@ Default:
 Nixpkgs channel used for NixOS rootfs builds via nix\-build.
 Default:
 .BR nixos\-unstable .
+.TP
+.B nix_config_template
+Path to a custom NixOS configuration file that replaces the built\-in
+default NixOS config template for nix\-build rootfs builds.
+When set, the build pipeline (nix\-build command, rootfs rebuild) stays
+the same; only the NixOS derivation changes.
+Default: empty (uses built\-in template).
+.TP
+.B auto_fs_gc
+Automatically clean up stale transaction staging directories before
+mutating filesystem operations.
+Values:
+.BR yes " or " no .
+Default:
+.BR yes .
+.TP
+.B distros.<family>.import_prehook
+JSON array of chroot commands to make a rootfs bootable under nspawn
+during import (e.g. install systemd, dbus, pam).
+Family names:
+.BR debian ", " fedora ", " arch ", " suse ", " unknown .
+Absent means use built\-in defaults; empty array means do nothing.
+Example:
+.BR 'sdme config set distros.debian.import_prehook \'["cmd1","cmd2"]\'' .
+Clear with an empty string.
+.TP
+.B distros.<family>.export_prehook
+JSON array of chroot commands to prepare a rootfs for VM export
+during export (e.g. install udev).
+Same family names and semantics as
+.BR import_prehook .
 .RE
 .SH CONFIGURATION
 The configuration file is in TOML format, located at
@@ -1281,6 +1314,16 @@ Nixpkgs channel used for NixOS rootfs builds via nix\-build.
 Default:
 .BR nixos\-unstable .
 .TP
+.B nix_config_template
+String.
+Path to a custom NixOS configuration file
+.RI ( .nix )
+that replaces the built\-in default NixOS config template used during
+nix\-build rootfs builds.
+The build pipeline (nix\-build command, rootfs rebuild) stays the same;
+only the NixOS derivation changes.
+Default: empty (uses built\-in template).
+.TP
 .B auto_fs_gc
 Boolean.
 Automatically clean up stale transaction staging directories from
@@ -1292,6 +1335,24 @@ only
 cleans up stale artifacts.
 Default:
 .BR true .
+.TP
+.B distros.<family>.import_prehook
+Array of strings (TOML array).
+Chroot commands to make an imported rootfs bootable under nspawn
+(e.g.\& install systemd, dbus, pam/login, tzdata).
+Family names match
+.BR DistroFamily::config_key() :
+.BR debian ", " fedora ", " arch ", " suse ", " unknown .
+Absent means use built\-in defaults; an empty array
+.RB ( "[]" )
+means explicitly do nothing.
+Nix and NixOS distros are hardcoded (nix\-build flow) and cannot be overridden.
+.TP
+.B distros.<family>.export_prehook
+Array of strings (TOML array).
+Chroot commands to prepare a rootfs for VM export (e.g.\& install udev).
+Same family names and semantics as
+.BR import_prehook .
 .SH FILES
 .TP
 .I /var/lib/sdme/
@@ -1780,7 +1841,7 @@ sdme create \-r postgresql \-\-oci\-env POSTGRES_PASSWORD=secret mydb
 .SH OCI PORT FORWARDING
 When creating a container from an OCI app rootfs that declares exposed ports
 (in
-.IR /oci/ports ),
+.IR /oci/apps/{name}/ports ),
 sdme automatically adds port forwarding rules if the container has a private
 network namespace (via
 .BR \-\-private\-network ,
@@ -1873,8 +1934,12 @@ The whole nspawn container, including init and all services, runs in the
 pod's netns via
 .BR \-\-network\-namespace\-path= .
 Works with any container type (host\-rootfs or imported rootfs).
-Mutually exclusive with
-.BR \-\-private\-network .
+When
+.B \-\-pod
+is used,
+.B \-\-private\-network
+is automatically omitted (the pod's network namespace provides equivalent
+loopback\-only isolation).
 Pod membership is stored in the container's state file as
 .BR POD .
 .TP
@@ -2060,7 +2125,8 @@ or
 is waiting for the container to boot will cancel the wait.
 For
 .BR "sdme new" ,
-the just\-created container is removed automatically.
+the container is stopped but preserved on disk for debugging or manual cleanup via
+.BR "sdme rm" .
 For
 .BR "sdme start" ,
 the container is stopped but preserved on disk.

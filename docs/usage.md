@@ -674,11 +674,12 @@ image (ubuntu, fedora, debian) contains systemd and can boot as a
 standalone container. An "application" image (nginx, redis, postgresql) has
 no init system; it expects something else to run it.
 
-sdme auto-detects which mode to use. If the image has systemd, it is
-treated as a base OS rootfs. If not, it is treated as an application that
-needs a base OS to run inside. You can override this with `--oci-mode`
-(values: `auto`, `base`, `app`), but auto-detection works correctly in
-practice.
+sdme auto-detects which mode to use based on the OCI image config: if the
+image has no entrypoint, a shell as its default command, and no exposed
+ports, it is treated as a base OS rootfs. Everything else is treated as
+an application that needs a base OS to run inside. You can override this
+with `--oci-mode` (values: `auto`, `base`, `app`), but auto-detection
+works correctly in practice.
 
 ### 5.2 How OCI apps work
 
@@ -1016,8 +1017,8 @@ sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu --strict
 
 **Supported Pod spec features:**
 
-- `containers[].image`, `name`, `command`, `args`, `env`, `ports`,
-  `volumeMounts`, `workingDir`, `imagePullPolicy`, `resources`
+- `containers[].image`, `name`, `command`, `args`, `env`, `envFrom`,
+  `ports`, `volumeMounts`, `workingDir`, `imagePullPolicy`, `resources`
 - `startupProbe`, `livenessProbe`, `readinessProbe` with exec,
   httpGet, tcpSocket, and grpc checks (see
   [Kubernetes probe docs](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/))
@@ -1092,12 +1093,14 @@ For the full kube specification reference, see
 This guide focuses on the concepts and workflows above. For the remaining
 topics, the existing documentation covers them well:
 
-**Security.** sdme provides three tiers of hardening. `--hardened` enables
-user namespace isolation, private network, no-new-privileges, and drops
-several capabilities. `--strict` adds Docker-equivalent capability drops,
-seccomp filters, and AppArmor. Individual flags (`--drop-capability`,
-`--no-new-privileges`, `--read-only`, `--system-call-filter`,
-`--apparmor-profile`) are also available for fine-grained control.
+**Security.** sdme provides three tiers of hardening. `--userns` enables
+user namespace isolation standalone. `--hardened` enables user namespace
+isolation, private network, no-new-privileges, and drops several
+capabilities. `--strict` adds Docker-equivalent capability drops, seccomp
+filters, and AppArmor. Individual flags (`--capability`,
+`--drop-capability`, `--no-new-privileges`, `--read-only`,
+`--system-call-filter`, `--apparmor-profile`) are also available for
+fine-grained control.
 
 ```bash
 sudo sdme new -r ubuntu --hardened
@@ -1116,13 +1119,15 @@ isolation, use `--private-network`, optionally combined with
 sudo sdme create mybox --private-network --network-veth --port 8080:80
 ```
 
-Network zones let containers in the same zone reach each other by name:
+Network zones let containers in the same zone reach each other. Note that
+sdme masks `systemd-resolved` in all containers, so DNS-based name
+resolution (e.g. `curl http://web`) requires unmasking resolved or
+configuring alternative name resolution inside private-network containers:
 
 ```bash
 sudo sdme create -r nginx --private-network --network-zone=myzone -p 8080:80 web
 sudo sdme create -r ubuntu --private-network --network-zone=myzone client
 sudo sdme start web client
-sudo sdme exec client -- curl http://web
 ```
 
 See [architecture.md, Section 9](architecture.md#9-networking) for details.

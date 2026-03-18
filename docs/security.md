@@ -522,8 +522,7 @@ time. It is used for ALL OCI apps, both root and non-root:
 - **Non-root apps**: additionally drops privileges via
   `setgroups`/`setgid`/`setuid`
 
-See [architecture.md, Section 16](architecture.md#16-oci-integration)
-and [architecture.md, Section 16](architecture.md#16-oci-integration) for
+See [architecture.md, Section 16](architecture.md#16-oci-integration) for
 full details on the isolate binary.
 
 ## 14. Systemd Hardening Directives

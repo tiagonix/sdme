@@ -19,6 +19,9 @@ configs, break things; the host is untouched.
 sudo sdme new
 ```
 
+On macOS? See [docs/macos.md](docs/macos.md) for setting up a Linux VM
+with lima-vm, then install sdme inside it.
+
 ## Importing any root filesystem
 
 Beyond cloning your host, sdme can import a root filesystem from virtually any
@@ -73,7 +76,7 @@ See [Kubernetes Pod YAML](docs/usage.md#7-kubernetes-pod-yaml).
 Export any imported rootfs or container filesystem as a directory, tarball, or
 raw disk image for sharing or producing bootable VM images.
 
-See [docs/usage.md](docs/usage.md) for export details.
+See [docs/usage.md](docs/usage.md#45-exporting-root-filesystems) for export details.
 
 ## Further reading
 
@@ -81,3 +84,5 @@ See [docs/usage.md](docs/usage.md) for export details.
   networking, OCI, pods, security, builds
 - [docs/architecture.md](docs/architecture.md): internals, design, OCI
   bridging, Kubernetes mapping
+- [docs/security.md](docs/security.md): container isolation model,
+  comparison with Docker and Podman

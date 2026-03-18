@@ -752,6 +752,10 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
 | `http_timeout`            | `30`                             |
 | `http_body_timeout`       | `300`                            |
 | `max_download_size`       | `50G`                            |
+| `nixpkgs_channel`         | `nixos-unstable`                 |
+| `nix_config_template`     | (empty)                          |
+| `auto_fs_gc`              | `true`                           |
+| `default_export_free_space` | `256M`                         |
 
 - `interactive`: enable interactive prompts.
 - `datadir`: root directory for all container and rootfs data.
@@ -775,6 +779,19 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
 - `http_body_timeout`: HTTP body receive timeout in seconds.
 - `max_download_size`: maximum download size for imports and
   OCI pulls (e.g. `50G`; `0` = unlimited).
+- `nixpkgs_channel`: nixpkgs channel for NixOS rootfs builds.
+- `nix_config_template`: path to a custom `.nix` file replacing
+  the built-in NixOS config template for nix-build rootfs builds.
+- `auto_fs_gc`: automatically clean stale transaction directories
+  before mutating operations.
+- `default_export_free_space`: extra free space for auto-calculated
+  raw disk image size.
+- `distros.<family>.import_prehook`: chroot commands to make a
+  rootfs bootable (install systemd, dbus, etc.). Family names:
+  `debian`, `fedora`, `arch`, `suse`, `unknown`. Absent = built-in
+  defaults; empty array = do nothing. Nix/NixOS stays hardcoded.
+- `distros.<family>.export_prehook`: chroot commands to prepare a
+  rootfs for VM export (install udev, etc.). Same semantics.
 
 Settings are read with `sdme config get` and written with
 `sdme config set <key> <value>`.
@@ -1346,28 +1363,6 @@ irreversible:
 After `execve`, the new process inherits the dropped uid/gid and cannot
 regain root.
 
-### /dev/std* shim for journal socket compatibility
-
-OCI images commonly symlink log files to `/dev/stdout` or
-`/dev/stderr` (e.g. `/var/log/nginx/error.log -> /dev/stderr ->
-/proc/self/fd/2`). Under Docker, fds 1/2 are pipes, so `open()` on
-`/proc/self/fd/N` succeeds. Under systemd, fds 1/2 are journal
-sockets, and the kernel rejects `open()` on socket-backed
-`/proc/self/fd/N` with ENXIO.
-
-sdme solves this with a generated LD_PRELOAD shared library
-(`devfd_shim`, approximately 4 KiB) that intercepts
-`open()`/`openat()` at the libc symbol level. When the path matches
-`/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/{0,1,2}`, or
-`/proc/self/fd/{0,1,2}`, the interceptor returns `dup(N)` instead of
-calling the real `open`. All other paths fall through to the real
-syscall.
-
-The shim is written to `/.sdme-devfd-shim.so` inside the OCI root at
-import time, and the generated unit includes
-`Environment=LD_PRELOAD=/.sdme-devfd-shim.so`. This applies to all OCI
-containers (both root and non-root users).
-
 ### The /dev/std* shim
 
 OCI images commonly create symlinks from log files to the standard
@@ -1604,7 +1599,9 @@ so image-defined variables are preserved unless explicitly overridden.
 
 - **One OCI service per container.** Each rootfs generates a single
   `sdme-oci-{name}.service`.
-- **No health checks.** OCI HEALTHCHECK directives are ignored.
+- **No OCI HEALTHCHECK support.** Docker HEALTHCHECK directives in OCI
+  image configs are ignored. (Kubernetes-style probes are supported for
+  kube pods; see Section 17.)
 ### OCI namespace entry: cgroup discovery
 
 `sdme exec --oci` and `sdme join --oci` need to find the host PID of
@@ -1683,6 +1680,7 @@ usage examples and CLI reference, see
 | `containers[].args`              | Override CMD                       |
 | `containers[].env`               | Per-container env vars             |
 | `containers[].env[].valueFrom`   | secretKeyRef or configMapKeyRef    |
+| `containers[].envFrom`           | Bulk-import from configMap/secret  |
 | `containers[].ports`             | Port forwarding (private network)  |
 | `containers[].volumeMounts`      | Bind volumes into app rootfs       |
 | `containers[].workingDir`        | Override working directory         |
