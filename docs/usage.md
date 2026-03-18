@@ -564,9 +564,10 @@ DNS resolvers, a hostname, and optionally a root password and SSH public
 key. If the rootfs is missing udev (common with container images),
 sdme will prompt to install it.
 
-The result is a GPT-partitioned raw disk image with a single Linux
-partition (no bootloader). You supply your own kernel at boot time via
-the hypervisor's `-kernel` flag. This works with cloud-hypervisor and
+The result is a GPT-partitioned raw disk image with a Linux root
+partition (no bootloader), and optionally a swap partition via
+`--swap <size>`. You supply your own kernel at boot time via the
+hypervisor's `-kernel` flag. This works with cloud-hypervisor and
 QEMU.
 
 **Finding a kernel.** Use the host's installed kernel:

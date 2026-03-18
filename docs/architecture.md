@@ -515,14 +515,17 @@ export, then unmounts.
 ### VM export
 
 When `--vm` is passed, the raw disk image is GPT-partitioned instead of
-a bare filesystem. A single Linux partition is created at 1 MiB offset
+a bare filesystem. A Linux root partition is created at 1 MiB offset
 (standard GPT alignment) via `sfdisk`, and the filesystem is formatted
-on the partition device (`/dev/loopNp1`). The exported rootfs is then
-modified for standalone VM boot: serial console login (patched
-`serial-getty@.service`), `/etc/fstab` with a `/dev/vda1` root entry,
-DHCP networking via `systemd-networkd`, and a hostname. Optional
-additions include DNS configuration, a root password, and an SSH public
-key. If the rootfs lacks udev, it can be installed via chroot. See the
+on the partition device (`/dev/loopNp1`). When `--swap <size>` is
+specified, a second GPT partition (type=swap) is created and formatted
+with `mkswap`; an `/etc/fstab` entry is written for `/dev/vda2`. The
+exported rootfs is then modified for standalone VM boot: serial console
+login (patched `serial-getty@.service`), `/etc/fstab` with a
+`/dev/vda1` root entry (and `/dev/vda2` swap if requested), DHCP
+networking via `systemd-networkd`, and a hostname. Optional additions
+include DNS configuration, a root password, and an SSH public key. If
+the rootfs lacks udev, it can be installed via chroot. See the
 [usage guide, Section 4.6](usage.md#46-exporting-for-vm-boot) for the
 full set of options and hypervisor examples.
 

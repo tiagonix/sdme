@@ -30,6 +30,8 @@ pub struct VmOptions {
     pub root_password: Option<String>,
     /// SSH public key installed as root's `authorized_keys`.
     pub ssh_key: Option<String>,
+    /// Swap partition size in bytes (`0` = no swap).
+    pub swap_size: u64,
     /// Whether to install packages (e.g. udev) via chroot.
     pub install_packages: InstallPackages,
     /// Allow interactive prompts during package installation.
@@ -429,10 +431,6 @@ fn meta_gid(meta: &fs::Metadata) -> u64 {
 }
 
 /// Export by creating a raw disk image with the specified filesystem.
-///
-// TODO: add --swap <size> flag to create a swap partition in VM exports.
-// This requires a second GPT partition (type=swap), mkswap on the partition
-// device, and a swap entry in /etc/fstab during prep_vm_rootfs.
 #[allow(clippy::too_many_arguments)]
 fn export_to_raw(
     src: &Path,
@@ -461,6 +459,10 @@ fn export_to_raw(
     if vm_opts.is_some() {
         deps.push(("sfdisk", "util-linux"));
     }
+    let swap_size = vm_opts.map(|o| o.swap_size).unwrap_or(0);
+    if swap_size > 0 {
+        deps.push(("mkswap", "util-linux"));
+    }
     system_check::check_dependencies(&deps, verbose)?;
 
     // Calculate or parse image size.
@@ -478,9 +480,14 @@ fn export_to_raw(
 
     // VM exports use a GPT partition table; add 2 MiB for the protective MBR,
     // primary GPT header, partition alignment gap, and backup GPT header.
+    // Swap partition size (if any) is added on top.
     let is_vm = vm_opts.is_some();
     if is_vm {
         image_size += 2 * 1024 * 1024;
+        if swap_size > 0 {
+            // Add swap partition size plus 1 MiB alignment padding.
+            image_size += swap_size + 1024 * 1024;
+        }
     }
 
     if verbose {
@@ -521,10 +528,19 @@ fn export_to_raw(
         .with_context(|| format!("failed to stat {}", output.display()))?
         .len();
 
+    let num_partitions = if is_vm {
+        if swap_size > 0 {
+            2
+        } else {
+            1
+        }
+    } else {
+        0
+    };
     Ok(ExportResult {
         output_size,
         free_space: Some(free_space),
-        partitions: Some(if is_vm { 1 } else { 0 }),
+        partitions: Some(num_partitions),
     })
 }
 
@@ -621,10 +637,10 @@ fn export_raw_bare(
 
 /// Export a GPT-partitioned raw disk image for VM boot.
 ///
-/// Creates a GPT partition table with a single Linux partition starting at
-/// 1 MiB (standard alignment). The filesystem lives on the partition, not
-/// the whole device. This avoids sector 0 conflicts with hypervisors like
-/// cloud-hypervisor.
+/// Creates a GPT partition table with a Linux root partition starting at
+/// 1 MiB (standard alignment), and optionally a swap partition. The
+/// filesystem lives on the partition, not the whole device. This avoids
+/// sector 0 conflicts with hypervisors like cloud-hypervisor.
 fn export_raw_gpt(
     output: &Path,
     mount_dir: &Path,
@@ -634,8 +650,17 @@ fn export_raw_gpt(
     vm_opts: Option<&VmOptions>,
     verbose: bool,
 ) -> Result<()> {
-    // Write a GPT partition table with one Linux partition.
-    let sfdisk_input = "label: gpt\ntype=linux\n";
+    let swap_size = vm_opts.map(|o| o.swap_size).unwrap_or(0);
+
+    // Write a GPT partition table. When swap is requested, the root
+    // partition is sized to fill everything except the swap area, and a
+    // second partition of type=swap gets the remainder.
+    let sfdisk_input = if swap_size > 0 {
+        let swap_mib = swap_size / (1024 * 1024);
+        format!("label: gpt\ntype=linux\ntype=swap, size={swap_mib}MiB\n")
+    } else {
+        "label: gpt\ntype=linux\n".to_string()
+    };
     let mut sfdisk = std::process::Command::new("sfdisk")
         .arg("--quiet")
         .arg(output)
@@ -688,22 +713,13 @@ fn export_raw_gpt(
 
     // Wait for the kernel to create the partition device (e.g. /dev/loop0p1).
     let part_dev = std::path::PathBuf::from(format!("{}p1", loop_dev.display()));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while !part_dev.exists() {
-        if std::time::Instant::now() >= deadline {
-            bail!(
-                "partition device {} did not appear within 2 seconds",
-                part_dev.display()
-            );
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    wait_for_partition(&part_dev)?;
 
     if verbose {
         eprintln!("partition device: {}", part_dev.display());
     }
 
-    // Format the partition (standard mkfs flags; no 1K block hack needed).
+    // Format the root partition.
     let (mkfs_args, mkfs_err): (&[&str], &str) = match fs_type {
         RawFs::Ext4 => (&["-q", "-F"], "mkfs.ext4 failed"),
         RawFs::Btrfs => (&["-q", "-f"], "mkfs.btrfs failed"),
@@ -718,7 +734,24 @@ fn export_raw_gpt(
         bail!("{mkfs_err}");
     }
 
-    // Mount the partition.
+    // Format the swap partition if requested.
+    if swap_size > 0 {
+        let swap_dev = std::path::PathBuf::from(format!("{}p2", loop_dev.display()));
+        wait_for_partition(&swap_dev)?;
+        if verbose {
+            eprintln!("swap partition device: {}", swap_dev.display());
+        }
+        let status = std::process::Command::new("mkswap")
+            .arg(&swap_dev)
+            .status()
+            .context("failed to run mkswap")?;
+        crate::check_interrupted()?;
+        if !status.success() {
+            bail!("mkswap failed");
+        }
+    }
+
+    // Mount the root partition.
     fs::create_dir_all(mount_dir)
         .with_context(|| format!("failed to create mount point {}", mount_dir.display()))?;
 
@@ -755,6 +788,21 @@ fn export_raw_gpt(
     loop_guard.detach();
 
     result
+}
+
+/// Wait for a partition device node to appear (up to 2 seconds).
+fn wait_for_partition(dev: &Path) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !dev.exists() {
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "partition device {} did not appear within 2 seconds",
+                dev.display()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Ok(())
 }
 
 /// Unmount a mount point (recursive) and remove the directory.
@@ -989,9 +1037,15 @@ fn prep_vm_rootfs(mount: &Path, fs_type: RawFs, opts: &VmOptions, verbose: bool)
         eprintln!("enabled serial-getty@ttyS0.service");
     }
 
-    write_vm_fstab(mount, fs_type)?;
+    write_vm_fstab(mount, fs_type, opts.swap_size)?;
     if verbose {
         eprintln!("wrote /etc/fstab");
+    }
+    if opts.swap_size > 0 && verbose {
+        eprintln!(
+            "swap partition: /dev/vda2 ({})",
+            format_human_size(opts.swap_size)
+        );
     }
 
     unmask_resolved(mount)?;
@@ -1279,9 +1333,12 @@ WantedBy=getty.target
 }
 
 /// Write /etc/fstab with the root device entry.
-fn write_vm_fstab(mount: &Path, fs_type: RawFs) -> Result<()> {
+fn write_vm_fstab(mount: &Path, fs_type: RawFs, swap_size: u64) -> Result<()> {
     let fstab = mount.join("etc/fstab");
-    let content = format!("/dev/vda1 / {fs_type} defaults 0 1\n");
+    let mut content = format!("/dev/vda1 / {fs_type} defaults 0 1\n");
+    if swap_size > 0 {
+        content.push_str("/dev/vda2 none swap sw 0 0\n");
+    }
     fs::write(&fstab, content).with_context(|| format!("failed to write {}", fstab.display()))
 }
 
@@ -2153,7 +2210,7 @@ WantedBy=getty.target
         let tmp = crate::testutil::TempDataDir::new("export-vm-fstab-ext4");
         fs::create_dir_all(tmp.path().join("etc")).unwrap();
 
-        write_vm_fstab(tmp.path(), RawFs::Ext4).unwrap();
+        write_vm_fstab(tmp.path(), RawFs::Ext4, 0).unwrap();
 
         let content = fs::read_to_string(tmp.path().join("etc/fstab")).unwrap();
         assert_eq!(content, "/dev/vda1 / ext4 defaults 0 1\n");
@@ -2164,10 +2221,24 @@ WantedBy=getty.target
         let tmp = crate::testutil::TempDataDir::new("export-vm-fstab-btrfs");
         fs::create_dir_all(tmp.path().join("etc")).unwrap();
 
-        write_vm_fstab(tmp.path(), RawFs::Btrfs).unwrap();
+        write_vm_fstab(tmp.path(), RawFs::Btrfs, 0).unwrap();
 
         let content = fs::read_to_string(tmp.path().join("etc/fstab")).unwrap();
         assert_eq!(content, "/dev/vda1 / btrfs defaults 0 1\n");
+    }
+
+    #[test]
+    fn test_write_vm_fstab_with_swap() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-fstab-swap");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+
+        write_vm_fstab(tmp.path(), RawFs::Ext4, 512 * 1024 * 1024).unwrap();
+
+        let content = fs::read_to_string(tmp.path().join("etc/fstab")).unwrap();
+        assert_eq!(
+            content,
+            "/dev/vda1 / ext4 defaults 0 1\n/dev/vda2 none swap sw 0 0\n"
+        );
     }
 
     // --- unmask_resolved tests ---

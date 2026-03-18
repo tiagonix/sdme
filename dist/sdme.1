@@ -542,7 +542,7 @@ Use a different path (e.g.\&
 Lines starting with
 .B #
 and blank lines are ignored.
-.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f] [\-\-fmt \fIformat\fR] [\-s \fIsize\fR] [\-\-free\-space \fIsize\fR] [\-\-filesystem \fItype\fR] [\-\-vm] [\-\-dns \fIip\fR]... [\-\-net\-ifaces \fIn\fR] [\-\-root\-password \fIpass\fR] [\-\-ssh\-key \fIpath\fR] [\-\-hostname \fIname\fR] [\-\-install\-packages \fImode\fR]
+.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f] [\-\-fmt \fIformat\fR] [\-s \fIsize\fR] [\-\-free\-space \fIsize\fR] [\-\-filesystem \fItype\fR] [\-\-vm] [\-\-dns \fIip\fR]... [\-\-net\-ifaces \fIn\fR] [\-\-root\-password \fIpass\fR] [\-\-ssh\-key \fIpath\fR] [\-\-swap \fIsize\fR] [\-\-hostname \fIname\fR] [\-\-install\-packages \fImode\fR]
 Export a root filesystem or container to a directory, tarball, or disk image.
 The output format is auto\-detected from the file extension:
 .RS
@@ -628,7 +628,7 @@ Use
 .B \-\-vm
 to prepare a raw disk image for booting as a virtual machine.
 This flag only applies to raw disk image exports and performs the following
-modifications: creates a GPT partition table with a single Linux partition
+modifications: creates a GPT partition table with a Linux root partition
 (via
 .BR sfdisk (8)),
 enables serial console login via
@@ -667,6 +667,15 @@ Set the root password in
 .BR \-\-ssh\-key " " \fIpath\fR
 Install an SSH authorized key for root from the given file path
 (or literal key string if not a file).
+.TP
+.BR \-\-swap " " \fIsize\fR
+Create a swap partition of the given size (e.g.\&
+.IR 512M ", " 2G ).
+The swap partition is added as a second GPT partition (type=swap),
+formatted with
+.BR mkswap (8),
+and an entry is written to
+.IR /etc/fstab .
 .TP
 .BR \-\-hostname " " \fIname\fR
 Set the VM hostname.

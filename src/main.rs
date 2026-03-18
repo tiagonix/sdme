@@ -539,6 +539,9 @@ EXAMPLE:
         /// SSH public key or path to .pub file for root authorized_keys
         #[arg(long, requires = "vm")]
         ssh_key: Option<String>,
+        /// Create a swap partition of the given size (e.g. "512M", "2G")
+        #[arg(long, requires = "vm")]
+        swap: Option<String>,
         /// Set VM hostname (default: rootfs/container name)
         #[arg(long, requires = "vm")]
         hostname: Option<String>,
@@ -2512,6 +2515,7 @@ fn main() -> Result<()> {
                 net_ifaces,
                 root_password,
                 ssh_key,
+                swap,
                 hostname,
                 install_packages,
             } => {
@@ -2552,6 +2556,10 @@ fn main() -> Result<()> {
                         }
                         None => None,
                     };
+                    let swap_size = match swap {
+                        Some(s) => sdme::parse_size(&s).context("invalid --swap size")?,
+                        None => 0,
+                    };
                     let hostname = hostname.unwrap_or_else(|| name.clone());
                     Some(export::VmOptions {
                         hostname,
@@ -2559,6 +2567,7 @@ fn main() -> Result<()> {
                         net_ifaces,
                         root_password,
                         ssh_key,
+                        swap_size,
                         install_packages,
                         interactive,
                         distros: cfg.distros.clone(),
