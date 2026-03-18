@@ -144,6 +144,7 @@ pub(super) fn list(cfg: &StoreConfig, datadir: &Path) -> Result<Vec<StoreInfo>> 
 /// Remove one or more entries.
 pub(super) fn remove(cfg: &StoreConfig, datadir: &Path, names: &[String]) -> Result<()> {
     for name in names {
+        crate::check_interrupted()?;
         let entry_dir = datadir.join(cfg.subdir).join(name);
         if !entry_dir.join("state").exists() {
             bail!("{} not found: {name}", cfg.noun);

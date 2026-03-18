@@ -11,8 +11,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    config, confirm, containers, export, kube, oci, pod, rootfs, security, system_check, systemd,
-    BindConfig, EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
+    check_interrupted, config, confirm, containers, export, kube, oci, pod, rootfs, security,
+    system_check, systemd, BindConfig, EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
 };
 
 #[derive(Parser)]
@@ -756,6 +756,7 @@ fn for_each_container(
 ) -> Result<()> {
     let mut failed = false;
     for input in targets {
+        check_interrupted()?;
         let name = match containers::resolve_name(datadir, input) {
             Ok(n) => n,
             Err(e) => {
@@ -2136,6 +2137,7 @@ fn main() -> Result<()> {
             PodCommand::Rm { names, force } => {
                 let mut failed = false;
                 for name in &names {
+                    check_interrupted()?;
                     eprintln!("removing pod '{name}'");
                     if let Err(e) = pod::remove(&cfg.datadir, name, force, cli.verbose) {
                         eprintln!("error: {name}: {e}");
@@ -2469,6 +2471,7 @@ fn main() -> Result<()> {
                 };
                 let mut failed = false;
                 for name in &targets {
+                    check_interrupted()?;
                     if let Err(e) = rootfs::remove(&cfg.datadir, name, cfg.auto_fs_gc, cli.verbose)
                     {
                         eprintln!("error: {name}: {e}");
