@@ -1,8 +1,7 @@
 # sdme
 
-The systemd machine editor: a single static binary that creates and manages
-Linux containers using systemd-nspawn with overlayfs. No daemon, no runtime
-dependency beyond systemd. Written in Rust.
+The systemd machine editor: a command line tool for managing
+systemd-nspawn booted containers on Linux. Written in Rust.
 
 sdme is primarily a **development tool**. It makes systemd-nspawn containers
 first-class citizens on any Linux machine, letting you spin up almost any
