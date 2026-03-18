@@ -4,11 +4,26 @@
 //! (default: `/etc/sdme.conf`, TOML format). Provides the
 //! [`Config`] struct and functions for reading/writing it to disk.
 
+use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+/// Per-distro chroot command overrides for import/export preparation.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct DistroCommands {
+    /// Chroot commands to prepare a rootfs for nspawn boot (import).
+    /// Installs systemd, dbus, pam/login, sets timezone, cleans cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_prehook: Option<Vec<String>>,
+
+    /// Chroot commands to prepare a rootfs for VM export.
+    /// Installs udev and any other VM boot dependencies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_prehook: Option<Vec<String>>,
+}
 
 /// Global sdme configuration loaded from `/etc/sdme.conf`.
 #[derive(Debug, Serialize, Deserialize)]
@@ -92,6 +107,11 @@ pub struct Config {
     /// Set to `false` to skip auto-cleanup; use `sdme fs gc` to clean manually.
     #[serde(default = "default_auto_fs_gc")]
     pub auto_fs_gc: bool,
+
+    /// Per-distro chroot command overrides for import/export preparation.
+    /// Absent = use built-in defaults. Empty vec = explicitly do nothing.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub distros: HashMap<String, DistroCommands>,
 }
 
 fn default_interactive() -> bool {
@@ -176,6 +196,7 @@ impl Default for Config {
             max_download_size: default_max_download_size(),
             nixpkgs_channel: default_nixpkgs_channel(),
             auto_fs_gc: default_auto_fs_gc(),
+            distros: HashMap::new(),
         }
     }
 }
@@ -271,16 +292,75 @@ pub fn load(path: Option<&Path>) -> Result<Config> {
     Ok(config)
 }
 
-/// Save the configuration to disk with restrictive permissions.
+/// Save the full configuration to disk with restrictive permissions.
 pub fn save(config: &Config, path: Option<&Path>) -> Result<()> {
     let path = resolve_path(path);
     let contents = toml::to_string(config).context("failed to serialize config")?;
-    crate::atomic_write(&path, contents.as_bytes())
+    write_config(&path, &contents)
+}
+
+/// Set or remove a single key in the config file without touching other keys.
+///
+/// Supports dot-separated keys for nested tables (e.g. `distros.debian.import_prehook`).
+/// When `value` is `None`, the key is removed; empty parent tables are cleaned up.
+pub fn save_key(path: Option<&Path>, key: &str, value: Option<toml::Value>) -> Result<()> {
+    let path = resolve_path(path);
+    let mut table = if path.exists() {
+        let contents = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        contents
+            .parse::<toml::Table>()
+            .with_context(|| format!("failed to parse {}", path.display()))?
+    } else {
+        toml::Table::new()
+    };
+
+    let parts: Vec<&str> = key.split('.').collect();
+    match value {
+        Some(val) => set_nested(&mut table, &parts, val),
+        None => {
+            remove_nested(&mut table, &parts);
+        }
+    }
+
+    let contents = toml::to_string(&table).context("failed to serialize config")?;
+    write_config(&path, &contents)
+}
+
+fn write_config(path: &Path, contents: &str) -> Result<()> {
+    crate::atomic_write(path, contents.as_bytes())
         .with_context(|| format!("failed to write config {}", path.display()))?;
-    // Ensure restrictive permissions (atomic_write creates with default umask).
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("failed to set permissions on {}", path.display()))?;
     Ok(())
+}
+
+/// Set a value at a dot-separated key path, creating intermediate tables as needed.
+fn set_nested(table: &mut toml::Table, parts: &[&str], value: toml::Value) {
+    if parts.len() == 1 {
+        table.insert(parts[0].to_string(), value);
+        return;
+    }
+    let entry = table
+        .entry(parts[0])
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if let toml::Value::Table(ref mut inner) = entry {
+        set_nested(inner, &parts[1..], value);
+    }
+}
+
+/// Remove a value at a dot-separated key path, cleaning up empty parent tables.
+fn remove_nested(table: &mut toml::Table, parts: &[&str]) {
+    if parts.len() == 1 {
+        table.remove(parts[0]);
+        return;
+    }
+    if let Some(toml::Value::Table(ref mut inner)) = table.get_mut(parts[0]) {
+        remove_nested(inner, &parts[1..]);
+        if inner.is_empty() {
+            table.remove(parts[0]);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -427,6 +507,163 @@ mod tests {
         save(&config, Some(&path)).unwrap();
         let loaded = load(Some(&path)).unwrap();
         assert_eq!(loaded.default_base_fs, "ubuntu");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_default_distros_empty() {
+        let config = Config::default();
+        assert!(config.distros.is_empty());
+    }
+
+    #[test]
+    fn test_save_and_load_distros() {
+        let path = temp_config_path();
+        let mut distros = HashMap::new();
+        distros.insert(
+            "debian".to_string(),
+            DistroCommands {
+                import_prehook: Some(vec!["echo hello".to_string()]),
+                export_prehook: None,
+            },
+        );
+        let config = Config {
+            distros,
+            ..Config::default()
+        };
+        save(&config, Some(&path)).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+        let debian = loaded.distros.get("debian").unwrap();
+        assert_eq!(debian.import_prehook, Some(vec!["echo hello".to_string()]));
+        assert_eq!(debian.export_prehook, None);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_distros_not_serialized_when_empty() {
+        let path = temp_config_path();
+        let config = Config::default();
+        save(&config, Some(&path)).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(
+            !contents.contains("[distros"),
+            "empty distros should not appear in config file"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_config_with_distros_section() {
+        let path = temp_config_path();
+        fs::write(
+            &path,
+            r#"
+[distros.fedora]
+import_prehook = ["dnf install -y custom-pkg"]
+export_prehook = ["dnf install -y custom-udev"]
+"#,
+        )
+        .unwrap();
+        let config = load(Some(&path)).unwrap();
+        let fedora = config.distros.get("fedora").unwrap();
+        assert_eq!(
+            fedora.import_prehook,
+            Some(vec!["dnf install -y custom-pkg".to_string()])
+        );
+        assert_eq!(
+            fedora.export_prehook,
+            Some(vec!["dnf install -y custom-udev".to_string()])
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_distros_roundtrip_empty_vec() {
+        let path = temp_config_path();
+        let mut distros = HashMap::new();
+        distros.insert(
+            "arch".to_string(),
+            DistroCommands {
+                import_prehook: Some(vec![]),
+                export_prehook: None,
+            },
+        );
+        let config = Config {
+            distros,
+            ..Config::default()
+        };
+        save(&config, Some(&path)).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+        let arch = loaded.distros.get("arch").unwrap();
+        assert_eq!(arch.import_prehook, Some(vec![]));
+        assert_eq!(arch.export_prehook, None);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_save_key_only_writes_target_key() {
+        let path = temp_config_path();
+        // Start with a file that has just one key.
+        fs::write(&path, "boot_timeout = 30\n").unwrap();
+
+        // Set a different key; boot_timeout should remain untouched.
+        save_key(Some(&path), "interactive", Some(toml::Value::Boolean(false))).unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("boot_timeout = 30"), "got: {contents}");
+        assert!(contents.contains("interactive = false"), "got: {contents}");
+        // Should NOT contain default keys that weren't in the original file.
+        assert!(
+            !contents.contains("datadir"),
+            "save_key should not add default keys: {contents}"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_save_key_creates_file() {
+        let path = temp_config_path();
+        let _ = fs::remove_file(&path);
+
+        save_key(
+            Some(&path),
+            "docker_user",
+            Some(toml::Value::String("me".into())),
+        )
+        .unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.trim(), r#"docker_user = "me""#);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_save_key_nested_set_and_remove() {
+        let path = temp_config_path();
+        let _ = fs::remove_file(&path);
+
+        // Set a nested distros key.
+        save_key(
+            Some(&path),
+            "distros.debian.import_prehook",
+            Some(toml::Value::Array(vec![toml::Value::String(
+                "echo hi".into(),
+            )])),
+        )
+        .unwrap();
+
+        let loaded = load(Some(&path)).unwrap();
+        let debian = loaded.distros.get("debian").unwrap();
+        assert_eq!(debian.import_prehook, Some(vec!["echo hi".to_string()]));
+
+        // Remove it; the distros section should disappear.
+        save_key(Some(&path), "distros.debian.import_prehook", None).unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(
+            !contents.contains("distros"),
+            "empty distros table should be cleaned up: {contents}"
+        );
         let _ = fs::remove_file(&path);
     }
 }

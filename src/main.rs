@@ -937,6 +937,61 @@ fn parse_security(args: SecurityArgs, cfg: &config::Config) -> Result<(SecurityC
 }
 
 /// Extract Docker Hub credentials from config, if both user and token are set.
+/// Display distro prehook configuration, showing effective commands
+/// (overrides or built-in defaults) for all configurable families.
+fn display_distro_hooks(cfg: &config::Config) {
+    use sdme::export::builtin_export_prehook;
+    use sdme::import::builtin_import_prehook;
+    use sdme::rootfs::DistroFamily;
+
+    let families = [
+        DistroFamily::Debian,
+        DistroFamily::Fedora,
+        DistroFamily::Arch,
+        DistroFamily::Suse,
+    ];
+
+    for family in &families {
+        let key = family.config_key();
+        let overrides = cfg.distros.get(key);
+
+        let (import_cmds, import_custom) = match overrides.and_then(|d| d.import_prehook.as_ref()) {
+            Some(cmds) => (cmds.clone(), true),
+            None => (builtin_import_prehook(family), false),
+        };
+        let (export_cmds, export_custom) = match overrides.and_then(|d| d.export_prehook.as_ref()) {
+            Some(cmds) => (cmds.clone(), true),
+            None => (builtin_export_prehook(family), false),
+        };
+
+        println!("\n[distros.{key}]");
+        let tag = if import_custom { " (custom)" } else { "" };
+        print!("import_prehook{tag} = ");
+        print_hook_commands(&import_cmds);
+        let tag = if export_custom { " (custom)" } else { "" };
+        print!("export_prehook{tag} = ");
+        print_hook_commands(&export_cmds);
+    }
+}
+
+/// Print a command list in a human-readable multi-line format.
+fn print_hook_commands(cmds: &[String]) {
+    if cmds.is_empty() {
+        println!("[]");
+        return;
+    }
+    if cmds.len() == 1 {
+        println!("{:?}", cmds);
+        return;
+    }
+    println!("[");
+    for (i, cmd) in cmds.iter().enumerate() {
+        let comma = if i + 1 < cmds.len() { "," } else { "" };
+        println!("  {cmd:?}{comma}");
+    }
+    println!("]");
+}
+
 fn docker_credentials(cfg: &config::Config) -> Option<(String, String)> {
     if cfg.docker_user.is_empty() || cfg.docker_token.is_empty() {
         return None;
@@ -1281,21 +1336,31 @@ fn main() -> Result<()> {
         Command::Config(cmd) => match cmd {
             ConfigCommand::Get => {
                 cfg.display();
+                display_distro_hooks(&cfg);
             }
             ConfigCommand::Set { key, value } => {
-                let mut cfg = cfg;
+                // Validate the value and produce the TOML representation.
+                // The key is written surgically without touching other config keys.
+                use toml::Value as V;
+                let toml_key;
+                let toml_val: Option<V>;
+
                 match key.as_str() {
-                    "interactive" => match value.as_str() {
-                        "yes" => cfg.interactive = true,
-                        "no" => cfg.interactive = false,
-                        _ => bail!("invalid value for interactive: {value} (expected yes or no)"),
-                    },
+                    "interactive" => {
+                        toml_key = key.clone();
+                        toml_val = Some(V::Boolean(match value.as_str() {
+                            "yes" => true,
+                            "no" => false,
+                            _ => bail!("invalid value for interactive: {value} (expected yes or no)"),
+                        }));
+                    }
                     "datadir" => {
                         let path = PathBuf::from(&value);
                         if !path.is_absolute() {
                             bail!("datadir must be an absolute path: {value}");
                         }
-                        cfg.datadir = path;
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(value));
                     }
                     "boot_timeout" => {
                         let secs: u64 = value.parse().map_err(|_| {
@@ -1304,27 +1369,32 @@ fn main() -> Result<()> {
                         if secs == 0 {
                             bail!("boot_timeout must be greater than 0");
                         }
-                        cfg.boot_timeout = secs;
+                        toml_key = key.clone();
+                        toml_val = Some(V::Integer(secs as i64));
                     }
-                    "join_as_sudo_user" => match value.as_str() {
-                        "yes" => cfg.join_as_sudo_user = true,
-                        "no" => cfg.join_as_sudo_user = false,
-                        _ => bail!(
-                            "invalid value for join_as_sudo_user: {value} (expected yes or no)"
-                        ),
-                    },
+                    "join_as_sudo_user" => {
+                        toml_key = key.clone();
+                        toml_val = Some(V::Boolean(match value.as_str() {
+                            "yes" => true,
+                            "no" => false,
+                            _ => bail!(
+                                "invalid value for join_as_sudo_user: {value} (expected yes or no)"
+                            ),
+                        }));
+                    }
                     "host_rootfs_opaque_dirs" => {
-                        if value.is_empty() {
-                            cfg.host_rootfs_opaque_dirs = String::new();
+                        let normalized = if value.is_empty() {
+                            String::new()
                         } else {
                             let dirs = parse_opaque_dirs_config(&value);
-                            let normalized = containers::validate_opaque_dirs(&dirs)?;
-                            cfg.host_rootfs_opaque_dirs = normalized.join(",");
-                        }
+                            containers::validate_opaque_dirs(&dirs)?.join(",")
+                        };
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(normalized));
                     }
                     "hardened_drop_caps" => {
-                        if value.is_empty() {
-                            cfg.hardened_drop_caps = String::new();
+                        let normalized = if value.is_empty() {
+                            String::new()
                         } else {
                             let caps: Vec<String> = value
                                 .split(',')
@@ -1333,14 +1403,17 @@ fn main() -> Result<()> {
                             for cap in &caps {
                                 security::validate_capability(cap)?;
                             }
-                            cfg.hardened_drop_caps = caps.join(",");
-                        }
+                            caps.join(",")
+                        };
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(normalized));
                     }
                     "default_base_fs" => {
                         if !value.is_empty() {
                             sdme::validate_name(&value)?;
                         }
-                        cfg.default_base_fs = value;
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(value));
                     }
                     "default_export_fs" => {
                         match value.as_str() {
@@ -1349,7 +1422,8 @@ fn main() -> Result<()> {
                                 bail!("invalid default_export_fs '{other}': expected ext4 or btrfs")
                             }
                         }
-                        cfg.default_export_fs = value;
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(value));
                     }
                     "tasks_max" => {
                         let v: u32 = value
@@ -1358,13 +1432,16 @@ fn main() -> Result<()> {
                         if v == 0 {
                             bail!("tasks_max must be greater than 0");
                         }
-                        cfg.tasks_max = v;
+                        toml_key = key.clone();
+                        toml_val = Some(V::Integer(v as i64));
                     }
                     "docker_user" => {
-                        cfg.docker_user = value;
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(value));
                     }
                     "docker_token" => {
-                        cfg.docker_token = value;
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(value));
                     }
                     "oci_cache_dir" => {
                         if !value.is_empty() {
@@ -1373,35 +1450,66 @@ fn main() -> Result<()> {
                                 bail!("oci_cache_dir must be an absolute path: {value}");
                             }
                         }
-                        cfg.oci_cache_dir = value;
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(value));
                     }
                     "oci_cache_max_size" => {
                         sdme::parse_size(&value)
                             .with_context(|| format!("invalid oci_cache_max_size: {value}"))?;
-                        cfg.oci_cache_max_size = value;
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(value));
                     }
                     "http_timeout" => {
                         let v: u64 = value
                             .parse()
                             .context("http_timeout must be a number of seconds")?;
-                        cfg.http_timeout = v;
+                        toml_key = key.clone();
+                        toml_val = Some(V::Integer(v as i64));
                     }
                     "http_body_timeout" => {
                         let v: u64 = value
                             .parse()
                             .context("http_body_timeout must be a number of seconds")?;
-                        cfg.http_body_timeout = v;
+                        toml_key = key.clone();
+                        toml_val = Some(V::Integer(v as i64));
                     }
                     "max_download_size" => {
                         if value != "0" {
                             sdme::parse_size(&value)
                                 .with_context(|| format!("invalid max_download_size: {value}"))?;
                         }
-                        cfg.max_download_size = value;
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(value));
+                    }
+                    key if key.starts_with("distros.") => {
+                        let parts: Vec<&str> = key.splitn(3, '.').collect();
+                        if parts.len() != 3 {
+                            bail!(
+                                "expected format: distros.<family>.<hook> \
+                                 (e.g., distros.debian.import_prehook)"
+                            );
+                        }
+                        let hook = parts[2];
+                        if hook != "import_prehook" && hook != "export_prehook" {
+                            bail!(
+                                "unknown hook '{hook}': expected import_prehook or export_prehook"
+                            );
+                        }
+                        toml_key = key.to_string();
+                        toml_val = if value.is_empty() {
+                            None // remove the key
+                        } else if value.starts_with('[') {
+                            let cmds: Vec<String> = serde_json::from_str(&value)
+                                .context("expected JSON array of command strings")?;
+                            Some(V::Array(cmds.into_iter().map(V::String).collect()))
+                        } else {
+                            Some(V::Array(vec![V::String(value)]))
+                        };
                     }
                     _ => bail!("unknown config key: {key}"),
                 }
-                config::save(&cfg, config_path)?;
+
+                config::save_key(config_path, &toml_key, toml_val)?;
             }
             // Handled before root check above.
             ConfigCommand::AppArmorProfile => unreachable!(),
@@ -2247,6 +2355,7 @@ fn main() -> Result<()> {
                         nix_config: nix_config_path,
                         nixpkgs_channel: &cfg.nixpkgs_channel,
                         auto_gc: cfg.auto_fs_gc,
+                        distros: &cfg.distros,
                     },
                 )?;
                 println!("{name}");
@@ -2395,6 +2504,7 @@ fn main() -> Result<()> {
                         ssh_key,
                         install_packages,
                         interactive,
+                        distros: cfg.distros.clone(),
                     })
                 } else {
                     None

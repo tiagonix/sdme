@@ -75,7 +75,7 @@ pub(crate) fn detect_distro(rootfs: &Path) -> String {
 
 /// Distro family classification for package manager selection.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum DistroFamily {
+pub enum DistroFamily {
     /// Debian, Ubuntu, and derivatives (uses apt-get).
     Debian,
     /// Fedora, CentOS, AlmaLinux, RHEL, Rocky (uses dnf).
@@ -90,6 +90,21 @@ pub(crate) enum DistroFamily {
     Nix,
     /// Unrecognized distribution.
     Unknown,
+}
+
+impl DistroFamily {
+    /// Return the config key used to look up per-distro hook overrides.
+    pub fn config_key(&self) -> &'static str {
+        match self {
+            DistroFamily::Debian => "debian",
+            DistroFamily::Fedora => "fedora",
+            DistroFamily::Arch => "arch",
+            DistroFamily::Suse => "suse",
+            DistroFamily::NixOS => "nixos",
+            DistroFamily::Nix => "nix",
+            DistroFamily::Unknown => "unknown",
+        }
+    }
 }
 
 /// Detect the distro family from `os-release` inside a rootfs.
@@ -320,6 +335,7 @@ mod tests {
                 nix_config: None,
                 nixpkgs_channel: "",
                 auto_gc: true,
+                distros: &std::collections::HashMap::new(),
             },
         )
     }

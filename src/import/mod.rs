@@ -20,6 +20,9 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use std::collections::HashMap;
+
+use crate::config::DistroCommands;
 use crate::rootfs::DistroFamily;
 use crate::{check_interrupted, validate_name, State};
 
@@ -100,6 +103,8 @@ pub struct ImportOptions<'a> {
     pub nixpkgs_channel: &'a str,
     /// Automatically clean up stale transactions before importing.
     pub auto_gc: bool,
+    /// Per-distro chroot command overrides from config.
+    pub distros: &'a HashMap<String, DistroCommands>,
 }
 
 // --- Source detection ---
@@ -910,46 +915,73 @@ let
 in nixos.config.system.build.toplevel
 "#;
 
-/// Return the shell commands that would be run to install systemd packages.
-fn install_commands(family: &DistroFamily, nixpkgs_channel: &str) -> Vec<String> {
+/// Built-in import prehook commands for each distro family.
+///
+/// These install systemd, dbus, pam/login, set timezone, and clean cache.
+/// Package managers are idempotent, so re-running when some packages are
+/// already present is safe.
+pub fn builtin_import_prehook(family: &DistroFamily) -> Vec<String> {
     let s = APT_NO_SANDBOX;
     match family {
         DistroFamily::Debian => vec![
             format!("apt-get {s} update"),
             format!("DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get {s} -y install tzdata"),
-            format!(
-                "apt-get {s} install -y dbus systemd; \
-                 apt-get autoremove -y -f && apt-get clean && \
-                 rm -rf /var/lib/apt/lists/*"
-            ),
+            format!("apt-get {s} install -y dbus systemd login"),
+            "apt-get autoremove -y -f".into(),
+            "apt-get clean".into(),
+            "rm -rf /var/lib/apt/lists/*".into(),
         ],
-        DistroFamily::Fedora => {
-            vec!["dnf install -y systemd dbus util-linux pam; dnf clean all".into()]
-        }
-        DistroFamily::Arch => {
-            vec!["pacman -Sy --noconfirm systemd dbus && pacman -Scc --noconfirm".into()]
-        }
-        DistroFamily::Suse => {
-            vec!["zypper --non-interactive install systemd dbus-1 && zypper clean --all".into()]
-        }
-        DistroFamily::Nix => {
-            let channel = if nixpkgs_channel.is_empty() {
-                "nixos-unstable"
-            } else {
-                nixpkgs_channel
-            };
-            vec![format!(
-                "export PATH=/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH && \
-                 export NIX_REMOTE= && \
-                 export NIX_PATH='nixpkgs=https://github.com/NixOS/nixpkgs/archive/refs/heads/{channel}.tar.gz' && \
-                 TOPLEVEL=$(nix-build /tmp/sdme-nixos.nix --no-out-link --option sandbox false --option filter-syscalls false) && \
-                 mkdir -p /sbin && \
-                 ln -sf \"$TOPLEVEL/init\" /sbin/init && \
-                 nix-store -qR \"$TOPLEVEL\" > /tmp/sdme-nix-closure.txt"
-            )]
-        }
+        DistroFamily::Fedora => vec![
+            "dnf install -y systemd dbus util-linux pam".into(),
+            "dnf clean all".into(),
+        ],
+        DistroFamily::Arch => vec![
+            "pacman -Sy --noconfirm systemd dbus util-linux pam".into(),
+            "pacman -Scc --noconfirm".into(),
+        ],
+        DistroFamily::Suse => vec![
+            "zypper --non-interactive install systemd dbus-1 util-linux pam".into(),
+            "zypper clean --all".into(),
+        ],
         _ => vec![],
     }
+}
+
+/// Built-in Nix import commands (not configurable via hooks).
+fn builtin_nix_commands(nixpkgs_channel: &str) -> Vec<String> {
+    let channel = if nixpkgs_channel.is_empty() {
+        "nixos-unstable"
+    } else {
+        nixpkgs_channel
+    };
+    vec![format!(
+        "export PATH=/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH && \
+         export NIX_REMOTE= && \
+         export NIX_PATH='nixpkgs=https://github.com/NixOS/nixpkgs/archive/refs/heads/{channel}.tar.gz' && \
+         TOPLEVEL=$(nix-build /tmp/sdme-nixos.nix --no-out-link --option sandbox false --option filter-syscalls false) && \
+         mkdir -p /sbin && \
+         ln -sf \"$TOPLEVEL/init\" /sbin/init && \
+         nix-store -qR \"$TOPLEVEL\" > /tmp/sdme-nix-closure.txt"
+    )]
+}
+
+/// Resolve import prehook commands: config override → built-in default.
+///
+/// Nix stays hardcoded (nix-build flow, not configurable via hooks).
+fn resolve_import_prehook(
+    family: &DistroFamily,
+    distros: &HashMap<String, DistroCommands>,
+    nixpkgs_channel: &str,
+) -> Vec<String> {
+    if *family == DistroFamily::Nix {
+        return builtin_nix_commands(nixpkgs_channel);
+    }
+    if let Some(cfg) = distros.get(family.config_key()) {
+        if let Some(cmds) = &cfg.import_prehook {
+            return cmds.clone();
+        }
+    }
+    builtin_import_prehook(family)
 }
 
 /// Install systemd packages into a rootfs via chroot.
@@ -958,9 +990,10 @@ fn install_systemd_packages(
     family: &DistroFamily,
     nixpkgs_channel: &str,
     nix_config: Option<&Path>,
+    distros: &HashMap<String, DistroCommands>,
     verbose: bool,
 ) -> Result<()> {
-    let commands = install_commands(family, nixpkgs_channel);
+    let commands = resolve_import_prehook(family, distros, nixpkgs_channel);
     if commands.is_empty() {
         bail!(
             "no package installation commands available for distro family {:?}",
@@ -1133,9 +1166,15 @@ fn rebuild_nix_rootfs(rootfs: &Path, verbose: bool) -> Result<()> {
 ///   shell (join/exec).
 ///
 /// - Installs missing packages required by machinectl shell: some minimal OCI
-///   images lack /etc/pam.d/login (needed for PAM session setup). For RHEL-family
-///   distros this means installing `util-linux` and `pam`.
-fn patch_rootfs_services(rootfs: &Path, family: &DistroFamily, verbose: bool) -> Result<()> {
+///   images lack /etc/pam.d/login (needed for PAM session setup). Runs the
+///   import prehook (which includes pam/login packages) since package managers
+///   are idempotent.
+fn patch_rootfs_services(
+    rootfs: &Path,
+    family: &DistroFamily,
+    distros: &HashMap<String, DistroCommands>,
+    verbose: bool,
+) -> Result<()> {
     let unit_dir = rootfs.join("etc/systemd/system");
     fs::create_dir_all(&unit_dir)
         .with_context(|| format!("failed to create {}", unit_dir.display()))?;
@@ -1164,9 +1203,11 @@ fn patch_rootfs_services(rootfs: &Path, family: &DistroFamily, verbose: bool) ->
     }
 
     // Ensure /etc/pam.d/login exists (required by machinectl shell).
+    // Run the import prehook which now includes pam/login packages.
+    // Package managers are idempotent so re-installing is safe.
     let pam_login = rootfs.join("etc/pam.d/login");
     if !pam_login.exists() {
-        let commands = machinectl_fix_commands(family);
+        let commands = resolve_import_prehook(family, distros, "");
         if !commands.is_empty() {
             eprintln!("installing packages for machinectl shell support");
             let mut chroot_guard = ChrootGuard::setup(rootfs, verbose)?;
@@ -1184,30 +1225,6 @@ fn patch_rootfs_services(rootfs: &Path, family: &DistroFamily, verbose: bool) ->
     Ok(())
 }
 
-/// Commands to install packages needed by machinectl shell.
-///
-/// These are only needed when the rootfs has systemd but is missing
-/// /etc/pam.d/login (typical of minimal RHEL-family container images).
-fn machinectl_fix_commands(family: &DistroFamily) -> Vec<String> {
-    let s = APT_NO_SANDBOX;
-    match family {
-        DistroFamily::Fedora => {
-            vec!["dnf install -y util-linux pam; dnf clean all".into()]
-        }
-        DistroFamily::Debian => vec![format!(
-            "apt-get {s} update && apt-get {s} install -y login && \
-             apt-get clean && rm -rf /var/lib/apt/lists/*"
-        )],
-        DistroFamily::Arch => {
-            vec!["pacman -Sy --noconfirm util-linux pam && pacman -Scc --noconfirm".into()]
-        }
-        DistroFamily::Suse => {
-            vec!["zypper --non-interactive install util-linux pam && zypper clean --all".into()]
-        }
-        _ => vec![],
-    }
-}
-
 /// Prompt the user interactively to install systemd packages.
 ///
 /// Returns `Ok(true)` if the user accepts, `Ok(false)` if declined,
@@ -1217,8 +1234,9 @@ fn prompt_install_systemd(
     family: &DistroFamily,
     distro_name: &str,
     nixpkgs_channel: &str,
+    distros: &HashMap<String, DistroCommands>,
 ) -> Result<bool> {
-    let commands = install_commands(family, nixpkgs_channel);
+    let commands = resolve_import_prehook(family, distros, nixpkgs_channel);
     let missing = presence.missing();
     eprintln!("warning: {missing} not found in rootfs (detected: {distro_name})");
     eprintln!("Install packages via chroot? The following commands will run:");
@@ -1265,6 +1283,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         nix_config,
         nixpkgs_channel,
         auto_gc,
+        distros,
     } = *opts;
 
     validate_name(name)?;
@@ -1462,6 +1481,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                         &family,
                         nixpkgs_channel,
                         nix_config,
+                        distros,
                         verbose,
                     )?;
                 }
@@ -1487,12 +1507,14 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                             &family,
                             &distro_name,
                             nixpkgs_channel,
+                            distros,
                         )? {
                             install_systemd_packages(
                                 &staging_dir,
                                 &family,
                                 nixpkgs_channel,
                                 nix_config,
+                                distros,
                                 verbose,
                             )?;
                         } else {
@@ -1544,7 +1566,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
     // Skip for NixOS (Nix-built) rootfs: NixOS manages /etc via activation
     // and the config already disables resolved.
     if !skip_systemd_check && presence.has_systemd && family != DistroFamily::Nix {
-        if let Err(e) = patch_rootfs_services(&staging_dir, &family, verbose) {
+        if let Err(e) = patch_rootfs_services(&staging_dir, &family, distros, verbose) {
             eprintln!("warning: rootfs service patching failed: {e}");
         }
     }
@@ -1667,6 +1689,7 @@ pub(crate) mod tests {
                 nix_config: None,
                 nixpkgs_channel: "",
                 auto_gc: true,
+                distros: &HashMap::new(),
             },
         )
     }
@@ -2598,6 +2621,7 @@ pub(crate) mod tests {
                 nix_config: None,
                 nixpkgs_channel: "",
                 auto_gc: true,
+                distros: &HashMap::new(),
             },
         )
         .unwrap();

@@ -10,6 +10,9 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
+use std::collections::HashMap;
+
+use crate::config::DistroCommands;
 use crate::import::InstallPackages;
 use crate::rootfs::DistroFamily;
 use crate::{check_interrupted, containers, copy, system_check, systemd, validate_name, State};
@@ -31,6 +34,8 @@ pub struct VmOptions {
     pub install_packages: InstallPackages,
     /// Allow interactive prompts during package installation.
     pub interactive: bool,
+    /// Per-distro chroot command overrides from config.
+    pub distros: HashMap<String, DistroCommands>,
 }
 
 /// Filesystem type for raw disk image export.
@@ -1061,18 +1066,45 @@ fn detect_udev_presence(mount: &Path) -> bool {
         || mount.join("usr/bin/udevd").exists()
 }
 
-/// Return the chroot commands to install udev for the given distro family.
-fn udev_install_commands(family: &DistroFamily) -> Vec<String> {
+/// Built-in export prehook commands for each distro family.
+///
+/// These install udev and any other VM boot dependencies.
+pub fn builtin_export_prehook(family: &DistroFamily) -> Vec<String> {
     use crate::import::APT_NO_SANDBOX;
     match *family {
-        DistroFamily::Debian => vec![format!(
-            "apt-get update -qq {APT_NO_SANDBOX} && apt-get install -y {APT_NO_SANDBOX} udev"
-        )],
-        DistroFamily::Fedora => vec!["dnf install -y systemd-udevd".to_string()],
-        DistroFamily::Arch => vec!["pacman -Sy --noconfirm systemd".to_string()],
-        DistroFamily::Suse => vec!["zypper --non-interactive install udev".to_string()],
+        DistroFamily::Debian => vec![
+            format!("apt-get update -qq {APT_NO_SANDBOX}"),
+            format!("apt-get install -y {APT_NO_SANDBOX} udev"),
+            "apt-get clean".into(),
+            "rm -rf /var/lib/apt/lists/*".into(),
+        ],
+        DistroFamily::Fedora => vec![
+            "dnf install -y systemd-udevd".into(),
+            "dnf clean all".into(),
+        ],
+        DistroFamily::Arch => vec![
+            "pacman -Sy --noconfirm systemd".into(),
+            "pacman -Scc --noconfirm".into(),
+        ],
+        DistroFamily::Suse => vec![
+            "zypper --non-interactive install udev".into(),
+            "zypper clean --all".into(),
+        ],
         _ => vec![],
     }
+}
+
+/// Resolve export prehook commands: config override → built-in default.
+fn resolve_export_prehook(
+    family: &DistroFamily,
+    distros: &HashMap<String, DistroCommands>,
+) -> Vec<String> {
+    if let Some(cfg) = distros.get(family.config_key()) {
+        if let Some(cmds) = &cfg.export_prehook {
+            return cmds.clone();
+        }
+    }
+    builtin_export_prehook(family)
 }
 
 /// Install udev into the rootfs if it is missing, respecting the
@@ -1112,7 +1144,7 @@ fn install_udev_if_needed(mount: &Path, opts: &VmOptions, verbose: bool) -> Resu
     }
 
     let family = crate::rootfs::detect_distro_family(mount);
-    let commands = udev_install_commands(&family);
+    let commands = resolve_export_prehook(&family, &opts.distros);
     if commands.is_empty() {
         eprintln!(
             "warning: udev not found but no install commands for distro family {:?}; skipping",
@@ -1860,33 +1892,37 @@ mod tests {
         assert!(!detect_udev_presence(tmp.path()));
     }
 
-    // --- udev_install_commands tests ---
+    // --- builtin_export_prehook tests ---
 
     #[test]
-    fn test_udev_install_commands_per_distro() {
+    fn test_builtin_export_prehook_per_distro() {
         use crate::rootfs::DistroFamily;
 
-        let cmds = udev_install_commands(&DistroFamily::Debian);
-        assert_eq!(cmds.len(), 1);
-        assert!(cmds[0].contains("apt-get"), "got: {}", cmds[0]);
-        assert!(cmds[0].contains("udev"), "got: {}", cmds[0]);
+        let cmds = builtin_export_prehook(&DistroFamily::Debian);
+        assert!(cmds.len() >= 2);
+        assert!(cmds[0].contains("apt-get") && cmds[0].contains("update"), "got: {}", cmds[0]);
+        assert!(cmds[1].contains("udev"), "got: {}", cmds[1]);
+        assert!(cmds.iter().any(|c| c.contains("clean")), "missing cleanup");
 
-        let cmds = udev_install_commands(&DistroFamily::Fedora);
-        assert_eq!(cmds.len(), 1);
+        let cmds = builtin_export_prehook(&DistroFamily::Fedora);
+        assert!(cmds.len() >= 2);
         assert!(cmds[0].contains("dnf"), "got: {}", cmds[0]);
         assert!(cmds[0].contains("systemd-udevd"), "got: {}", cmds[0]);
+        assert!(cmds.iter().any(|c| c.contains("clean")), "missing cleanup");
 
-        let cmds = udev_install_commands(&DistroFamily::Arch);
-        assert_eq!(cmds.len(), 1);
+        let cmds = builtin_export_prehook(&DistroFamily::Arch);
+        assert!(cmds.len() >= 2);
         assert!(cmds[0].contains("pacman"), "got: {}", cmds[0]);
+        assert!(cmds.iter().any(|c| c.contains("-Scc")), "missing cleanup");
 
-        let cmds = udev_install_commands(&DistroFamily::Suse);
-        assert_eq!(cmds.len(), 1);
+        let cmds = builtin_export_prehook(&DistroFamily::Suse);
+        assert!(cmds.len() >= 2);
         assert!(cmds[0].contains("zypper"), "got: {}", cmds[0]);
+        assert!(cmds.iter().any(|c| c.contains("clean")), "missing cleanup");
 
-        assert!(udev_install_commands(&DistroFamily::NixOS).is_empty());
-        assert!(udev_install_commands(&DistroFamily::Nix).is_empty());
-        assert!(udev_install_commands(&DistroFamily::Unknown).is_empty());
+        assert!(builtin_export_prehook(&DistroFamily::NixOS).is_empty());
+        assert!(builtin_export_prehook(&DistroFamily::Nix).is_empty());
+        assert!(builtin_export_prehook(&DistroFamily::Unknown).is_empty());
     }
 
     // --- sha512_crypt tests ---
