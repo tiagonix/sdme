@@ -130,21 +130,6 @@ impl Txn {
         Ok(())
     }
 
-    /// Explicitly abandon the transaction by removing the staging directory.
-    ///
-    /// Use this for non-interrupt errors where immediate cleanup is preferred
-    /// (e.g. validation failures). For interrupt cases, just let the `Txn`
-    /// drop — the staging dir stays for gc.
-    #[allow(dead_code)]
-    pub fn abandon(&self) {
-        if !self.finished && self.staging.exists() {
-            if self.verbose {
-                eprintln!("abandoning staging dir: {}", self.staging.display());
-            }
-            let _ = crate::copy::safe_remove_dir(&self.staging);
-        }
-    }
-
     /// Mark the transaction as complete without renaming.
     ///
     /// Use this for delete operations where the final step is removal of
@@ -159,9 +144,6 @@ impl Drop for Txn {
         // Intentionally no-op: leave staging behind for gc.
     }
 }
-
-// Old staging patterns recognized during cleanup.
-const OLD_STAGING_SUFFIXES: &[&str] = &[".importing", ".removing", ".download"];
 
 /// Return true if a PID is still running (has a `/proc/{pid}` entry).
 fn pid_alive(pid: u32) -> bool {
@@ -178,20 +160,12 @@ fn extract_txn_pid(file_name: &str) -> Option<u32> {
 
 /// Return true if an entry name looks like a stale transaction for `name`.
 ///
-/// Matches both new-style `.{name}.*-txn-{pid}` (where the PID is dead)
-/// and old-style `.{name}.importing` / `.{name}.removing` / `.{name}.download`.
+/// Matches `.{name}.*-txn-{pid}` where the PID is no longer running.
 fn is_stale_entry(entry_name: &str, name: &str) -> bool {
-    // New-style: .{name}.{kind}-txn-{pid}
-    let new_prefix = format!(".{name}.");
-    if entry_name.starts_with(&new_prefix) {
+    let prefix = format!(".{name}.");
+    if entry_name.starts_with(&prefix) {
         if let Some(pid) = extract_txn_pid(entry_name) {
             return !pid_alive(pid);
-        }
-    }
-    // Old-style patterns.
-    for suffix in OLD_STAGING_SUFFIXES {
-        if entry_name == format!(".{name}{suffix}") {
-            return true;
         }
     }
     false
@@ -199,8 +173,7 @@ fn is_stale_entry(entry_name: &str, name: &str) -> bool {
 
 /// Scan a directory for stale transaction artifacts for `name` and remove them.
 ///
-/// A transaction is stale if its creator PID is no longer running, or if it
-/// uses an old naming convention (`.importing`, `.removing`, `.download`).
+/// A transaction is stale if its creator PID is no longer running.
 pub(crate) fn cleanup_stale_txns(dir: &Path, name: &str, verbose: bool) -> Result<()> {
     if !dir.is_dir() {
         return Ok(());
@@ -229,7 +202,7 @@ pub(crate) fn cleanup_stale_txns(dir: &Path, name: &str, verbose: bool) -> Resul
 /// Scan a directory for ALL stale transaction artifacts (for `sdme gc`).
 ///
 /// Returns paths to stale entries. An entry is stale if its creator PID is
-/// no longer running, or if it uses an old naming convention.
+/// no longer running.
 pub(crate) fn find_all_stale_txns(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut stale = Vec::new();
     if !dir.is_dir() {
@@ -244,18 +217,9 @@ pub(crate) fn find_all_stale_txns(dir: &Path) -> Result<Vec<PathBuf>> {
         if !file_name_str.starts_with('.') {
             continue;
         }
-        // New-style: .*-txn-{pid} where PID is dead.
         if let Some(pid) = extract_txn_pid(&file_name_str) {
             if !pid_alive(pid) {
                 stale.push(entry.path());
-            }
-            continue;
-        }
-        // Old-style: .{name}.{suffix} where suffix is a known old pattern.
-        for suffix in OLD_STAGING_SUFFIXES {
-            if file_name_str.ends_with(suffix) {
-                stale.push(entry.path());
-                break;
             }
         }
     }
@@ -264,8 +228,8 @@ pub(crate) fn find_all_stale_txns(dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// Clean up all stale transaction artifacts under a directory.
 ///
-/// Scans for dead-PID transactions and old-style staging entries,
-/// removes each one, and returns the count of entries cleaned.
+/// Scans for dead-PID transactions, removes each one, and returns the
+/// count of entries cleaned.
 pub fn gc(dir: &Path, verbose: bool) -> Result<usize> {
     let stale = find_all_stale_txns(dir)?;
     let count = stale.len();
@@ -362,17 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn test_txn_abandon_removes_staging() {
-        let dir = setup_dir("abandon");
-        let txn = Txn::new(&dir, "test", TxnKind::Export, false, false);
-        txn.prepare().unwrap();
-        assert!(txn.path().is_dir());
-        txn.abandon();
-        assert!(!txn.path().exists());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn test_txn_done_marks_finished() {
         let dir = setup_dir("done");
         let mut txn = Txn::new(&dir, "test", TxnKind::Remove, false, false);
@@ -413,27 +366,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_old_patterns() {
-        let dir = setup_dir("old-patterns");
-        let old_importing = dir.join(".myfs.importing");
-        let old_removing = dir.join(".myfs.removing");
-        let old_download = dir.join(".myfs.download");
-        let unrelated = dir.join(".other.importing");
-        fs::create_dir_all(&old_importing).unwrap();
-        fs::create_dir_all(&old_removing).unwrap();
-        fs::write(&old_download, "data").unwrap();
-        fs::create_dir_all(&unrelated).unwrap();
-
-        cleanup_stale_txns(&dir, "myfs", false).unwrap();
-
-        assert!(!old_importing.exists());
-        assert!(!old_removing.exists());
-        assert!(!old_download.exists());
-        assert!(unrelated.exists(), "unrelated entries should remain");
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn test_find_all_stale_txns() {
         let dir = setup_dir("find-all");
         // Dead PID transaction.
@@ -442,9 +374,6 @@ mod tests {
         // Live PID transaction (PID 1 = init).
         let live = dir.join(".bar.build-txn-1");
         fs::create_dir_all(&live).unwrap();
-        // Old-style pattern.
-        let old = dir.join(".baz.importing");
-        fs::create_dir_all(&old).unwrap();
         // Non-hidden entry (not a transaction).
         let normal = dir.join("ubuntu");
         fs::create_dir_all(&normal).unwrap();
@@ -453,7 +382,6 @@ mod tests {
 
         assert!(stale.contains(&dead));
         assert!(!stale.contains(&live));
-        assert!(stale.contains(&old));
         assert!(!stale.contains(&normal));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -469,14 +397,14 @@ mod tests {
     #[test]
     fn test_prepare_with_auto_gc() {
         let dir = setup_dir("auto-gc");
-        // Create a stale old-style entry.
-        let old = dir.join(".myfs.importing");
-        fs::create_dir_all(&old).unwrap();
+        // Create a stale dead-PID entry.
+        let stale = dir.join(".myfs.import-txn-999999999");
+        fs::create_dir_all(&stale).unwrap();
 
         let txn = Txn::new(&dir, "myfs", TxnKind::Import, true, false);
         txn.prepare().unwrap();
 
-        assert!(!old.exists(), "auto_gc should clean old staging");
+        assert!(!stale.exists(), "auto_gc should clean stale staging");
         assert!(txn.path().is_dir());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -484,14 +412,17 @@ mod tests {
     #[test]
     fn test_prepare_without_auto_gc() {
         let dir = setup_dir("no-auto-gc");
-        // Create a stale old-style entry.
-        let old = dir.join(".myfs.importing");
-        fs::create_dir_all(&old).unwrap();
+        // Create a stale dead-PID entry.
+        let stale = dir.join(".myfs.import-txn-999999999");
+        fs::create_dir_all(&stale).unwrap();
 
         let txn = Txn::new(&dir, "myfs", TxnKind::Import, false, false);
         txn.prepare().unwrap();
 
-        assert!(old.exists(), "without auto_gc, old staging should remain");
+        assert!(
+            stale.exists(),
+            "without auto_gc, stale staging should remain"
+        );
         assert!(txn.path().is_dir());
         let _ = fs::remove_dir_all(&dir);
     }

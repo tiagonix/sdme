@@ -1986,10 +1986,6 @@ pub(crate) mod tests {
         );
         assert!(result.is_err());
 
-        // Staging dir should be cleaned up.
-        let staging = tmp.path().join("fs/.fail.importing");
-        assert!(!staging.exists(), "staging dir was not cleaned up");
-
         // Final dir should not exist.
         let final_dir = tmp.path().join("fs/fail");
         assert!(!final_dir.exists(), "final dir should not exist");

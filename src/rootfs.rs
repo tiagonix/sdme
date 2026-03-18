@@ -178,7 +178,7 @@ pub fn list(datadir: &Path) -> Result<Vec<RootfsEntry>> {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
 
-        // Skip hidden entries (staging dirs like .foo.importing, meta files).
+        // Skip hidden entries (staging dirs, meta files).
         if name.starts_with('.') {
             continue;
         }
@@ -457,7 +457,7 @@ mod tests {
         test_import(tmp.path(), src.path().to_str().unwrap(), "real").unwrap();
 
         // Create a fake staging dir that should be skipped.
-        fs::create_dir_all(tmp.path().join("fs/.fake.importing")).unwrap();
+        fs::create_dir_all(tmp.path().join("fs/.fake.import-txn-999999999")).unwrap();
 
         let entries = list(tmp.path()).unwrap();
         assert_eq!(entries.len(), 1);

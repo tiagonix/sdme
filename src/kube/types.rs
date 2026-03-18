@@ -4,8 +4,8 @@
 #[derive(serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct KubeManifest {
-    #[allow(dead_code)]
-    pub api_version: Option<String>,
+    #[serde(rename = "apiVersion")]
+    pub _api_version: Option<String>,
     pub kind: String,
     pub metadata: Option<Metadata>,
     pub spec: Option<serde_yml::Value>,
@@ -16,9 +16,8 @@ pub(super) struct KubeManifest {
 pub(super) struct Metadata {
     pub name: Option<String>,
     /// Labels (accepted but not used).
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub labels: Option<serde_yml::Value>,
+    #[serde(default, rename = "labels")]
+    pub _labels: Option<serde_yml::Value>,
 }
 
 /// Deployment spec wrapper to extract the pod template.
@@ -122,8 +121,8 @@ pub(crate) struct Capabilities {
 pub(crate) struct SeccompProfile {
     #[serde(rename = "type")]
     pub(crate) profile_type: String,
-    #[allow(dead_code)]
-    pub(crate) localhost_profile: Option<String>,
+    #[serde(rename = "localhostProfile")]
+    pub(crate) _localhost_profile: Option<String>,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -251,9 +250,8 @@ pub(crate) struct ContainerPort {
     pub(crate) container_port: u16,
     #[serde(default)]
     pub(crate) protocol: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) name: Option<String>,
+    #[serde(default, rename = "name")]
+    pub(crate) _name: Option<String>,
 }
 
 #[derive(serde::Deserialize, Debug)]

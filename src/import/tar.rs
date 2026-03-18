@@ -168,8 +168,8 @@ mod tests {
             "unexpected error: {err}"
         );
 
-        // Staging dir should be cleaned up.
-        assert!(!tmp.path().join("fs/.bad.importing").exists());
+        // Staging dir should not exist (txn left behind for gc).
+        assert!(!tmp.path().join("fs/bad").exists());
 
         let _ = fs::remove_file(&file_path);
     }
