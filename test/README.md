@@ -210,13 +210,15 @@ sudo ./test/scripts/verify-nixos.sh
 
 ### Kube Tests
 
-Eight-level progression from basic lifecycle to a full multi-service stack.
-All require a base-fs imported (e.g. `ubuntu`). Run in order:
+Six-level progression (nine scripts) from basic lifecycle to a full
+multi-service stack. All require a base-fs imported (e.g. `ubuntu`).
+Run in order:
 
 | Script                         | Level | Tests |
 |--------------------------------|-------|-------|
-| `verify-kube-L1-basic.sh`     | L1    | ~6    |
+| `verify-kube-L1-basic.sh`     | L1    | ~14   |
 | `verify-kube-L2-spec.sh`      | L2    | ~12   |
+| `verify-kube-L2-probes.sh`    | L2    | ~41   |
 | `verify-kube-L2-security.sh`  | L2    | ~17   |
 | `verify-kube-L3-volumes.sh`   | L3    | ~39   |
 | `verify-kube-L3-secrets.sh`   | L3    | ~16   |
@@ -228,6 +230,8 @@ All require a base-fs imported (e.g. `ubuntu`). Run in order:
   override, kube delete, shared emptyDir, ps metadata.
 - **L2-spec**: terminationGracePeriodSeconds, securityContext,
   initContainers, workingDir, resources, readinessProbe.
+- **L2-probes**: startup, liveness, readiness, httpGet, tcpSocket
+  probes and combined probe configurations.
 - **L2-security**: capabilities add/drop (including ALL),
   allowPrivilegeEscalation, readOnlyRootFilesystem,
   seccompProfile, appArmorProfile, per-container runAsUser.
@@ -245,6 +249,7 @@ All require a base-fs imported (e.g. `ubuntu`). Run in order:
 ```bash
 sudo ./test/scripts/verify-kube-L1-basic.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L2-spec.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L2-probes.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L2-security.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L3-volumes.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L3-secrets.sh --base-fs ubuntu
@@ -280,6 +285,7 @@ sudo ./test/scripts/verify-nixos.sh   # requires nix
 # 4. Kube tests
 sudo ./test/scripts/verify-kube-L1-basic.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L2-spec.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L2-probes.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L2-security.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L3-volumes.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L3-secrets.sh --base-fs ubuntu
