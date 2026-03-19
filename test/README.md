@@ -197,14 +197,27 @@ sudo ./test/scripts/verify-usage.sh
 
 ### verify-nixos.sh
 
-NixOS end-to-end verification. Imports a NixOS rootfs via
-`docker.io/nixos/nix --install-packages=yes` (no local nix required),
-boots a plain NixOS container, tests an OCI nginx-unprivileged app,
-a single-container Kubernetes Pod, and a multi-service Kubernetes Pod
-(nginx + redis + mysql) on the NixOS base.
+NixOS end-to-end verification. Builds a NixOS rootfs externally via
+`build-nixos-rootfs.sh` (pulls `docker.io/nixos/nix`, runs `nix-build`
+in a chroot, rebuilds a clean rootfs from the closure -- no local nix
+required), boots a plain NixOS container, tests an OCI
+nginx-unprivileged app, a single-container Kubernetes Pod, and a
+multi-service Kubernetes Pod (nginx + redis + mysql) on the NixOS base.
 
 ```bash
 sudo ./test/scripts/verify-nixos.sh
+```
+
+### build-nixos-rootfs.sh
+
+Standalone script that builds a NixOS rootfs and imports it via sdme.
+Used by verify-nixos.sh but can also be run directly. Uses the nix
+expression at `test/nix/sdme-nixos.nix` by default.
+
+```bash
+sudo ./test/scripts/build-nixos-rootfs.sh mynixos
+sudo ./test/scripts/build-nixos-rootfs.sh mynixos --nix-file /path/to/custom.nix
+sudo ./test/scripts/build-nixos-rootfs.sh mynixos --channel nixos-24.11
 ```
 
 ### Kube Tests
@@ -279,7 +292,7 @@ sudo ./test/scripts/verify-oci.sh
 sudo ./test/scripts/verify-security.sh
 sudo ./test/scripts/verify-export.sh
 sudo ./test/scripts/verify-usage.sh
-sudo ./test/scripts/verify-nixos.sh   # requires nix
+sudo ./test/scripts/verify-nixos.sh   # builds NixOS rootfs externally
 
 # 4. Kube tests
 sudo ./test/scripts/verify-kube-L1-basic.sh --base-fs ubuntu

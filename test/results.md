@@ -45,6 +45,16 @@ No known issues at this time.
 
 ## Previous Results
 
+### 0.4.5 -- nix-build pipeline removal (2026-03-19, aarch64)
+
+Removed the built-in `DistroFamily::Nix` nix-build pipeline from sdme.
+NixOS rootfs are now built externally via `test/scripts/build-nixos-rootfs.sh`
+(pulls `docker.io/nixos/nix`, runs `nix-build` in a chroot, rebuilds a
+clean rootfs from the closure) and imported as a directory. All 27
+verify-nixos.sh tests pass: import, plain container boot, OCI
+nginx-unprivileged app, single-container kube pod, and multi-service
+kube pod (nginx + redis + mysql).
+
 ### 0.4.4 -- openSUSE caps fix (2026-03-19, aarch64)
 
 The built-in Suse import prehook now strips `security.capability`
