@@ -73,6 +73,8 @@ pub struct ExportOptions<'a> {
     pub verbose: bool,
     /// Overwrite the output path if it already exists.
     pub force: bool,
+    /// Timezone to set in the exported rootfs (e.g. "America/New_York").
+    pub timezone: Option<&'a str>,
 }
 
 /// Summary returned after a successful export.
@@ -185,6 +187,68 @@ pub fn detect_format(output: &str, format_override: Option<&str>) -> Result<Expo
     }
 }
 
+/// Validate timezone string format: no empty, no null bytes, no leading `/`,
+/// no `..` path components, no whitespace or control characters.
+fn validate_timezone_format(tz: &str) -> Result<()> {
+    if tz.is_empty() {
+        bail!("timezone cannot be empty");
+    }
+    if tz.contains('\0') {
+        bail!("timezone contains null byte");
+    }
+    if tz.starts_with('/') {
+        bail!("timezone must not start with '/'");
+    }
+    if tz.split('/').any(|c| c == "..") {
+        bail!("timezone must not contain '..' components");
+    }
+    if tz.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        bail!("timezone must not contain whitespace or control characters");
+    }
+    Ok(())
+}
+
+/// Validate that the timezone zoneinfo file exists in the given rootfs.
+fn validate_timezone_in_rootfs(rootfs: &Path, tz: &str) -> Result<()> {
+    let zi = rootfs.join("usr/share/zoneinfo").join(tz);
+    if !zi.exists() {
+        bail!(
+            "timezone '{tz}' not found in rootfs (expected {})",
+            zi.display()
+        );
+    }
+    Ok(())
+}
+
+/// Validate timezone format and existence in the rootfs.
+fn validate_timezone(rootfs: &Path, tz: &str) -> Result<()> {
+    validate_timezone_format(tz)?;
+    validate_timezone_in_rootfs(rootfs, tz)
+}
+
+/// Write timezone into a writable rootfs directory: symlink `/etc/localtime`
+/// and write `/etc/timezone`.
+fn set_timezone(root: &Path, tz: &str) -> Result<()> {
+    let etc = root.join("etc");
+    fs::create_dir_all(&etc).with_context(|| format!("failed to create {}", etc.display()))?;
+
+    let localtime = etc.join("localtime");
+    // Remove existing file or symlink.
+    if localtime.symlink_metadata().is_ok() {
+        fs::remove_file(&localtime)
+            .with_context(|| format!("failed to remove {}", localtime.display()))?;
+    }
+    let target = format!("../usr/share/zoneinfo/{tz}");
+    std::os::unix::fs::symlink(&target, &localtime)
+        .with_context(|| format!("failed to symlink {} -> {}", localtime.display(), target))?;
+
+    let tz_file = etc.join("timezone");
+    fs::write(&tz_file, format!("{tz}\n"))
+        .with_context(|| format!("failed to write {}", tz_file.display()))?;
+
+    Ok(())
+}
+
 /// Export an imported rootfs to the given output path.
 pub fn export_rootfs(
     datadir: &Path,
@@ -196,6 +260,9 @@ pub fn export_rootfs(
     let rootfs_dir = datadir.join("fs").join(name);
     if !rootfs_dir.is_dir() {
         bail!("rootfs not found: {name}");
+    }
+    if let Some(tz) = opts.timezone {
+        validate_timezone(&rootfs_dir, tz)?;
     }
     export_from_dir(&rootfs_dir, output, opts)
 }
@@ -223,6 +290,9 @@ pub fn export_container(
             "warning: container '{name}' is running; filesystem is live and \
              consistency is not guaranteed"
         );
+        if let Some(tz) = opts.timezone {
+            validate_timezone(&merged_dir, tz)?;
+        }
         export_from_dir(&merged_dir, output, opts)
     } else {
         // Read state to find the rootfs.
@@ -238,6 +308,11 @@ pub fn export_container(
             },
         )?;
 
+        // Validate timezone against the lower-layer rootfs before mounting.
+        if let Some(tz) = opts.timezone {
+            validate_timezone(&rootfs_dir, tz)?;
+        }
+
         mount_overlay(&rootfs_dir, &container_dir)?;
         let result = export_from_dir(&merged_dir, output, opts);
         unmount_overlay(&container_dir);
@@ -251,6 +326,9 @@ fn export_from_dir(src: &Path, output: &Path, opts: &ExportOptions) -> Result<Ex
     match opts.format {
         ExportFormat::Dir => {
             export_to_dir(src, output, opts.verbose, opts.force)?;
+            if let Some(tz) = opts.timezone {
+                set_timezone(output, tz)?;
+            }
             let output_size = dir_size(output)?;
             Ok(ExportResult {
                 output_size,
@@ -263,7 +341,7 @@ fn export_from_dir(src: &Path, output: &Path, opts: &ExportOptions) -> Result<Ex
         | ExportFormat::TarBz2
         | ExportFormat::TarXz
         | ExportFormat::TarZst => {
-            export_to_tar(src, output, opts.format, opts.verbose, opts.force)?;
+            export_to_tar(src, output, opts)?;
             let output_size = fs::metadata(output)
                 .with_context(|| format!("failed to stat {}", output.display()))?
                 .len();
@@ -296,57 +374,79 @@ fn export_to_dir(src: &Path, dst: &Path, verbose: bool, force: bool) -> Result<(
 
 /// Build a tar archive from a source directory into the given writer.
 /// Returns the writer so callers can finalize compression encoders.
-fn write_tar<W: std::io::Write>(writer: W, src: &Path, verbose: bool) -> Result<W> {
+fn write_tar<W: std::io::Write>(
+    writer: W,
+    src: &Path,
+    verbose: bool,
+    timezone: Option<&str>,
+) -> Result<W> {
     let mut builder = tar::Builder::new(writer);
     builder.follow_symlinks(false);
     append_dir_recursive(&mut builder, src, src, verbose)?;
+
+    if let Some(tz) = timezone {
+        // Add /etc/localtime symlink.
+        let target = format!("../usr/share/zoneinfo/{tz}");
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mode(0o777);
+        builder.append_link(&mut header, "etc/localtime", &target)?;
+
+        // Add /etc/timezone file.
+        let tz_data = format!("{tz}\n");
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(tz_data.len() as u64);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mode(0o644);
+        builder.append_data(&mut header, "etc/timezone", tz_data.as_bytes())?;
+    }
+
     Ok(builder.into_inner()?)
 }
 
 /// Export by creating a tar archive, optionally compressed.
-fn export_to_tar(
-    src: &Path,
-    output: &Path,
-    format: &ExportFormat,
-    verbose: bool,
-    force: bool,
-) -> Result<()> {
+fn export_to_tar(src: &Path, output: &Path, opts: &ExportOptions) -> Result<()> {
     if output.exists() {
-        if force {
+        if opts.force {
             fs::remove_file(output)
                 .with_context(|| format!("failed to remove {}", output.display()))?;
         } else {
             bail!("destination already exists: {}", output.display());
         }
     }
-    if verbose {
+    if opts.verbose {
         eprintln!("creating tarball: {}", output.display());
     }
 
     let file =
         File::create(output).with_context(|| format!("failed to create {}", output.display()))?;
 
-    match format {
+    match opts.format {
         ExportFormat::Tar => {
-            write_tar(file, src, verbose)?;
+            write_tar(file, src, opts.verbose, opts.timezone)?;
         }
         ExportFormat::TarGz => {
             let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-            let encoder = write_tar(encoder, src, verbose)?;
+            let encoder = write_tar(encoder, src, opts.verbose, opts.timezone)?;
             encoder.finish()?;
         }
         ExportFormat::TarBz2 => {
             let encoder = bzip2::write::BzEncoder::new(file, bzip2::Compression::default());
-            let encoder = write_tar(encoder, src, verbose)?;
+            let encoder = write_tar(encoder, src, opts.verbose, opts.timezone)?;
             encoder.finish()?;
         }
         ExportFormat::TarXz => {
             let encoder = xz2::write::XzEncoder::new(file, 6);
-            write_tar(encoder, src, verbose)?;
+            write_tar(encoder, src, opts.verbose, opts.timezone)?;
         }
         ExportFormat::TarZst => {
             let encoder = zstd::stream::write::Encoder::new(file, 0)?;
-            let encoder = write_tar(encoder, src, verbose)?;
+            let encoder = write_tar(encoder, src, opts.verbose, opts.timezone)?;
             encoder.finish()?;
         }
         _ => unreachable!(),
@@ -428,8 +528,8 @@ fn export_to_raw(
     fs_type: RawFs,
     opts: &ExportOptions<'_>,
 ) -> Result<ExportResult> {
-    let verbose = opts.verbose;
     let free_space = opts.free_space;
+    let verbose = opts.verbose;
     let vm_opts = opts.vm_opts;
     if output.exists() {
         if opts.force {
@@ -499,9 +599,9 @@ fn export_to_raw(
     // VM exports: GPT partition table via sfdisk, then losetup --partscan.
     // Non-VM exports: bare filesystem on the whole image file.
     let copy_result = if is_vm {
-        export_raw_gpt(output, &mount_dir, mkfs_bin, fs_type, src, vm_opts, verbose)
+        export_raw_gpt(output, &mount_dir, mkfs_bin, fs_type, src, opts)
     } else {
-        export_raw_bare(output, &mount_dir, mkfs_bin, fs_type, src, verbose)
+        export_raw_bare(output, &mount_dir, mkfs_bin, fs_type, src, opts)
     };
 
     if let Err(e) = copy_result {
@@ -576,7 +676,7 @@ fn export_raw_bare(
     mkfs_bin: &str,
     fs_type: RawFs,
     src: &Path,
-    verbose: bool,
+    opts: &ExportOptions,
 ) -> Result<()> {
     let (mkfs_args, mkfs_err): (&[&str], &str) = match fs_type {
         RawFs::Ext4 => (&["-q", "-F"], "mkfs.ext4 failed"),
@@ -616,7 +716,10 @@ fn export_raw_bare(
 
     let result = (|| -> Result<()> {
         copy::copy_metadata(src, mount_dir)?;
-        copy::copy_tree(src, mount_dir, verbose)?;
+        copy::copy_tree(src, mount_dir, opts.verbose)?;
+        if let Some(tz) = opts.timezone {
+            set_timezone(mount_dir, tz)?;
+        }
         Ok(())
     })();
 
@@ -636,9 +739,10 @@ fn export_raw_gpt(
     mkfs_bin: &str,
     fs_type: RawFs,
     src: &Path,
-    vm_opts: Option<&VmOptions>,
-    verbose: bool,
+    opts: &ExportOptions,
 ) -> Result<()> {
+    let vm_opts = opts.vm_opts;
+    let verbose = opts.verbose;
     let swap_size = vm_opts.map(|o| o.swap_size).unwrap_or(0);
 
     // Write a GPT partition table. When swap is requested, the root
@@ -768,6 +872,9 @@ fn export_raw_gpt(
         copy::copy_tree(src, mount_dir, verbose)?;
         if let Some(opts) = vm_opts {
             prep_vm_rootfs(mount_dir, fs_type, opts, verbose)?;
+        }
+        if let Some(tz) = opts.timezone {
+            set_timezone(mount_dir, tz)?;
         }
         Ok(())
     })();
@@ -1827,7 +1934,16 @@ mod tests {
         let dst = crate::testutil::TempDataDir::new("export-tar-dst");
         let tarball = dst.path().join("out.tar");
 
-        export_to_tar(src.path(), &tarball, &ExportFormat::Tar, false, false).unwrap();
+        let opts = ExportOptions {
+            format: &ExportFormat::Tar,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: None,
+        };
+        export_to_tar(src.path(), &tarball, &opts).unwrap();
         assert!(tarball.exists());
         assert!(fs::metadata(&tarball).unwrap().len() > 0);
 
@@ -1852,7 +1968,16 @@ mod tests {
         let dst = crate::testutil::TempDataDir::new("export-targz-dst");
         let tarball = dst.path().join("out.tar.gz");
 
-        export_to_tar(src.path(), &tarball, &ExportFormat::TarGz, false, false).unwrap();
+        let opts = ExportOptions {
+            format: &ExportFormat::TarGz,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: None,
+        };
+        export_to_tar(src.path(), &tarball, &opts).unwrap();
         assert!(tarball.exists());
 
         // Verify by decompressing and reading.
@@ -1875,8 +2000,16 @@ mod tests {
         let tarball = dst.path().join("out.tar");
         fs::write(&tarball, "existing").unwrap();
 
-        let err =
-            export_to_tar(src.path(), &tarball, &ExportFormat::Tar, false, false).unwrap_err();
+        let opts = ExportOptions {
+            format: &ExportFormat::Tar,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: None,
+        };
+        let err = export_to_tar(src.path(), &tarball, &opts).unwrap_err();
         assert!(err.to_string().contains("already exists"), "got: {err}");
     }
 
@@ -1895,6 +2028,7 @@ mod tests {
             vm_opts: None,
             verbose: false,
             force: false,
+            timezone: None,
         };
         let err = export_rootfs(tmp.path(), "nonexistent", &output, &opts).unwrap_err();
         assert!(err.to_string().contains("rootfs not found"), "got: {err}");
@@ -1912,6 +2046,7 @@ mod tests {
             vm_opts: None,
             verbose: false,
             force: false,
+            timezone: None,
         };
         let err = export_rootfs(tmp.path(), "../escape", &output, &opts).unwrap_err();
         assert!(err.to_string().contains("name"), "got: {err}");
@@ -1933,6 +2068,7 @@ mod tests {
             vm_opts: None,
             verbose: false,
             force: false,
+            timezone: None,
         };
         export_rootfs(tmp.path(), "myfs", &output, &opts).unwrap();
 
@@ -2423,5 +2559,180 @@ WantedBy=getty.target
 
         let mode = fs::metadata(&auth_keys).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    // --- validate_timezone_format tests ---
+
+    #[test]
+    fn test_validate_timezone_format_valid() {
+        assert!(validate_timezone_format("UTC").is_ok());
+        assert!(validate_timezone_format("America/New_York").is_ok());
+        assert!(validate_timezone_format("Europe/London").is_ok());
+        assert!(validate_timezone_format("Asia/Kolkata").is_ok());
+    }
+
+    #[test]
+    fn test_validate_timezone_format_empty() {
+        let err = validate_timezone_format("").unwrap_err();
+        assert!(err.to_string().contains("empty"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_timezone_format_dotdot() {
+        let err = validate_timezone_format("../etc/passwd").unwrap_err();
+        assert!(err.to_string().contains(".."), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_timezone_format_leading_slash() {
+        let err = validate_timezone_format("/UTC").unwrap_err();
+        assert!(err.to_string().contains("'/'"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_timezone_format_null() {
+        let err = validate_timezone_format("UTC\0").unwrap_err();
+        assert!(err.to_string().contains("null"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_timezone_format_whitespace() {
+        let err = validate_timezone_format("America/ New_York").unwrap_err();
+        assert!(err.to_string().contains("whitespace"), "got: {err}");
+    }
+
+    // --- validate_timezone_in_rootfs tests ---
+
+    #[test]
+    fn test_validate_timezone_in_rootfs_found() {
+        let tmp = crate::testutil::TempDataDir::new("export-tz-found");
+        let zi_dir = tmp.path().join("usr/share/zoneinfo/America");
+        fs::create_dir_all(&zi_dir).unwrap();
+        fs::write(zi_dir.join("New_York"), "fake").unwrap();
+
+        assert!(validate_timezone_in_rootfs(tmp.path(), "America/New_York").is_ok());
+    }
+
+    #[test]
+    fn test_validate_timezone_in_rootfs_not_found() {
+        let tmp = crate::testutil::TempDataDir::new("export-tz-notfound");
+        let err = validate_timezone_in_rootfs(tmp.path(), "Fake/Zone").unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    // --- set_timezone tests ---
+
+    #[test]
+    fn test_set_timezone_creates_files() {
+        let tmp = crate::testutil::TempDataDir::new("export-tz-set");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+
+        set_timezone(tmp.path(), "America/New_York").unwrap();
+
+        let localtime = tmp.path().join("etc/localtime");
+        assert!(localtime
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let target = fs::read_link(&localtime).unwrap();
+        assert_eq!(
+            target.to_str().unwrap(),
+            "../usr/share/zoneinfo/America/New_York"
+        );
+
+        let tz_content = fs::read_to_string(tmp.path().join("etc/timezone")).unwrap();
+        assert_eq!(tz_content, "America/New_York\n");
+    }
+
+    #[test]
+    fn test_set_timezone_replaces_existing() {
+        let tmp = crate::testutil::TempDataDir::new("export-tz-replace");
+        let etc = tmp.path().join("etc");
+        fs::create_dir_all(&etc).unwrap();
+        fs::write(etc.join("localtime"), "old content").unwrap();
+
+        set_timezone(tmp.path(), "UTC").unwrap();
+
+        let localtime = etc.join("localtime");
+        assert!(localtime
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let target = fs::read_link(&localtime).unwrap();
+        assert_eq!(target.to_str().unwrap(), "../usr/share/zoneinfo/UTC");
+    }
+
+    // --- export_rootfs with timezone validation ---
+
+    #[test]
+    fn test_export_rootfs_timezone_not_in_rootfs() {
+        let tmp = crate::testutil::TempDataDir::new("export-tz-rootfs-missing");
+        let rootfs_dir = tmp.path().join("fs/myfs");
+        fs::create_dir_all(&rootfs_dir).unwrap();
+
+        let output = tmp.path().join("out");
+        let opts = ExportOptions {
+            format: &ExportFormat::Dir,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: Some("Fake/Zone"),
+        };
+        let err = export_rootfs(tmp.path(), "myfs", &output, &opts).unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    // --- export_to_tar with timezone ---
+
+    #[test]
+    fn test_export_to_tar_with_timezone() {
+        let _guard = lock_and_clear_interrupted();
+        let src = crate::testutil::TempDataDir::new("export-tar-tz-src");
+        // Create a fake zoneinfo file so the source is valid.
+        let zi = src.path().join("usr/share/zoneinfo");
+        fs::create_dir_all(&zi).unwrap();
+        fs::write(zi.join("UTC"), "fake").unwrap();
+        fs::create_dir_all(src.path().join("etc")).unwrap();
+        fs::write(src.path().join("etc/hello"), "world").unwrap();
+
+        let dst = crate::testutil::TempDataDir::new("export-tar-tz-dst");
+        let tarball = dst.path().join("out.tar");
+
+        let opts = ExportOptions {
+            format: &ExportFormat::Tar,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: Some("UTC"),
+        };
+        export_to_tar(src.path(), &tarball, &opts).unwrap();
+
+        // Read tarball and verify timezone entries exist.
+        let file = File::open(&tarball).unwrap();
+        let mut archive = tar::Archive::new(file);
+        let mut found_localtime = false;
+        let mut found_timezone = false;
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            if path == "etc/localtime" {
+                found_localtime = true;
+                assert_eq!(entry.header().entry_type(), tar::EntryType::Symlink);
+                let link = entry.link_name().unwrap().unwrap();
+                assert_eq!(link.to_str().unwrap(), "../usr/share/zoneinfo/UTC");
+            }
+            if path == "etc/timezone" {
+                found_timezone = true;
+                assert_eq!(entry.header().entry_type(), tar::EntryType::Regular);
+            }
+        }
+        assert!(found_localtime, "etc/localtime not found in tarball");
+        assert!(found_timezone, "etc/timezone not found in tarball");
     }
 }

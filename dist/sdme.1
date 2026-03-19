@@ -556,7 +556,7 @@ Use a different path (e.g.\&
 Lines starting with
 .B #
 and blank lines are ignored.
-.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f] [\-\-fmt \fIformat\fR] [\-s \fIsize\fR] [\-\-free\-space \fIsize\fR] [\-\-filesystem \fItype\fR] [\-\-vm] [\-\-dns \fIip\fR]... [\-\-net\-ifaces \fIn\fR] [\-\-root\-password \fIpass\fR] [\-\-ssh\-key \fIpath\fR] [\-\-swap \fIsize\fR] [\-\-hostname \fIname\fR] [\-\-install\-packages \fImode\fR]
+.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f] [\-\-fmt \fIformat\fR] [\-s \fIsize\fR] [\-\-free\-space \fIsize\fR] [\-\-filesystem \fItype\fR] [\-\-timezone \fItz\fR] [\-\-vm] [\-\-dns \fIip\fR]... [\-\-net\-ifaces \fIn\fR] [\-\-root\-password \fIpass\fR] [\-\-ssh\-key \fIpath\fR] [\-\-swap \fIsize\fR] [\-\-hostname \fIname\fR] [\-\-install\-packages \fImode\fR]
 Export a root filesystem or container to a directory, tarball, or disk image.
 The output format is auto\-detected from the file extension:
 .RS
@@ -637,6 +637,24 @@ default: config
 .BR default_export_fs ,
 initially
 .BR ext4 ).
+.PP
+Use
+.B \-\-timezone
+to set the timezone in the exported rootfs (e.g.\&
+.IR America/New_York ", " UTC ).
+This symlinks
+.I /etc/localtime
+to the corresponding zoneinfo file and writes
+.IR /etc/timezone .
+The timezone is validated against the rootfs zoneinfo database before export
+begins.
+Works with all output formats.
+Not needed for
+.B sdme fs import
+since
+.BR systemd\-nspawn (1)
+handles timezone at container boot via
+.BR \-\-timezone=copy .
 .PP
 Use
 .B \-\-vm

@@ -556,6 +556,9 @@ EXAMPLE:
         /// Install missing packages (e.g. udev) into rootfs for VM boot
         #[arg(long, value_enum, default_value_t = InstallPackages::Auto, requires = "vm")]
         install_packages: InstallPackages,
+        /// Set timezone in exported rootfs (e.g. America/New_York)
+        #[arg(long)]
+        timezone: Option<String>,
     },
     /// Manage the OCI blob cache
     #[command(subcommand)]
@@ -2598,6 +2601,7 @@ fn main() -> Result<()> {
                 swap,
                 hostname,
                 install_packages,
+                timezone,
             } => {
                 let fmt = export::detect_format(&output, format.as_deref())?;
                 let fs_str = filesystem.as_deref().unwrap_or(&cfg.default_export_fs);
@@ -2675,6 +2679,7 @@ fn main() -> Result<()> {
                     vm_opts: vm_opts.as_ref(),
                     verbose: cli.verbose,
                     force,
+                    timezone: timezone.as_deref(),
                 };
                 let result = if container {
                     export::export_container(&cfg.datadir, &name, &output_path, &export_opts)?
