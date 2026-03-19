@@ -82,7 +82,7 @@ fi
 log() { echo "==> $*"; }
 
 DATADIR="/var/lib/sdme"
-TMP_FS="_build-nix-tmp-$$"
+TMP_FS="tmp-build-nix-$$"
 
 cleanup() {
     log "Cleaning up temporary rootfs..."
@@ -103,13 +103,15 @@ cp "$NIX_FILE" "$ROOTFS/tmp/sdme-nixos.nix"
 
 # Step 3: Set up chroot environment.
 log "Setting up chroot environment"
+mkdir -p "$ROOTFS/proc" "$ROOTFS/sys" "$ROOTFS/dev" "$ROOTFS/dev/pts" "$ROOTFS/etc"
 mount -t proc proc "$ROOTFS/proc"
 mount -t sysfs sysfs "$ROOTFS/sys"
 mount --bind /dev "$ROOTFS/dev"
-mkdir -p "$ROOTFS/etc"
+mount -t devpts devpts "$ROOTFS/dev/pts"
 cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf" 2>/dev/null || true
 
 chroot_cleanup() {
+    umount "$ROOTFS/dev/pts" 2>/dev/null || true
     umount "$ROOTFS/proc" 2>/dev/null || true
     umount "$ROOTFS/sys" 2>/dev/null || true
     umount "$ROOTFS/dev" 2>/dev/null || true
@@ -130,6 +132,7 @@ chroot "$ROOTFS" /bin/sh -c "
 "
 
 # Step 5: Tear down chroot mounts before rebuilding.
+umount "$ROOTFS/dev/pts" 2>/dev/null || true
 umount "$ROOTFS/proc" 2>/dev/null || true
 umount "$ROOTFS/sys" 2>/dev/null || true
 umount "$ROOTFS/dev" 2>/dev/null || true
