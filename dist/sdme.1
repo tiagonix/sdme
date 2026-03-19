@@ -666,6 +666,16 @@ and sets the hostname.
 The GPT layout places the filesystem at a 1\ MiB offset, avoiding sector\ 0
 conflicts with hypervisors such as cloud\-hypervisor.
 .PP
+.B NixOS note:
+Not all export formats are useful with NixOS rootfs.
+Directory and tarball exports work (faithful copies), but
+.B \-\-vm
+is not supported because NixOS manages init, fstab, networkd, and udev
+declaratively via the Nix store.
+Use NixOS\-native tooling
+.RB ( nixos\-generators ", " "nixos\-rebuild build\-vm" )
+to build NixOS VM images.
+.PP
 VM\-specific options (only valid with
 .BR \-\-vm ):
 .TP

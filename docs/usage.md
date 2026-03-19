@@ -434,6 +434,14 @@ zoneinfo file and writes `/etc/timezone`, validated against the rootfs
 before export begins. Works with all output formats. Not needed for
 containers since `systemd-nspawn` copies the host timezone at boot.
 
+**NixOS note.** Directory and tarball exports work with NixOS rootfs
+(they produce a faithful copy). Raw disk image exports also work for
+archival purposes. However, VM export (`--vm`) is not supported because
+NixOS manages its own init, fstab, networkd, and udev configuration
+declaratively via the Nix store — the file-level patches that `--vm`
+applies conflict with NixOS activation. Use NixOS-native tooling
+(`nixos-generators`, `nixos-rebuild build-vm`) to build NixOS VM images.
+
 For more on how the fs subsystem works internally, see
 [architecture.md, Section 6](architecture.md#6-the-fs-subsystem-managing-root-filesystems).
 

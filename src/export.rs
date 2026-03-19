@@ -1067,7 +1067,7 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 ///
 /// | What | Path(s) | Why |
 /// |------|---------|-----|
-/// | VM prehook | (via chroot) | Distro-specific VM prep (udev, nix-build, etc.); runs if `--install-packages` allows |
+/// | VM prehook | (via chroot) | Distro-specific VM prep (udev, etc.); runs if `--install-packages` allows |
 /// | init symlink | `/usr/sbin/init` → `../../lib/systemd/systemd` | Kernel needs `/sbin/init`; nspawn finds systemd directly |
 /// | serial-getty template | `/etc/systemd/system/serial-getty@.service` | Copy of distro template with `BindsTo=dev-%i.device` removed (no udev) |
 /// | serial-getty enable | `/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service` | Explicit enable for ttyS0 |
@@ -1101,10 +1101,14 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 ///   `BindsTo=dev-%i.device` dependency regardless, so the serial console
 ///   works even without udev.
 ///
-/// - **NixOS**: VM export runs a nix-build that produces a VM-ready NixOS
-///   closure with udev, serial console, networkd, resolved, and fstab baked
-///   into the Nix store. The inline config uses ext4; users needing btrfs or
-///   swap can override via `[distros.nixos] export_vm_prehook` in the config.
+/// - **NixOS**: Not all export formats are useful with NixOS rootfs. Directory
+///   and tarball exports work (they produce a faithful copy), but VM export
+///   (`--vm`) is not supported because NixOS manages its own init, fstab,
+///   networkd, and udev configuration declaratively via the Nix store. The
+///   file-level patches applied by `prepare_vm_rootfs` (init symlink, fstab,
+///   serial-getty, networkd units) conflict with NixOS activation. Use
+///   NixOS-native tooling (`nixos-generators`, `nixos-rebuild build-vm`) to
+///   build NixOS VM images.
 ///
 /// # TODO: package these modifications
 ///
@@ -1285,7 +1289,7 @@ fn resolve_export_vm_prehook(
 /// `--install-packages` policy (Auto/Yes/No).
 ///
 /// The prehook handles all distro-specific VM preparation (e.g. installing
-/// udev on Debian/Fedora, running nix-build for NixOS).
+/// udev on Debian/Fedora).
 fn run_vm_prehook(mount: &Path, opts: &VmOptions, verbose: bool) -> Result<()> {
     let family = crate::rootfs::detect_distro_family(mount);
     let commands = resolve_export_vm_prehook(&family, &opts.distros);
