@@ -1065,23 +1065,30 @@ fn resolve_masked_services(
     cli_masked: Option<Vec<String>>,
     network: &NetworkConfig,
     cfg: &config::Config,
-) -> Vec<String> {
-    if let Some(explicit) = cli_masked {
+) -> anyhow::Result<Vec<String>> {
+    let list = if let Some(explicit) = cli_masked {
         // Explicit override: use as-is (even if empty).
-        return explicit.into_iter().filter(|s| !s.is_empty()).collect();
+        explicit.into_iter().filter(|s| !s.is_empty()).collect()
+    } else {
+        // Config defaults.
+        let mut list: Vec<String> = cfg
+            .default_create_masked_services
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // Auto-unmask resolved for --network-zone containers.
+        if network.network_zone.is_some() {
+            list.retain(|s| s != "systemd-resolved.service");
+        }
+        list
+    };
+    for svc in &list {
+        if svc.contains('/') || svc.contains("..") {
+            anyhow::bail!("invalid masked service name: {svc:?}");
+        }
     }
-    // Config defaults.
-    let mut list: Vec<String> = cfg
-        .default_create_masked_services
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    // Auto-unmask resolved for --network-zone containers.
-    if network.network_zone.is_some() {
-        list.retain(|s| s != "systemd-resolved.service");
-    }
-    list
+    Ok(list)
 }
 
 /// Auto-wire OCI port forwarding from the rootfs `/oci/ports` file.
@@ -1623,7 +1630,7 @@ fn main() -> Result<()> {
             let (binds, envs) = parse_mounts(mounts)?;
             let oci_envs = validate_oci_envs(oci_env)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
-            let masked_services = resolve_masked_services(masked_services, &network, &cfg);
+            let masked_services = resolve_masked_services(masked_services, &network, &cfg)?;
 
             // Auto-wire OCI ports if the rootfs declares them.
             if !no_oci_ports {
@@ -1911,7 +1918,7 @@ fn main() -> Result<()> {
             let (binds, envs) = parse_mounts(mounts)?;
             let oci_envs = validate_oci_envs(oci_env)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
-            let masked_services = resolve_masked_services(masked_services, &network, &cfg);
+            let masked_services = resolve_masked_services(masked_services, &network, &cfg)?;
 
             // Auto-wire OCI ports if the rootfs declares them.
             if !no_oci_ports {
@@ -2243,7 +2250,7 @@ fn main() -> Result<()> {
                 // so network_zone is not applicable (kube doesn't expose it).
                 // Resolve masked services with a default NetworkConfig.
                 let masked_services =
-                    resolve_masked_services(masked_services, &NetworkConfig::default(), &cfg);
+                    resolve_masked_services(masked_services, &NetworkConfig::default(), &cfg)?;
                 let docker_creds = docker_credentials(&cfg);
                 let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
                 let name = kube::kube_create(
@@ -2321,7 +2328,7 @@ fn main() -> Result<()> {
                     .as_deref()
                     .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
                 let masked_services =
-                    resolve_masked_services(masked_services, &NetworkConfig::default(), &cfg);
+                    resolve_masked_services(masked_services, &NetworkConfig::default(), &cfg)?;
                 let docker_creds = docker_credentials(&cfg);
                 let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
                 let name = kube::kube_create(

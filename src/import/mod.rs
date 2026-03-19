@@ -645,7 +645,7 @@ fn detect_dbus_nixos(rootfs: &Path) -> bool {
 }
 
 /// Scan the nix store for a binary matching the given suffix.
-pub(crate) fn scan_nix_store(rootfs: &Path, suffix: &str) -> bool {
+fn scan_nix_store(rootfs: &Path, suffix: &str) -> bool {
     let store = rootfs.join("nix/store");
     if let Ok(entries) = fs::read_dir(&store) {
         for entry in entries.flatten() {

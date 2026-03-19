@@ -442,7 +442,8 @@ fn export_to_tar(src: &Path, output: &Path, opts: &ExportOptions) -> Result<()> 
         }
         ExportFormat::TarXz => {
             let encoder = xz2::write::XzEncoder::new(file, 6);
-            write_tar(encoder, src, opts.verbose, opts.timezone)?;
+            let encoder = write_tar(encoder, src, opts.verbose, opts.timezone)?;
+            encoder.finish()?;
         }
         ExportFormat::TarZst => {
             let encoder = zstd::stream::write::Encoder::new(file, 0)?;

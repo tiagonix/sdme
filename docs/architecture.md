@@ -388,14 +388,16 @@ absent.
 
 **Rootfs patching** runs after systemd detection. Even when systemd is
 present, sdme patches the rootfs for nspawn compatibility:
-`systemd-resolved` is masked (containers share the host's network
-namespace and cannot bind 127.0.0.53), `systemd-logind` is unmasked if
+pre-existing `systemd-resolved.service` masks (symlinks to `/dev/null`)
+are removed so they don't leak through overlayfs and interfere with
+zone containers that need resolved, `systemd-logind` is unmasked if
 masked (some OCI images like CentOS/AlmaLinux mask it, but
 `machinectl shell` requires logind), and missing packages needed by
 `machinectl shell` (e.g. `util-linux` and `pam` on RHEL-family, which
-provide `/etc/pam.d/login`) are installed via chroot. These patches are
-applied directly to the rootfs so all containers created from it inherit
-a working environment without overlayfs-level fixups.
+provide `/etc/pam.d/login`) are installed via chroot. Service masking
+(e.g. `systemd-resolved`) is handled at container create time via the
+configurable `--masked-services` / `default_create_masked_services`
+mechanism, not at import time.
 
 **Staging areas and atomic operations** ensure that a failed import
 doesn't leave a half-written rootfs. The staging directory
@@ -789,8 +791,7 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
 | `http_timeout`            | `30`                             |
 | `http_body_timeout`       | `300`                            |
 | `max_download_size`       | `50G`                            |
-| `nixpkgs_channel`         | `nixos-unstable`                 |
-| `nix_config_template`     | (empty)                          |
+| `default_create_masked_services` | `systemd-resolved.service` |
 | `stop_timeout_graceful`   | `90`                             |
 | `stop_timeout_terminate`  | `30`                             |
 | `stop_timeout_kill`       | `15`                             |
@@ -819,9 +820,8 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
 - `http_body_timeout`: HTTP body receive timeout in seconds.
 - `max_download_size`: maximum download size for imports and
   OCI pulls (e.g. `50G`; `0` = unlimited).
-- `nixpkgs_channel`: nixpkgs channel for NixOS rootfs builds.
-- `nix_config_template`: path to a custom `.nix` file replacing
-  the built-in NixOS config template for nix-build rootfs builds.
+- `default_create_masked_services`: comma-separated systemd units
+  to mask at container create time (empty string disables).
 - `stop_timeout_graceful`: seconds to wait during graceful stop.
 - `stop_timeout_terminate`: seconds to wait during terminate stop.
 - `stop_timeout_kill`: seconds to wait during force-kill stop.
@@ -831,8 +831,8 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
   raw disk image size.
 - `distros.<family>.import_prehook`: chroot commands to make a
   rootfs bootable (install systemd, dbus, etc.). Family names:
-  `debian`, `fedora`, `arch`, `suse`, `unknown`. Absent = built-in
-  defaults; empty array = do nothing. Nix/NixOS stays hardcoded.
+  `debian`, `fedora`, `arch`, `suse`, `nixos`, `unknown`. Absent =
+  built-in defaults; empty array = do nothing.
 - `distros.<family>.export_prehook`: chroot commands run before
   container or rootfs export. Same semantics.
 - `distros.<family>.export_vm_prehook`: chroot commands to prepare

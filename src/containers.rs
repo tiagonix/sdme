@@ -206,7 +206,7 @@ fn do_create(
     }
 
     // Mask configurable systemd services in the overlayfs upper layer.
-    // Skipped for NixOS/Nix rootfs because NixOS activation replaces
+    // Skipped for NixOS rootfs because NixOS activation replaces
     // /etc/systemd/system with an immutable symlink to the Nix store.
     let family = rootfs::detect_distro_family(rootfs);
     if family != rootfs::DistroFamily::NixOS {
