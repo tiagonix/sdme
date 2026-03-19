@@ -10,6 +10,7 @@ set -euo pipefail
 #   4. Btrfs raw disk image export (auto-size, explicit --size)
 #   5. Format override (--fmt)
 #   6. Nonexistent rootfs (error case)
+#   7. Timezone: dir export, tar export, raw image export, invalid timezone
 
 source "$(dirname "$0")/lib.sh"
 
@@ -307,6 +308,104 @@ if [[ "$HAS_MKFS_BTRFS" == "true" ]]; then
     rm -f "$rawbtrfs2"
 else
     skipped "btrfs raw export --size (mkfs.btrfs not available)"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 13: Directory export with --timezone
+# ---------------------------------------------------------------------------
+echo "=== Test 13: dir export --timezone ==="
+
+outdir="$TMPDIR/dir-tz-export"
+if $SDME fs export ubuntu "$outdir" --timezone America/New_York $VFLAG; then
+    if [[ -L "$outdir/etc/localtime" ]]; then
+        target=$(readlink "$outdir/etc/localtime")
+        if [[ "$target" == "../usr/share/zoneinfo/America/New_York" ]]; then
+            ok "dir export --timezone localtime symlink"
+        else
+            fail "dir export --timezone: expected ../usr/share/zoneinfo/America/New_York, got $target"
+        fi
+    else
+        fail "dir export --timezone: /etc/localtime is not a symlink"
+    fi
+    if [[ -f "$outdir/etc/timezone" ]]; then
+        tz_content=$(cat "$outdir/etc/timezone")
+        if [[ "$tz_content" == "America/New_York" ]]; then
+            ok "dir export --timezone /etc/timezone"
+        else
+            fail "dir export --timezone: expected America/New_York, got $tz_content"
+        fi
+    else
+        fail "dir export --timezone: /etc/timezone not found"
+    fi
+else
+    fail "dir export --timezone: command failed"
+fi
+rm -rf "$outdir"
+
+# ---------------------------------------------------------------------------
+# Test 14: Tarball export with --timezone
+# ---------------------------------------------------------------------------
+echo "=== Test 14: tar export --timezone ==="
+
+tarfile="$TMPDIR/tz-out.tar"
+if $SDME fs export ubuntu "$tarfile" --timezone UTC $VFLAG; then
+    if [[ -f "$tarfile" ]] && tar_contains "$tarfile" "etc/localtime" && tar_contains "$tarfile" "etc/timezone"; then
+        ok "tar export --timezone"
+    else
+        fail "tar export --timezone: missing etc/localtime or etc/timezone in archive"
+    fi
+else
+    fail "tar export --timezone: command failed"
+fi
+rm -f "$tarfile"
+
+# ---------------------------------------------------------------------------
+# Test 15: Raw image export with --timezone
+# ---------------------------------------------------------------------------
+echo "=== Test 15: raw export --timezone ==="
+
+if [[ "$HAS_MKFS_EXT4" == "true" ]]; then
+    rawimg="$TMPDIR/tz-out.raw"
+    if $SDME fs export ubuntu "$rawimg" --timezone Europe/London $VFLAG; then
+        if [[ -f "$rawimg" ]]; then
+            mntpoint="$TMPDIR/tz-rawmnt"
+            mkdir -p "$mntpoint"
+            if mount -o loop,ro "$rawimg" "$mntpoint"; then
+                if [[ -L "$mntpoint/etc/localtime" ]]; then
+                    target=$(readlink "$mntpoint/etc/localtime")
+                    if [[ "$target" == "../usr/share/zoneinfo/Europe/London" ]]; then
+                        ok "raw export --timezone"
+                    else
+                        fail "raw export --timezone: expected ../usr/share/zoneinfo/Europe/London, got $target"
+                    fi
+                else
+                    fail "raw export --timezone: /etc/localtime is not a symlink"
+                fi
+                umount "$mntpoint"
+            else
+                fail "raw export --timezone: failed to mount image"
+            fi
+        else
+            fail "raw export --timezone: output file not created"
+        fi
+    else
+        fail "raw export --timezone: command failed"
+    fi
+    rm -f "$rawimg"
+else
+    skipped "raw export --timezone (mkfs.ext4 not available)"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 16: Invalid timezone (error case)
+# ---------------------------------------------------------------------------
+echo "=== Test 16: invalid timezone ==="
+
+if $SDME fs export ubuntu "$TMPDIR/tz-bad" --timezone Fake/Zone 2>/dev/null; then
+    fail "invalid timezone should error"
+    rm -rf "$TMPDIR/tz-bad"
+else
+    ok "invalid timezone rejected"
 fi
 
 # ---------------------------------------------------------------------------

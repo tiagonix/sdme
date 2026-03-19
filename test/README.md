@@ -182,7 +182,8 @@ sudo ./test/scripts/verify-network.sh
 
 Rootfs export end-to-end validation. Tests all output formats: directory
 copy, tarballs (uncompressed, gzip, bzip2, xz, zstd), raw ext4 disk
-images (auto-size and explicit `--size`), format override (`-f`), and
+images (auto-size and explicit `--size`), format override (`-f`),
+`--timezone` (dir, tar, raw image, invalid timezone rejection), and
 error handling for nonexistent rootfs.
 
 ```bash
