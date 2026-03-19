@@ -1660,7 +1660,7 @@ sdme can run Kubernetes Pod YAML files as nspawn containers. Each pod maps
 to a single container where each workload runs as a separate systemd
 service chrooted into its own rootfs under `/oci/apps/{name}/root`. For
 usage examples and CLI reference, see
-[usage.md, Section 7](usage.md#7-kubernetes-pod-yaml).
+[usage.md, Section 8](usage.md#8-kubernetes-pod-yaml).
 
 ### Pipeline
 

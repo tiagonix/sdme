@@ -130,6 +130,14 @@ pub struct Config {
     #[serde(default = "default_auto_fs_gc")]
     pub auto_fs_gc: bool,
 
+    /// Comma-separated systemd services to mask at container create time.
+    ///
+    /// Each service gets a `/dev/null` symlink in the overlayfs upper layer's
+    /// `etc/systemd/system/`. Default: `"systemd-resolved.service"`.
+    /// Empty string masks nothing. Skipped for NixOS/Nix rootfs.
+    #[serde(default = "default_create_masked_services")]
+    pub default_create_masked_services: String,
+
     /// Per-distro chroot command overrides for import/export preparation.
     /// Absent = use built-in defaults. Empty vec = explicitly do nothing.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -208,6 +216,10 @@ fn default_auto_fs_gc() -> bool {
     true
 }
 
+fn default_create_masked_services() -> String {
+    "systemd-resolved.service".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -234,6 +246,7 @@ impl Default for Config {
             stop_timeout_terminate: default_stop_timeout_terminate(),
             stop_timeout_kill: default_stop_timeout_kill(),
             auto_fs_gc: default_auto_fs_gc(),
+            default_create_masked_services: default_create_masked_services(),
             distros: HashMap::new(),
         }
     }
@@ -305,6 +318,10 @@ impl Config {
         println!("stop_timeout_kill = {}", self.stop_timeout_kill);
         let auto_fs_gc = if self.auto_fs_gc { "yes" } else { "no" };
         println!("auto_fs_gc = {auto_fs_gc}");
+        println!(
+            "default_create_masked_services = {}",
+            self.default_create_masked_services
+        );
     }
 }
 

@@ -675,9 +675,106 @@ cloud-hypervisor with Ctrl-A x; exit QEMU with Ctrl-A x.
 - `systemd-logind` fails inside the VM (no seat or input devices). This
   is harmless and does not affect serial console login.
 
-## 5. OCI applications
+## 5. Security, networking, and resource limits
 
-### 5.1 Base OS vs application images
+This guide focuses on the concepts and workflows above. For the remaining
+topics, the existing documentation covers them well:
+
+**Security.** sdme provides three tiers of hardening. `--userns` enables
+user namespace isolation standalone. `--hardened` enables user namespace
+isolation, private network, no-new-privileges, and drops several
+capabilities. `--strict` adds Docker-equivalent capability drops, seccomp
+filters, and AppArmor. Individual flags (`--capability`,
+`--drop-capability`, `--no-new-privileges`, `--read-only`,
+`--system-call-filter`, `--apparmor-profile`) are also available for
+fine-grained control.
+
+```bash
+sudo sdme new -r ubuntu --hardened
+sudo sdme new -r ubuntu --strict
+```
+
+See [security.md](security.md) for the full comparison with Docker and
+Podman, and [architecture.md, Section 14](architecture.md#14-security)
+for implementation details.
+
+**Networking.** Containers share the host network by default. For
+isolation, use `--private-network`, optionally combined with
+`--network-veth`, `--network-bridge`, `--network-zone`, or `--port`:
+
+```bash
+sudo sdme create mybox --private-network --network-veth --port 8080:80
+```
+
+Network zones let containers in the same zone reach each other.
+When using `--network-zone`, sdme automatically leaves
+`systemd-resolved` unmasked so that LLMNR/mDNS enables
+container-to-container name resolution within the zone. For other
+private-network modes, resolved is masked by default because the
+container cannot bind 127.0.0.53 (already owned by the host):
+
+```bash
+sudo sdme create -r nginx --private-network --network-zone=myzone -p 8080:80 web
+sudo sdme create -r ubuntu --private-network --network-zone=myzone client
+sudo sdme start web client
+```
+
+See [architecture.md, Section 9](architecture.md#9-networking) for details.
+
+**Service masking.** By default, sdme masks `systemd-resolved.service`
+in the overlayfs upper layer at container create time. This is
+configurable:
+
+```bash
+# Change the default for all new containers
+sudo sdme config set default_create_masked_services "systemd-resolved.service"
+
+# Mask nothing by default
+sudo sdme config set default_create_masked_services ""
+
+# Override per container (comma-separated)
+sudo sdme create mybox --masked-services=systemd-resolved.service,systemd-networkd.service
+
+# Mask nothing for this container
+sudo sdme create mybox --masked-services=
+```
+
+When `--network-zone` is set and `--masked-services` is not explicitly
+passed, `systemd-resolved.service` is automatically removed from the
+default mask list. NixOS/Nix rootfs always skip masking because NixOS
+activation replaces `/etc/systemd/system` with an immutable symlink.
+
+Host-rootfs containers additionally mask host-specific `.mount`,
+`.swap`, and `.automount` units to prevent them from leaking through
+overlayfs. This is separate from `--masked-services` and always applies.
+
+**Resource limits.** Memory and CPU limits are applied via cgroups:
+
+```bash
+sudo sdme create mybox -r ubuntu --memory 2G --cpus 0.5
+sudo sdme set mybox --memory 4G --cpus 2
+```
+
+**Building rootfs.** `sdme fs build` takes a Dockerfile-like config to
+produce custom rootfs images. Use `-t` to override the boot timeout for
+build steps that start the container (e.g. `sdme fs build -t 180 ...`).
+See [architecture.md, Section 7](architecture.md#7-fs-build-building-root-filesystems).
+
+**Configuration.** Settings are stored in `/etc/sdme.conf` (TOML).
+
+```bash
+sudo sdme config get                    # show all settings
+sudo sdme config set boot_timeout 120   # change a setting
+```
+
+The `boot_timeout` config key (default 60 seconds) controls how long sdme
+waits for a container to reach the running state. The `-t`/`--timeout`
+flag on `new`, `start`, `join --start`, `fs build`, and `kube apply`
+overrides this value for a single invocation.
+
+## 6. OCI applications
+
+### 6.1 Base OS vs application images
 
 This is the key conceptual distinction for OCI images in sdme. A "base OS"
 image (ubuntu, fedora, debian) contains systemd and can boot as a
@@ -691,7 +788,7 @@ an application that needs a base OS to run inside. You can override this
 with `--oci-mode` (values: `auto`, `base`, `app`), but auto-detection
 works correctly in practice.
 
-### 5.2 How OCI apps work
+### 6.2 How OCI apps work
 
 When you import an application image with `--base-fs`, sdme uses a
 "capsule" model. It takes your base OS rootfs (which has systemd), copies
@@ -738,7 +835,7 @@ PID, IPC, and mount namespaces via `nsenter`, so commands like `ps` show
 only the app's processes, not the entire container init tree. `join --oci`
 defaults to `/bin/sh` when no command is given.
 
-### 5.3 The convenience of this model
+### 6.3 The convenience of this model
 
 Why is this useful? You get the OCI distribution model (pull from any
 registry, use any image on Docker Hub, GHCR, or Quay) combined with the
@@ -803,7 +900,7 @@ host-side directories under `/var/lib/sdme/volumes/{container}/`. You
 can suppress this behavior with `--no-oci-ports` and `--no-oci-volumes`.
 Your own `--port` and `--bind` flags always take priority.
 
-### 5.4 Security
+### 6.4 Security
 
 OCI apps get additional isolation automatically, beyond what the nspawn
 container provides. The `isolate` binary (a static ELF under 2 KiB,
@@ -821,7 +918,7 @@ defaults.
 For the full details, see [security.md, Part 2](security.md#part-2-oci-workload-security)
 and [architecture.md, Section 16](architecture.md#16-oci-integration).
 
-### 5.5 Tested OCI app matrix
+### 6.5 Tested OCI app matrix
 
 The following applications are verified across all supported base OS
 distros in the release process:
@@ -838,7 +935,7 @@ OCI port forwarding and volume mounting are additionally tested on ubuntu
 and fedora. See [test/results.md](../test/results.md) for the complete
 test matrix.
 
-## 6. Pods
+## 7. Pods
 
 A pod is a shared network namespace that multiple containers can join.
 This is the same concept as Kubernetes pods: one network, multiple
@@ -857,7 +954,7 @@ sudo sdme pod rm -f my-pod       # force remove
 A pod creates a network namespace at `/run/sdme/pods/{name}/netns` with
 only a loopback interface. The namespace persists until the pod is removed.
 
-### 6.1 The `--pod` flag: whole container in the pod's netns
+### 7.1 The `--pod` flag: whole container in the pod's netns
 
 With `--pod`, the entire nspawn container (init, services, everything)
 runs in the pod's network namespace:
@@ -890,7 +987,7 @@ boundary.
 If you need both pod networking and security hardening, use `--oci-pod`
 instead (see below).
 
-### 6.2 The `--oci-pod` flag: OCI app only in the pod's netns
+### 7.2 The `--oci-pod` flag: OCI app only in the pod's netns
 
 With `--oci-pod`, only the `sdme-oci-{name}.service` process enters the
 pod's network namespace. The container's systemd init and other services
@@ -917,7 +1014,7 @@ Both flags can be set on the same container, pointing to the same or
 different pods. When set to different pods, container-level networking
 and application-level networking operate in separate network namespaces.
 
-### 6.3 Multi-service patterns
+### 7.3 Multi-service patterns
 
 Pods are most useful when you have multiple services that need to
 communicate over localhost:
@@ -941,7 +1038,7 @@ sudo sdme create --oci-pod=web-tier --hardened -r redis cache
 sudo sdme start frontend cache
 ```
 
-### 6.4 What's tested
+### 7.4 What's tested
 
 Pod tests verify loopback connectivity between `--pod` containers, correct
 rejection of incompatible flag combinations (`--pod` with `--hardened`,
@@ -952,7 +1049,7 @@ successful `--oci-pod` with `--hardened`. See
 For the pod implementation internals, see
 [architecture.md, Section 10](architecture.md#10-pods).
 
-## 7. Kubernetes Pod YAML
+## 8. Kubernetes Pod YAML
 
 sdme can create containers from Kubernetes Pod YAML files. Each pod maps
 to a single nspawn container where each workload runs as a separate
@@ -960,7 +1057,7 @@ systemd service (`sdme-oci-{name}.service`) chrooted into its own rootfs.
 Multi-container pods share localhost and can communicate the same way they
 would in a real Kubernetes cluster.
 
-### 7.1 Preparing a base rootfs
+### 8.1 Preparing a base rootfs
 
 You need a base rootfs with systemd. If you followed section 4, you
 already have one. If not:
@@ -975,7 +1072,7 @@ To avoid passing `--base-fs` on every kube command:
 sudo sdme config set default_base_fs ubuntu
 ```
 
-### 7.2 Running kube pods
+### 8.2 Running kube pods
 
 Write a Pod YAML file (or use an existing one). Here is a minimal example:
 
@@ -1085,7 +1182,7 @@ L4 (multi-container localhost connectivity), L5 (Redis round-trip), and
 L6 (a full Gitea + MySQL + Nginx stack). See
 [test/results.md](../test/results.md) for the complete results.
 
-### 7.3 Composing kube pods with pod networking
+### 8.3 Composing kube pods with pod networking
 
 You can combine `--pod` or `--oci-pod` with kube pods to give multiple
 kube containers a shared network namespace:
@@ -1099,76 +1196,16 @@ sudo sdme kube apply -f backend.yaml --base-fs ubuntu --pod infra
 Both kube containers now share localhost. The frontend can reach the
 backend's services directly, and vice versa.
 
+**Note on userns and kube multi-container pods.** The `--pod`/`--userns`
+incompatibility (Section 7.1) applies to connecting *separate* nspawn
+containers via `--pod`. Kube multi-container pods are different: all OCI
+apps run inside a *single* nspawn container as separate systemd services,
+sharing localhost automatically. No `setns(CLONE_NEWNET)` is involved, so
+`--hardened`, `--strict`, and `--userns` all work fine with multi-container
+kube pods.
+
 For the full kube specification reference, see
 [architecture.md, Section 17](architecture.md#17-kubernetes-pod-support).
-
-## 8. Security, networking, and resource limits
-
-This guide focuses on the concepts and workflows above. For the remaining
-topics, the existing documentation covers them well:
-
-**Security.** sdme provides three tiers of hardening. `--userns` enables
-user namespace isolation standalone. `--hardened` enables user namespace
-isolation, private network, no-new-privileges, and drops several
-capabilities. `--strict` adds Docker-equivalent capability drops, seccomp
-filters, and AppArmor. Individual flags (`--capability`,
-`--drop-capability`, `--no-new-privileges`, `--read-only`,
-`--system-call-filter`, `--apparmor-profile`) are also available for
-fine-grained control.
-
-```bash
-sudo sdme new -r ubuntu --hardened
-sudo sdme new -r ubuntu --strict
-```
-
-See [security.md](security.md) for the full comparison with Docker and
-Podman, and [architecture.md, Section 14](architecture.md#14-security)
-for implementation details.
-
-**Networking.** Containers share the host network by default. For
-isolation, use `--private-network`, optionally combined with
-`--network-veth`, `--network-bridge`, `--network-zone`, or `--port`:
-
-```bash
-sudo sdme create mybox --private-network --network-veth --port 8080:80
-```
-
-Network zones let containers in the same zone reach each other. Note that
-sdme masks `systemd-resolved` in all containers, so DNS-based name
-resolution (e.g. `curl http://web`) requires unmasking resolved or
-configuring alternative name resolution inside private-network containers:
-
-```bash
-sudo sdme create -r nginx --private-network --network-zone=myzone -p 8080:80 web
-sudo sdme create -r ubuntu --private-network --network-zone=myzone client
-sudo sdme start web client
-```
-
-See [architecture.md, Section 9](architecture.md#9-networking) for details.
-
-**Resource limits.** Memory and CPU limits are applied via cgroups:
-
-```bash
-sudo sdme create mybox -r ubuntu --memory 2G --cpus 0.5
-sudo sdme set mybox --memory 4G --cpus 2
-```
-
-**Building rootfs.** `sdme fs build` takes a Dockerfile-like config to
-produce custom rootfs images. Use `-t` to override the boot timeout for
-build steps that start the container (e.g. `sdme fs build -t 180 ...`).
-See [architecture.md, Section 7](architecture.md#7-fs-build-building-root-filesystems).
-
-**Configuration.** Settings are stored in `/etc/sdme.conf` (TOML).
-
-```bash
-sudo sdme config get                    # show all settings
-sudo sdme config set boot_timeout 120   # change a setting
-```
-
-The `boot_timeout` config key (default 60 seconds) controls how long sdme
-waits for a container to reach the running state. The `-t`/`--timeout`
-flag on `new`, `start`, `join --start`, `fs build`, and `kube apply`
-overrides this value for a single invocation.
 
 ## 9. Further reading
 

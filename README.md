@@ -37,7 +37,14 @@ These containers support all the expected systemd-nspawn capabilities: port
 binding, private networking, bind mounts, and complex security configurations.
 Run pretty much any systemd-capable distro as a container on any Linux machine.
 
-See [security, networking, and resource limits](docs/usage.md#8-security-networking-and-resource-limits).
+See [security, networking, and resource limits](docs/usage.md#5-security-networking-and-resource-limits).
+
+## Exporting rootfs and containers
+
+Export any imported rootfs or container filesystem as a directory, tarball, or
+raw disk image for sharing or producing bootable VM images.
+
+See [docs/usage.md](docs/usage.md#45-exporting-root-filesystems) for export details.
 
 ---
 
@@ -52,7 +59,7 @@ sdme can run OCI application images (e.g. nginx, redis, mysql) as systemd
 services inside a booted container, with port bindings and volumes wired
 through. The OCI application runs in a chroot inside the systemd container.
 
-See [OCI applications](docs/usage.md#5-oci-applications).
+See [OCI applications](docs/usage.md#6-oci-applications).
 
 ### Dual security model and pods
 
@@ -61,21 +68,14 @@ the systemd container can have different configurations and security
 permissions. Containers can be placed in a **pod**, a shared network namespace,
 letting you compose a control plane and an application plane separately.
 
-See [pods](docs/usage.md#6-pods).
+See [pods](docs/usage.md#7-pods).
 
 ### Kubernetes pod support
 
 sdme can consume Kube Pod YAML and set up multi-container pods on a systemd
 container, with volumes, port bindings, config maps, secrets, and probes.
 
-See [Kubernetes Pod YAML](docs/usage.md#7-kubernetes-pod-yaml).
-
-### Exporting rootfs and containers
-
-Export any imported rootfs or container filesystem as a directory, tarball, or
-raw disk image for sharing or producing bootable VM images.
-
-See [docs/usage.md](docs/usage.md#45-exporting-root-filesystems) for export details.
+See [Kubernetes Pod YAML](docs/usage.md#8-kubernetes-pod-yaml).
 
 ## Further reading
 

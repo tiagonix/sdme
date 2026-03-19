@@ -59,6 +59,8 @@ pub struct KubeCreateOptions<'a> {
     pub security: crate::SecurityConfig,
     /// Whether `--hardened` or `--strict` was specified (forces private network).
     pub hardened: bool,
+    /// Systemd services to mask in the overlayfs upper layer at create time.
+    pub masked_services: Vec<String>,
 }
 
 /// Create a kube pod: parse YAML, pull images, build combined rootfs, create container.
@@ -442,6 +444,7 @@ WantedBy=multi-user.target
         pod: opts.pod.map(String::from),
         oci_pod: opts.oci_pod.map(String::from),
         security: opts.security.clone(),
+        masked_services: opts.masked_services.clone(),
         ..Default::default()
     };
     let name = crate::containers::create(datadir, &create_opts, opts.verbose)?;

@@ -176,6 +176,10 @@ enum Command {
         /// Enable auto-start on boot
         #[arg(long)]
         enable: bool,
+
+        /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
+        #[arg(long, value_delimiter = ',')]
+        masked_services: Option<Vec<String>>,
     },
 
     /// Run a command in a running container
@@ -285,6 +289,10 @@ enum Command {
         /// Enable auto-start on boot
         #[arg(long)]
         enable: bool,
+
+        /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
+        #[arg(long, value_delimiter = ',')]
+        masked_services: Option<Vec<String>>,
 
         /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -644,6 +652,10 @@ enum KubeCommand {
 
         #[command(flatten)]
         security: SecurityArgs,
+
+        /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
+        #[arg(long, value_delimiter = ',')]
+        masked_services: Option<Vec<String>>,
     },
     /// Create a kube pod from a YAML file (without starting)
     Create {
@@ -665,6 +677,10 @@ enum KubeCommand {
 
         #[command(flatten)]
         security: SecurityArgs,
+
+        /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
+        #[arg(long, value_delimiter = ',')]
+        masked_services: Option<Vec<String>>,
     },
     /// Delete a kube pod (stop, remove container and rootfs)
     Delete {
@@ -1037,6 +1053,35 @@ fn resolve_opaque_dirs(
     } else {
         Vec::new()
     }
+}
+
+/// Resolve which systemd services to mask at create time.
+///
+/// If the user passed explicit `--masked-services`, use that as-is.
+/// Otherwise, use the config default. When using defaults and
+/// `--network-zone` is set, automatically remove `systemd-resolved.service`
+/// from the list (zones enable inter-container DNS via resolved).
+fn resolve_masked_services(
+    cli_masked: Option<Vec<String>>,
+    network: &NetworkConfig,
+    cfg: &config::Config,
+) -> Vec<String> {
+    if let Some(explicit) = cli_masked {
+        // Explicit override: use as-is (even if empty).
+        return explicit.into_iter().filter(|s| !s.is_empty()).collect();
+    }
+    // Config defaults.
+    let mut list: Vec<String> = cfg
+        .default_create_masked_services
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    // Auto-unmask resolved for --network-zone containers.
+    if network.network_zone.is_some() {
+        list.retain(|s| s != "systemd-resolved.service");
+    }
+    list
 }
 
 /// Auto-wire OCI port forwarding from the rootfs `/oci/ports` file.
@@ -1559,6 +1604,7 @@ fn main() -> Result<()> {
             no_oci_volumes,
             oci_env,
             enable,
+            masked_services,
         } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
@@ -1577,6 +1623,7 @@ fn main() -> Result<()> {
             let (binds, envs) = parse_mounts(mounts)?;
             let oci_envs = validate_oci_envs(oci_env)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
+            let masked_services = resolve_masked_services(masked_services, &network, &cfg);
 
             // Auto-wire OCI ports if the rootfs declares them.
             if !no_oci_ports {
@@ -1609,6 +1656,7 @@ fn main() -> Result<()> {
                 security: sec,
                 oci_volumes,
                 oci_envs,
+                masked_services,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
 
@@ -1843,6 +1891,7 @@ fn main() -> Result<()> {
             no_oci_volumes,
             oci_env,
             enable,
+            masked_services,
             command,
         } => {
             system_check::check_systemd_version(252)?;
@@ -1862,6 +1911,7 @@ fn main() -> Result<()> {
             let (binds, envs) = parse_mounts(mounts)?;
             let oci_envs = validate_oci_envs(oci_env)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
+            let masked_services = resolve_masked_services(masked_services, &network, &cfg);
 
             // Auto-wire OCI ports if the rootfs declares them.
             if !no_oci_ports {
@@ -1894,6 +1944,7 @@ fn main() -> Result<()> {
                 security: sec,
                 oci_volumes,
                 oci_envs,
+                masked_services,
             };
             let is_host_rootfs = opts.rootfs.is_none();
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
@@ -2170,6 +2221,7 @@ fn main() -> Result<()> {
                 pod,
                 oci_pod,
                 security: security_args,
+                masked_services,
             } => {
                 system_check::check_systemd_version(252)?;
                 let (sec, hardened) = parse_security(security_args, &cfg)?;
@@ -2187,6 +2239,11 @@ fn main() -> Result<()> {
                 let base_fs = effective_base_fs
                     .as_deref()
                     .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
+                // Kube containers always use an imported rootfs (never host),
+                // so network_zone is not applicable (kube doesn't expose it).
+                // Resolve masked services with a default NetworkConfig.
+                let masked_services =
+                    resolve_masked_services(masked_services, &NetworkConfig::default(), &cfg);
                 let docker_creds = docker_credentials(&cfg);
                 let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
                 let name = kube::kube_create(
@@ -2203,6 +2260,7 @@ fn main() -> Result<()> {
                         auto_gc: cfg.auto_fs_gc,
                         security: sec,
                         hardened,
+                        masked_services,
                     },
                 )?;
                 eprintln!("starting '{name}'");
@@ -2244,6 +2302,7 @@ fn main() -> Result<()> {
                 pod,
                 oci_pod,
                 security: security_args,
+                masked_services,
             } => {
                 system_check::check_systemd_version(252)?;
                 let (sec, hardened) = parse_security(security_args, &cfg)?;
@@ -2261,6 +2320,8 @@ fn main() -> Result<()> {
                 let base_fs = effective_base_fs
                     .as_deref()
                     .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
+                let masked_services =
+                    resolve_masked_services(masked_services, &NetworkConfig::default(), &cfg);
                 let docker_creds = docker_credentials(&cfg);
                 let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
                 let name = kube::kube_create(
@@ -2277,6 +2338,7 @@ fn main() -> Result<()> {
                         auto_gc: cfg.auto_fs_gc,
                         security: sec,
                         hardened,
+                        masked_services,
                     },
                 )?;
                 println!("{name}");

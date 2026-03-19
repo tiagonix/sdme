@@ -48,6 +48,8 @@ pub struct CreateOptions {
     pub oci_volumes: Vec<String>,
     /// OCI environment variables from the image.
     pub oci_envs: Vec<String>,
+    /// Systemd services to mask in the overlayfs upper layer at create time.
+    pub masked_services: Vec<String>,
 }
 
 /// Read the current process umask. There is no "get umask" syscall, so
@@ -199,25 +201,28 @@ fn do_create(
     // These units reference block devices and paths (e.g. /data) that don't
     // exist inside the container, causing "Failed to isolate default target"
     // when systemd can't resolve their dependencies at boot.
-    //
-    // Also mask systemd-resolved: when a container shares the host's network
-    // namespace (the default), the container's resolved cannot bind 127.0.0.53
-    // (already owned by the host) and ends up with no upstream DNS servers.
-    // Masking makes NSS skip the resolve module and fall through to "dns",
-    // which queries the host's resolver via /etc/resolv.conf.
-    //
-    // For imported rootfs these patches are applied at import time
-    // (see import/mod.rs::patch_rootfs_services).
     if rootfs == Path::new("/") {
         mask_host_mount_units(&systemd_unit_dir, verbose)?;
+    }
 
-        let resolved_mask = systemd_unit_dir.join("systemd-resolved.service");
-        symlink("/dev/null", &resolved_mask).with_context(|| {
-            format!(
-                "failed to mask systemd-resolved at {}",
-                resolved_mask.display()
-            )
-        })?;
+    // Mask configurable systemd services in the overlayfs upper layer.
+    // Skipped for NixOS/Nix rootfs because NixOS activation replaces
+    // /etc/systemd/system with an immutable symlink to the Nix store.
+    let family = rootfs::detect_distro_family(rootfs);
+    if family != rootfs::DistroFamily::NixOS && family != rootfs::DistroFamily::Nix {
+        for svc in &opts.masked_services {
+            let mask_path = systemd_unit_dir.join(svc);
+            if !mask_path.exists() {
+                symlink("/dev/null", &mask_path).with_context(|| {
+                    format!("failed to mask {} at {}", svc, mask_path.display())
+                })?;
+                if verbose {
+                    eprintln!("masked service: {svc}");
+                }
+            }
+        }
+    } else if verbose && !opts.masked_services.is_empty() {
+        eprintln!("skipping service masking for NixOS/Nix rootfs");
     }
 
     // When /etc/systemd/system is opaque, the dbus.service alias from the
@@ -300,7 +305,7 @@ fn do_create(
     }
 
     if verbose {
-        eprintln!("wrote hostname, hosts, resolv.conf, machine-id, and fstab files; masked systemd-resolved");
+        eprintln!("wrote hostname, hosts, resolv.conf, machine-id, and fstab files");
     }
 
     let rootfs_value = if rootfs == Path::new("/") {
@@ -441,6 +446,9 @@ fn do_create(
     }
 
     opts.security.write_to_state(&mut state);
+    if !opts.masked_services.is_empty() {
+        state.set("MASKED_SERVICES", opts.masked_services.join(","));
+    }
     if !opaque_dirs.is_empty() {
         state.set("OPAQUE_DIRS", opaque_dirs.join(","));
     }

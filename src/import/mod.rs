@@ -1201,16 +1201,9 @@ fn patch_rootfs_services(
     fs::create_dir_all(&unit_dir)
         .with_context(|| format!("failed to create {}", unit_dir.display()))?;
 
-    // Mask systemd-resolved.
-    let resolved = unit_dir.join("systemd-resolved.service");
-    if !resolved.exists() {
-        std::os::unix::fs::symlink("/dev/null", &resolved).with_context(|| {
-            format!("failed to mask systemd-resolved at {}", resolved.display())
-        })?;
-        if verbose {
-            eprintln!("masked systemd-resolved in rootfs");
-        }
-    }
+    // Note: systemd-resolved masking is handled at container create time
+    // (see containers.rs) rather than at import time. This allows per-container
+    // control via --masked-services and automatic unmasking for --network-zone.
 
     // Unmask systemd-logind if it points to /dev/null.
     let logind = unit_dir.join("systemd-logind.service");
