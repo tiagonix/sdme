@@ -1,6 +1,6 @@
-.TH SDME 1 "2026-03-13" "sdme" "User Commands"
+.TH SDME 1 "2026-03-19" "sdme" "User Commands"
 .SH NAME
-sdme \- booted systemd\-nspawn containers with OCI and Kubernetes support
+sdme \- the systemd machine editor
 .SH SYNOPSIS
 .B sdme
 [\fB\-v\fR] [\fB\-\-config\fR \fIpath\fR]
@@ -43,7 +43,7 @@ Path to config file.
 Default:
 .IR /etc/sdme.conf .
 .SH COMMANDS
-.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-oci\-env \fIKEY=VALUE\fR]... [\-\-enable] [\-\-no\-oci\-ports] [\-\-no\-oci\-volumes] [\-\-] [\fIcommand\fR...]
+.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-oci\-env \fIKEY=VALUE\fR]... [\-\-enable] [\-\-no\-oci\-ports] [\-\-no\-oci\-volumes] [\-\-masked\-services \fIlist\fR] [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
 .I name
@@ -124,6 +124,13 @@ Use
 .B \-\-enable
 to enable auto\-start on boot via systemd.
 .PP
+Use
+.B \-\-masked\-services
+to override which systemd services are masked in the overlayfs upper layer;
+see
+.B SERVICE MASKING
+below.
+.PP
 Security hardening options can be set with
 .BR \-\-strict ,
 .BR \-\-hardened ,
@@ -140,7 +147,7 @@ below.
 .PP
 If boot fails or is interrupted (Ctrl+C or SIGTERM), the container is
 automatically stopped but preserved on disk for debugging or manual cleanup.
-.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-oci\-env \fIKEY=VALUE\fR]... [\-\-enable] [\-\-no\-oci\-ports] [\-\-no\-oci\-volumes]
+.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-oci\-env \fIKEY=VALUE\fR]... [\-\-enable] [\-\-no\-oci\-ports] [\-\-no\-oci\-volumes] [\-\-masked\-services \fIlist\fR]
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
 Resource limits can be set with
@@ -199,6 +206,13 @@ below.
 Use
 .B \-\-enable
 to enable auto\-start on boot via systemd.
+.PP
+Use
+.B \-\-masked\-services
+to override which systemd services are masked in the overlayfs upper layer;
+see
+.B SERVICE MASKING
+below.
 .PP
 Security hardening options can be set with
 .BR \-\-strict ,
@@ -736,7 +750,7 @@ or
 keys) unless
 .B \-f
 is given.
-.SS sdme kube apply \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-t \fIseconds\fR] [\fIsecurity\fR]
+.SS sdme kube apply \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-t \fIseconds\fR] [\fIsecurity\fR] [\-\-masked\-services \fIlist\fR]
 Create, start, and enter a container from a Kubernetes Pod YAML file.
 Equivalent to
 .B kube create
@@ -773,7 +787,7 @@ below.
 .PP
 If boot fails or is interrupted (Ctrl+C or SIGTERM), the container is
 automatically stopped but preserved on disk for debugging or manual cleanup.
-.SS sdme kube create \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\fIsecurity\fR]
+.SS sdme kube create \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\fIsecurity\fR] [\-\-masked\-services \fIlist\fR]
 Create a container from a Kubernetes Pod YAML file without starting it.
 .PP
 Parses the YAML, pulls each container's OCI image from the registry, builds
@@ -1156,6 +1170,19 @@ Values:
 Default:
 .BR yes .
 .TP
+.B default_create_masked_services
+Comma\-separated list of systemd service unit names to mask (symlink to
+.IR /dev/null )
+in the overlayfs upper layer at container create time.
+The
+.B \-\-masked\-services
+flag on
+.BR create / new / "kube apply" / "kube create"
+overrides this value per container.
+Set to an empty string to mask nothing by default.
+Default:
+.BR systemd\-resolved.service .
+.TP
 .B distros.<family>.import_prehook
 JSON array of chroot commands to make a rootfs bootable under nspawn
 during import (e.g. install systemd, dbus, pam).
@@ -1401,6 +1428,27 @@ cleans up stale artifacts.
 Default:
 .BR true .
 .TP
+.B default_create_masked_services
+String.
+Comma\-separated list of systemd service unit names to mask in the
+overlayfs upper layer at container create time.
+Each service gets a
+.I /dev/null
+symlink in the upper layer's
+.IR etc/systemd/system/ .
+Skipped for NixOS and Nix rootfs (NixOS activation replaces the directory).
+When
+.B \-\-network\-zone
+is set and
+.B \-\-masked\-services
+is not explicitly passed,
+.B systemd\-resolved.service
+is automatically removed from the default mask list to enable
+inter\-container name resolution via LLMNR/mDNS within the zone.
+Set to an empty string to mask nothing by default.
+Default:
+.BR systemd\-resolved.service .
+.TP
 .B distros.<family>.import_prehook
 Array of strings (TOML array).
 Chroot commands to make an imported rootfs bootable under nspawn
@@ -1455,8 +1503,10 @@ OCI volumes
 .RB ( OCI_VOLUMES ),
 kube pod metadata
 .RB ( KUBE ", " KUBE_CONTAINERS ", " KUBE_YAML_HASH ),
-and security hardening
-.RB ( DROP_CAPS ", " ADD_CAPS ", " NO_NEW_PRIVS ", " READ_ONLY ", " SYSCALL_FILTER ", " APPARMOR_PROFILE ).
+security hardening
+.RB ( DROP_CAPS ", " ADD_CAPS ", " NO_NEW_PRIVS ", " READ_ONLY ", " SYSCALL_FILTER ", " APPARMOR_PROFILE ),
+and masked services
+.RB ( MASKED_SERVICES ).
 .TP
 .I /var/lib/sdme/volumes/\fIname\fR/
 Per\-container OCI volume data (created automatically for OCI images that
@@ -1983,6 +2033,60 @@ Suppress automatic volume mounting from OCI image metadata.
 Volumes declared in the image's
 .I /oci/volumes
 file are ignored.
+.SH SERVICE MASKING
+At container create time, sdme masks systemd services by creating
+.I /dev/null
+symlinks in the overlayfs upper layer's
+.IR etc/systemd/system/ .
+This prevents the container from starting services that conflict with the host
+(e.g.\&
+.B systemd\-resolved
+cannot bind 127.0.0.53 when the host already owns it).
+.PP
+By default, the
+.B default_create_masked_services
+config key controls which services are masked (default:
+.BR systemd\-resolved.service ).
+The
+.B \-\-masked\-services
+flag overrides this per container.
+.TP
+.BI \-\-masked\-services " svc1,svc2,..."
+Comma\-separated list of systemd unit names to mask.
+Overrides the config default entirely (even if the list is empty).
+An empty value masks nothing.
+.PP
+.B Auto\-unmask for \-\-network\-zone:
+When using config defaults (no explicit
+.BR \-\-masked\-services )
+and the container has
+.BR \-\-network\-zone ,
+.B systemd\-resolved.service
+is automatically removed from the mask list.
+Zones create a virtual bridge where containers get their own network
+namespace, so resolved can bind 127.0.0.53 without conflict and
+LLMNR/mDNS enables container\-to\-container name resolution within the zone.
+.PP
+.B NixOS/Nix rootfs:
+Service masking is skipped entirely for NixOS and Nix rootfs because
+NixOS activation replaces
+.I /etc/systemd/system
+with an immutable symlink to the Nix store.
+.PP
+.B Host\-rootfs containers:
+In addition to the configurable service masking, host\-rootfs containers
+(no
+.BR \-r )
+also mask host\-specific
+.BR .mount ", " .swap ", and " .automount
+units from
+.IR /etc/systemd/system/ .
+This is separate from
+.B \-\-masked\-services
+and always applies.
+.PP
+The masked services list is stored in the container state file as
+.BR MASKED_SERVICES .
 .SH PODS
 Pods provide a shared network namespace for multiple containers.
 Containers in the same pod can reach each other via localhost.
