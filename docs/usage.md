@@ -556,6 +556,56 @@ cloud-hypervisor with Ctrl-A x; exit QEMU with Ctrl-A x.
 - `systemd-logind` fails inside the VM (no seat or input devices). This
   is harmless and does not affect serial console login.
 
+### 4.7 Building root filesystems
+
+`sdme fs build` takes a Dockerfile-like config and produces a new
+rootfs. The build engine creates a temporary container from the base
+rootfs, starts it, and runs all operations against the live container.
+
+**Basic example** (host-path COPY and RUN):
+
+```bash
+cat <<'EOF' > build.conf
+FROM ubuntu
+COPY ./my-app /opt/my-app
+RUN apt-get update && apt-get install -y libssl3
+RUN systemctl enable my-app.service
+EOF
+
+sudo sdme fs build build.conf my-custom-rootfs
+```
+
+**Cross-rootfs COPY.** Copy files from another imported rootfs using the
+`fs:name:/path` prefix:
+
+```
+FROM ubuntu
+COPY fs:base-tools:/usr/local/bin/helper /usr/local/bin/helper
+RUN chmod +x /usr/local/bin/helper
+```
+
+**Cross-container COPY.** Copy files from an existing container using
+the `container-name:/path` prefix:
+
+```
+FROM ubuntu
+COPY dev-container:/etc/app.conf /etc/app.conf
+```
+
+`FROM` accepts an optional `fs:` prefix for explicitness (`FROM fs:ubuntu`
+is equivalent to `FROM ubuntu`).
+
+`/tmp` is persistent in builds — files written there survive across COPY
+and RUN steps. `/run` and `/dev/shm` are rejected as COPY destinations.
+
+Use `--force` (`-f`) to replace an existing output rootfs with the same
+name. Use `-t` to override the boot timeout for long-running RUN steps
+(e.g. `sdme fs build -t 180 build.conf my-rootfs`).
+
+See [architecture.md, Section 7](architecture.md#7-fs-build-building-root-filesystems)
+for design details (resource locking, stale build cleanup, overlayfs
+lifecycle).
+
 ## 5. Security, networking, and resource limits
 
 This guide focuses on the concepts and workflows above. For the remaining
@@ -641,10 +691,8 @@ sudo sdme create mybox -r ubuntu --memory 2G --cpus 0.5
 sudo sdme set mybox --memory 4G --cpus 2
 ```
 
-**Building rootfs.** `sdme fs build` takes a Dockerfile-like config to
-produce custom rootfs images. Use `-t` to override the boot timeout for
-build steps that start the container (e.g. `sdme fs build -t 180 ...`).
-See [architecture.md, Section 7](architecture.md#7-fs-build-building-root-filesystems).
+**Building rootfs.** See [Section 4.7](#47-building-root-filesystems)
+below for the full guide on `sdme fs build`.
 
 **Configuration.** Settings are stored in `/etc/sdme.conf` (TOML).
 

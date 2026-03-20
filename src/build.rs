@@ -5,12 +5,13 @@
 //! then captures the resulting merged filesystem as a new rootfs.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
 use crate::copy::sanitize_dest_path;
-use crate::{check_interrupted, containers, copy, rootfs, systemd, validate_name, State};
+use crate::{check_interrupted, containers, copy, lock, rootfs, systemd, validate_name, State};
 
 // --- Config types ---
 
@@ -21,10 +22,21 @@ struct BuildConfig {
     ops: Vec<BuildOp>,
 }
 
+/// Source location for a COPY directive.
+#[derive(Debug)]
+enum CopySource {
+    /// Host filesystem path (no prefix): `COPY /host/path /dst`
+    Host(PathBuf),
+    /// Another container: `COPY container-name:/path /dst`
+    Container { name: String, path: PathBuf },
+    /// Imported rootfs: `COPY fs:name:/path /dst`
+    Rootfs { name: String, path: PathBuf },
+}
+
 #[derive(Debug)]
 enum BuildOp {
     Copy {
-        src: PathBuf,
+        src: CopySource,
         dst: PathBuf,
         lineno: usize,
     },
@@ -35,6 +47,64 @@ enum BuildOp {
 }
 
 // --- Parser ---
+
+fn parse_copy_source(src: &str, config_path: &Path, lineno: usize) -> Result<CopySource> {
+    if let Some(rest) = src.strip_prefix("fs:") {
+        // fs:name:/path
+        let (name, path) = rest.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}:{}: COPY fs: source requires fs:name:/path format",
+                config_path.display(),
+                lineno
+            )
+        })?;
+        if name.is_empty() {
+            bail!(
+                "{}:{}: COPY fs: source name is empty",
+                config_path.display(),
+                lineno
+            );
+        }
+        validate_name(name).with_context(|| {
+            format!(
+                "{}:{}: invalid COPY fs source name",
+                config_path.display(),
+                lineno
+            )
+        })?;
+        if path.is_empty() || !path.starts_with('/') {
+            bail!(
+                "{}:{}: COPY fs: source path must be absolute",
+                config_path.display(),
+                lineno
+            );
+        }
+        Ok(CopySource::Rootfs {
+            name: name.to_string(),
+            path: PathBuf::from(path),
+        })
+    } else if let Some((maybe_name, path)) = src.split_once(':') {
+        // container-name:/path — only if the part before : is a valid name
+        if validate_name(maybe_name).is_ok() {
+            if path.is_empty() || !path.starts_with('/') {
+                bail!(
+                    "{}:{}: COPY container source path must be absolute",
+                    config_path.display(),
+                    lineno
+                );
+            }
+            Ok(CopySource::Container {
+                name: maybe_name.to_string(),
+                path: PathBuf::from(path),
+            })
+        } else {
+            // Not a valid container name, treat as a host path (e.g. /path:with:colons)
+            Ok(CopySource::Host(PathBuf::from(src)))
+        }
+    } else {
+        Ok(CopySource::Host(PathBuf::from(src)))
+    }
+}
 
 fn parse_build_config(path: &Path) -> Result<BuildConfig> {
     let content =
@@ -70,14 +140,16 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
                         lineno + 1
                     );
                 }
-                validate_name(rest).with_context(|| {
+                // Support both `FROM ubuntu` and `FROM fs:ubuntu`.
+                let rootfs_name = rest.strip_prefix("fs:").unwrap_or(rest);
+                validate_name(rootfs_name).with_context(|| {
                     format!(
                         "{}:{}: invalid FROM rootfs name",
                         path.display(),
                         lineno + 1
                     )
                 })?;
-                rootfs = Some(rest.to_string());
+                rootfs = Some(rootfs_name.to_string());
             }
             "COPY" => {
                 if rootfs.is_none() {
@@ -102,8 +174,9 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
                         lineno + 1
                     );
                 }
+                let copy_src = parse_copy_source(src, path, lineno + 1)?;
                 ops.push(BuildOp::Copy {
-                    src: PathBuf::from(src),
+                    src: copy_src,
                     dst: PathBuf::from(dst),
                     lineno: lineno + 1,
                 });
@@ -144,6 +217,98 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
     })
 }
 
+// --- Source resolution ---
+
+/// RAII guard that unmounts overlayfs on drop.
+struct OverlayGuard {
+    container_dir: PathBuf,
+}
+
+impl Drop for OverlayGuard {
+    fn drop(&mut self) {
+        containers::unmount_overlay(&self.container_dir);
+    }
+}
+
+struct ResolvedSource {
+    path: PathBuf,
+    /// If we temporarily mounted overlayfs, this guard handles unmount on drop.
+    _mount_guard: Option<OverlayGuard>,
+    /// Resource lock held for the duration of the copy.
+    _lock: Option<lock::ResourceLock>,
+}
+
+fn resolve_copy_source(datadir: &Path, src: &CopySource, verbose: bool) -> Result<ResolvedSource> {
+    match src {
+        CopySource::Host(path) => Ok(ResolvedSource {
+            path: path.clone(),
+            _mount_guard: None,
+            _lock: None,
+        }),
+        CopySource::Rootfs { name, path } => {
+            validate_name(name)?;
+            let rootfs_dir = datadir.join("fs").join(name);
+            if !rootfs_dir.is_dir() {
+                bail!("COPY source fs not found: {name}");
+            }
+            let lock = lock::lock_shared(datadir, "fs", name)
+                .with_context(|| format!("cannot read-lock rootfs '{name}' for COPY"))?;
+            let full_path = rootfs_dir.join(path.strip_prefix("/").unwrap_or(path));
+            Ok(ResolvedSource {
+                path: full_path,
+                _mount_guard: None,
+                _lock: Some(lock),
+            })
+        }
+        CopySource::Container { name, path } => {
+            containers::ensure_exists(datadir, name)?;
+            let lock = lock::lock_shared(datadir, "containers", name)
+                .with_context(|| format!("cannot read-lock container '{name}' for COPY"))?;
+            let container_dir = datadir.join("containers").join(name);
+
+            let (guard, resolved_path) = if systemd::is_active(name)? {
+                eprintln!(
+                    "warning: copying from running container '{name}'; \
+                     data may be inconsistent"
+                );
+                let full_path = container_dir
+                    .join("merged")
+                    .join(path.strip_prefix("/").unwrap_or(path));
+                (None, full_path)
+            } else {
+                // Stopped: mount a read-only overlay view.
+                let state_path = datadir.join("state").join(name);
+                let state = State::read_from(&state_path)?;
+                let rootfs_name = state.rootfs();
+                let rootfs_dir = if rootfs_name.is_empty() {
+                    PathBuf::from("/")
+                } else {
+                    datadir.join("fs").join(rootfs_name)
+                };
+                if verbose {
+                    eprintln!("mounting read-only overlay for container '{name}'");
+                }
+                containers::mount_overlay_ro(&rootfs_dir, &container_dir)?;
+                let full_path = container_dir
+                    .join("merged")
+                    .join(path.strip_prefix("/").unwrap_or(path));
+                (
+                    Some(OverlayGuard {
+                        container_dir: container_dir.clone(),
+                    }),
+                    full_path,
+                )
+            };
+
+            Ok(ResolvedSource {
+                path: resolved_path,
+                _mount_guard: guard,
+                _lock: Some(lock),
+            })
+        }
+    }
+}
+
 // --- Execution engine ---
 
 fn run_in_container(name: &str, command: &str, verbose: bool) -> Result<()> {
@@ -174,16 +339,20 @@ fn run_in_container(name: &str, command: &str, verbose: bool) -> Result<()> {
 }
 
 /// Directories that systemd mounts tmpfs over at boot, hiding any files
-/// written to the overlayfs upper layer underneath. COPY into these
-/// destinations would silently lose data.
+/// written to the overlayfs upper layer underneath.
+#[cfg(test)]
 const SHADOWED_DIRS: &[&str] = &["/tmp", "/run", "/dev/shm"];
+
+/// Shadowed directories for build context: /tmp is excluded because
+/// build containers bind-mount upper/tmp over nspawn's tmpfs, making /tmp persistent.
+const BUILD_SHADOWED_DIRS: &[&str] = &["/run", "/dev/shm"];
 
 /// Check if `dst` falls under a directory that is shadowed by a tmpfs
 /// mount at boot or marked as overlayfs-opaque, meaning files written
 /// to the upper layer would be invisible in the running container.
-fn check_shadowed_dest(dst: &Path, opaque_dirs: &[String]) -> Result<()> {
+fn check_shadowed_dest(dst: &Path, shadowed: &[&str], opaque_dirs: &[String]) -> Result<()> {
     let dst_str = dst.to_string_lossy();
-    for dir in SHADOWED_DIRS {
+    for dir in shadowed {
         if dst_str == *dir || dst_str.starts_with(&format!("{dir}/")) {
             bail!(
                 "COPY to {dst_str} is not supported: systemd mounts tmpfs over {dir} at boot, \
@@ -204,13 +373,14 @@ fn check_shadowed_dest(dst: &Path, opaque_dirs: &[String]) -> Result<()> {
 
 fn do_copy(
     upper_dir: &Path,
-    lower_dir: &Path,
+    check_dir: &Path,
     src: &Path,
     dst: &Path,
+    shadowed: &[&str],
     opaque_dirs: &[String],
     verbose: bool,
 ) -> Result<()> {
-    check_shadowed_dest(dst, opaque_dirs)?;
+    check_shadowed_dest(dst, shadowed, opaque_dirs)?;
     let rel_dst = sanitize_dest_path(dst)?;
     let mut target = upper_dir.join(&rel_dst);
 
@@ -218,10 +388,10 @@ fn do_copy(
         fs::symlink_metadata(src).with_context(|| format!("failed to stat {}", src.display()))?;
 
     // Check whether dst resolves to a directory in either layer.
-    let dst_is_dir = target.is_dir() || lower_dir.join(&rel_dst).is_dir();
+    let dst_is_dir = target.is_dir() || check_dir.join(&rel_dst).is_dir();
 
     // Check whether dst resolves to a file in either layer.
-    let dst_is_file = (!dst_is_dir) && (target.is_file() || lower_dir.join(&rel_dst).is_file());
+    let dst_is_file = (!dst_is_dir) && (target.is_file() || check_dir.join(&rel_dst).is_file());
 
     // Cannot copy a directory onto an existing file.
     if meta.is_dir() && dst_is_file {
@@ -277,47 +447,58 @@ fn execute_build(datadir: &Path, ctx: &ExecuteBuildContext<'_>) -> Result<()> {
     let mut container_running = false;
     let timeout = std::time::Duration::from_secs(ctx.boot_timeout);
 
+    // Eagerly start the container before any ops. This ensures:
+    // 1. systemd-tmpfiles cleanup of /tmp has finished before any COPY
+    // 2. The merged overlayfs view is available for dst existence checks
+    // Without this, COPY to /tmp before the first RUN would write to
+    // upper/tmp, but systemd-tmpfiles cleans /tmp during boot and
+    // deletes the file.
+    if !ctx.config.ops.is_empty() {
+        eprintln!("starting build container '{}'", ctx.container_name);
+        systemd::start(
+            datadir,
+            ctx.container_name,
+            ctx.tasks_max,
+            ctx.boot_timeout,
+            ctx.verbose,
+        )?;
+        systemd::await_boot(ctx.container_name, timeout, ctx.verbose)?;
+        container_running = true;
+    }
+
     for op in &ctx.config.ops {
         check_interrupted()?;
 
         match op {
             BuildOp::Run { command, lineno } => {
-                if !container_running {
-                    eprintln!("starting build container '{}'", ctx.container_name);
-                    systemd::start(
-                        datadir,
-                        ctx.container_name,
-                        ctx.tasks_max,
-                        ctx.boot_timeout,
-                        ctx.verbose,
-                    )?;
-                    systemd::await_boot(ctx.container_name, timeout, ctx.verbose)?;
-                    container_running = true;
-                }
                 run_in_container(ctx.container_name, command, ctx.verbose)
                     .with_context(|| format!("{}:{}", ctx.config.path.display(), lineno))?;
             }
             BuildOp::Copy { src, dst, lineno } => {
-                if container_running {
-                    eprintln!("stopping build container '{}'", ctx.container_name);
-                    containers::stop(
-                        ctx.container_name,
-                        containers::StopMode::Terminate,
-                        30,
-                        ctx.verbose,
-                    )?;
-                    container_running = false;
-                }
-                let upper_dir = datadir
-                    .join("containers")
-                    .join(ctx.container_name)
-                    .join("upper");
-                let lower_dir = datadir.join("fs").join(&ctx.config.rootfs);
+                // Hot COPY: container stays running. Files are written through
+                // the merged overlayfs mount so the kernel properly updates
+                // its dcache and the changes are immediately visible inside
+                // the container. Writing directly to upper/ while overlayfs
+                // is mounted is undefined behavior per the kernel docs.
+                let resolved = resolve_copy_source(datadir, src, ctx.verbose)?;
+                let container_dir = datadir.join("containers").join(ctx.container_name);
+                let (write_dir, check_dir) = if container_running {
+                    // Write through merged overlayfs; check against merged view.
+                    let merged = container_dir.join("merged");
+                    (merged.clone(), merged)
+                } else {
+                    // Container stopped: write to upper, check against rootfs.
+                    (
+                        container_dir.join("upper"),
+                        datadir.join("fs").join(&ctx.config.rootfs),
+                    )
+                };
                 do_copy(
-                    &upper_dir,
-                    &lower_dir,
-                    src,
+                    &write_dir,
+                    &check_dir,
+                    &resolved.path,
                     dst,
+                    BUILD_SHADOWED_DIRS,
                     ctx.opaque_dirs,
                     ctx.verbose,
                 )
@@ -384,16 +565,61 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
         bail!("fs not found: {}", config.rootfs);
     }
 
-    // Create a staging container.
+    // Acquire locks: shared on FROM rootfs, exclusive on output rootfs and build container.
     let staging_name = format!("build-{name}");
+    let _from_lock = lock::lock_shared(datadir, "fs", &config.rootfs)
+        .with_context(|| format!("cannot lock FROM rootfs '{}'", config.rootfs))?;
+    let _output_lock = lock::lock_exclusive(datadir, "fs", name)
+        .with_context(|| format!("cannot lock output rootfs '{name}'"))?;
+
+    // Clean up leftover build container from a prior interrupted build.
+    let state_path = datadir.join("state").join(&staging_name);
+    if state_path.exists() {
+        if systemd::is_active(&staging_name)? {
+            bail!(
+                "build container '{staging_name}' is already running; \
+                 is another build in progress?"
+            );
+        }
+        eprintln!("removing stale build container '{staging_name}'");
+        containers::remove(datadir, &staging_name, verbose)?;
+    }
+
     eprintln!("creating build container '{staging_name}'");
-    // Staging container runs as root for package installation and file copying.
     let create_opts = containers::CreateOptions {
         name: Some(staging_name.clone()),
         rootfs: Some(config.rootfs.clone()),
         ..Default::default()
     };
     containers::create(datadir, &create_opts, verbose)?;
+
+    // Make /tmp persistent across RUN and COPY steps by bind-mounting
+    // upper/tmp into the container. systemd-nspawn mounts tmpfs on /tmp
+    // before systemd starts (masking tmp.mount doesn't prevent this), so
+    // we bind-mount over the tmpfs to get a persistent /tmp backed by
+    // the overlayfs upper layer.
+    let upper_tmp = datadir
+        .join("containers")
+        .join(&staging_name)
+        .join("upper/tmp");
+    if !upper_tmp.exists() {
+        fs::create_dir(&upper_tmp)
+            .with_context(|| format!("failed to create {}", upper_tmp.display()))?;
+    }
+    fs::set_permissions(&upper_tmp, fs::Permissions::from_mode(0o1777))
+        .with_context(|| format!("failed to set permissions on {}", upper_tmp.display()))?;
+
+    // Add the /tmp bind mount to the container's state file.
+    let state_path = datadir.join("state").join(&staging_name);
+    let mut state = State::read_from(&state_path)?;
+    let bind_spec = format!("{}:/tmp:rw", upper_tmp.display());
+    let existing_binds = state.get("BINDS").unwrap_or("").to_string();
+    if existing_binds.is_empty() {
+        state.set("BINDS", &bind_spec);
+    } else {
+        state.set("BINDS", format!("{existing_binds}|{bind_spec}"));
+    }
+    state.write_to(&state_path)?;
 
     // Execute all build operations; clean up on failure.
     if let Err(e) = execute_build(
@@ -414,33 +640,14 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
     }
 
     // Capture the merged filesystem as the new rootfs.
-    let merged_dir = datadir
-        .join("containers")
-        .join(&staging_name)
-        .join("merged");
+    let container_dir = datadir.join("containers").join(&staging_name);
+    let merged_dir = container_dir.join("merged");
 
     // Mount overlayfs to get the merged view (container is stopped, so we mount manually).
-    let upper_dir = datadir.join("containers").join(&staging_name).join("upper");
-    let work_dir = datadir.join("containers").join(&staging_name).join("work");
-
-    let mount_opts = format!(
-        "lowerdir={},upperdir={},workdir={}",
-        rootfs_dir.display(),
-        upper_dir.display(),
-        work_dir.display()
-    );
-
-    let mount_status = std::process::Command::new("mount")
-        .args(["-t", "overlay", "overlay", "-o", &mount_opts])
-        .arg(&merged_dir)
-        .status()
-        .context("failed to run mount")?;
-    crate::check_interrupted()?;
-
-    if !mount_status.success() {
+    if let Err(e) = containers::mount_overlay(&rootfs_dir, &container_dir) {
         eprintln!("build failed (mount), removing '{staging_name}'");
         let _ = containers::remove(datadir, &staging_name, verbose);
-        bail!("failed to mount overlayfs for final copy");
+        return Err(e.context("failed to mount overlayfs for final copy"));
     }
 
     // Copy merged to staging rootfs, then atomic rename.
@@ -468,9 +675,7 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
     })();
 
     // Unmount regardless of copy result.
-    let _ = std::process::Command::new("umount")
-        .arg(&merged_dir)
-        .status();
+    containers::unmount_overlay(&container_dir);
 
     copy_result.context("failed to copy merged filesystem")?;
 
@@ -531,6 +736,8 @@ mod tests {
         path
     }
 
+    // --- Parser tests ---
+
     #[test]
     fn test_parse_basic() {
         let tmp = TempDir::new("basic");
@@ -550,7 +757,10 @@ mod tests {
         }
         match &config.ops[1] {
             BuildOp::Copy { src, dst, lineno } => {
-                assert_eq!(src, Path::new("/etc/hostname"));
+                match src {
+                    CopySource::Host(p) => assert_eq!(p, Path::new("/etc/hostname")),
+                    _ => panic!("expected Host source"),
+                }
                 assert_eq!(dst, Path::new("/etc/build-host"));
                 assert_eq!(*lineno, 3);
             }
@@ -680,12 +890,99 @@ mod tests {
         }
     }
 
+    // --- FROM fs: prefix tests ---
+
+    #[test]
+    fn test_parse_from_with_fs_prefix() {
+        let tmp = TempDir::new("from-fs-prefix");
+        let path = write_config(tmp.path(), "FROM fs:ubuntu\nRUN echo hi\n");
+        let config = parse_build_config(&path).unwrap();
+        assert_eq!(config.rootfs, "ubuntu");
+    }
+
+    // --- COPY source prefix tests ---
+
+    #[test]
+    fn test_parse_copy_container_source() {
+        let tmp = TempDir::new("copy-container");
+        let path = write_config(
+            tmp.path(),
+            "FROM ubuntu\nCOPY my-container:/etc/foo /etc/foo\n",
+        );
+        let config = parse_build_config(&path).unwrap();
+        match &config.ops[0] {
+            BuildOp::Copy { src, dst, .. } => {
+                match src {
+                    CopySource::Container { name, path } => {
+                        assert_eq!(name, "my-container");
+                        assert_eq!(path, Path::new("/etc/foo"));
+                    }
+                    _ => panic!("expected Container source"),
+                }
+                assert_eq!(dst, Path::new("/etc/foo"));
+            }
+            _ => panic!("expected Copy"),
+        }
+    }
+
+    #[test]
+    fn test_parse_copy_rootfs_source() {
+        let tmp = TempDir::new("copy-rootfs");
+        let path = write_config(
+            tmp.path(),
+            "FROM ubuntu\nCOPY fs:fedora:/etc/os-release /tmp/os-release\n",
+        );
+        let config = parse_build_config(&path).unwrap();
+        match &config.ops[0] {
+            BuildOp::Copy { src, .. } => match src {
+                CopySource::Rootfs { name, path } => {
+                    assert_eq!(name, "fedora");
+                    assert_eq!(path, Path::new("/etc/os-release"));
+                }
+                _ => panic!("expected Rootfs source"),
+            },
+            _ => panic!("expected Copy"),
+        }
+    }
+
+    #[test]
+    fn test_parse_copy_rootfs_missing_colon() {
+        let tmp = TempDir::new("copy-rootfs-no-colon");
+        let path = write_config(tmp.path(), "FROM ubuntu\nCOPY fs:ubuntu /dst\n");
+        let err = parse_build_config(&path).unwrap_err();
+        assert!(err.to_string().contains("fs:name:/path"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_copy_container_relative_path() {
+        let tmp = TempDir::new("copy-container-rel");
+        let path = write_config(tmp.path(), "FROM ubuntu\nCOPY my-container:relative /dst\n");
+        let err = parse_build_config(&path).unwrap_err();
+        assert!(err.to_string().contains("absolute"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_copy_host_path_with_colon() {
+        // A host path starting with / should not be parsed as a container source
+        // even if it contains a colon.
+        let tmp = TempDir::new("copy-host-colon");
+        let path = write_config(tmp.path(), "FROM ubuntu\nCOPY /path:with:colons /dst\n");
+        let config = parse_build_config(&path).unwrap();
+        match &config.ops[0] {
+            BuildOp::Copy { src, .. } => match src {
+                CopySource::Host(p) => assert_eq!(p, Path::new("/path:with:colons")),
+                _ => panic!("expected Host source, got {src:?}"),
+            },
+            _ => panic!("expected Copy"),
+        }
+    }
+
     // --- do_copy tests ---
 
     /// Mutex to serialize tests that change the working directory.
     static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Helper: create upper and lower dirs for do_copy tests.
+    /// Helper: create upper and check dirs for do_copy tests.
     fn make_layers(name: &str) -> (TempDir, PathBuf, PathBuf) {
         let tmp = TempDir::new(name);
         let upper = tmp.path().join("upper");
@@ -711,6 +1008,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/usr/local/bin"),
+            SHADOWED_DIRS,
             &[],
             false,
         )
@@ -738,6 +1036,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/usr/local/bin"),
+            SHADOWED_DIRS,
             &[],
             false,
         )
@@ -764,6 +1063,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/opt/mybin"),
+            SHADOWED_DIRS,
             &[],
             false,
         )
@@ -788,6 +1088,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/usr/local/bin/"),
+            SHADOWED_DIRS,
             &[],
             false,
         )
@@ -805,7 +1106,16 @@ mod tests {
         fs::create_dir_all(&src_dir).unwrap();
         fs::write(src_dir.join("app.bin"), "app").unwrap();
 
-        do_copy(&upper, &lower, &src_dir, Path::new("/opt"), &[], false).unwrap();
+        do_copy(
+            &upper,
+            &lower,
+            &src_dir,
+            Path::new("/opt"),
+            SHADOWED_DIRS,
+            &[],
+            false,
+        )
+        .unwrap();
         // Named dir should be placed inside: /opt/myapp/app.bin
         assert!(upper.join("opt/myapp").is_dir());
         assert!(upper.join("opt/myapp/app.bin").is_file());
@@ -828,7 +1138,15 @@ mod tests {
         let orig_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&src_dir).unwrap();
 
-        let result = do_copy(&upper, &lower, &dot_path, Path::new("/srv"), &[], false);
+        let result = do_copy(
+            &upper,
+            &lower,
+            &dot_path,
+            Path::new("/srv"),
+            SHADOWED_DIRS,
+            &[],
+            false,
+        );
         std::env::set_current_dir(&orig_dir).unwrap();
         result.unwrap();
 
@@ -850,7 +1168,15 @@ mod tests {
         let orig_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&src_dir).unwrap();
 
-        let result = do_copy(&upper, &lower, &dot_path, Path::new("/newdir"), &[], false);
+        let result = do_copy(
+            &upper,
+            &lower,
+            &dot_path,
+            Path::new("/newdir"),
+            SHADOWED_DIRS,
+            &[],
+            false,
+        );
         std::env::set_current_dir(&orig_dir).unwrap();
         result.unwrap();
 
@@ -875,6 +1201,7 @@ mod tests {
             &lower,
             &src_dir,
             Path::new("/opt/target"),
+            SHADOWED_DIRS,
             &[],
             false,
         )
@@ -899,6 +1226,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/opt/../../etc/shadow"),
+            SHADOWED_DIRS,
             &[],
             false,
         )
@@ -914,6 +1242,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("../escape"),
+            SHADOWED_DIRS,
             &[],
             false,
         )
@@ -929,6 +1258,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/opt/safe"),
+            SHADOWED_DIRS,
             &[],
             false,
         )
@@ -950,6 +1280,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/tmp/data"),
+            SHADOWED_DIRS,
             &[],
             false,
         )
@@ -960,8 +1291,16 @@ mod tests {
         );
 
         // /run is also shadowed.
-        let err =
-            do_copy(&upper, &lower, &src_file, Path::new("/run/foo"), &[], false).unwrap_err();
+        let err = do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/run/foo"),
+            SHADOWED_DIRS,
+            &[],
+            false,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("tmpfs"),
             "should reject /run as shadowed, got: {err}"
@@ -973,6 +1312,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/dev/shm/bar"),
+            SHADOWED_DIRS,
             &[],
             false,
         )
@@ -983,7 +1323,16 @@ mod tests {
         );
 
         // Exact match on shadowed dir.
-        let err = do_copy(&upper, &lower, &src_file, Path::new("/tmp"), &[], false).unwrap_err();
+        let err = do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/tmp"),
+            SHADOWED_DIRS,
+            &[],
+            false,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("tmpfs"),
             "should reject /tmp exact match, got: {err}"
@@ -1005,6 +1354,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/etc/systemd/system/foo.service"),
+            SHADOWED_DIRS,
             &opaque,
             false,
         )
@@ -1020,10 +1370,67 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/etc/foo.conf"),
+            SHADOWED_DIRS,
             &opaque,
             false,
         )
         .unwrap();
         assert!(upper.join("etc/foo.conf").is_file());
+    }
+
+    // --- Build-context shadowed dirs test ---
+
+    #[test]
+    fn test_do_copy_build_shadowed_allows_tmp() {
+        let (_tmp, upper, lower) = make_layers("build-shadowed");
+        let src_dir = _tmp.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let src_file = src_dir.join("data");
+        fs::write(&src_file, "payload").unwrap();
+
+        // In build context, /tmp is allowed.
+        do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/tmp/data"),
+            BUILD_SHADOWED_DIRS,
+            &[],
+            false,
+        )
+        .unwrap();
+        assert!(upper.join("tmp/data").is_file());
+
+        // /run is still rejected.
+        let err = do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/run/foo"),
+            BUILD_SHADOWED_DIRS,
+            &[],
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("tmpfs"),
+            "should reject /run in build context, got: {err}"
+        );
+
+        // /dev/shm is still rejected.
+        let err = do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/dev/shm/bar"),
+            BUILD_SHADOWED_DIRS,
+            &[],
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("tmpfs"),
+            "should reject /dev/shm in build context, got: {err}"
+        );
     }
 }

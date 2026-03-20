@@ -426,34 +426,47 @@ rootfs:
 ```
 FROM ubuntu
 COPY ./my-app /opt/my-app
+COPY fs:base-tools:/usr/local/bin/helper /usr/local/bin/helper
+COPY dev-container:/etc/app.conf /etc/app.conf
 RUN apt-get update && apt-get install -y libssl3
 RUN systemctl enable my-app.service
 ```
 
 The build engine creates a staging container from the FROM rootfs, then
-processes operations sequentially. The key insight is that COPY and RUN
-have different requirements:
+eagerly starts it before processing any operations. Both COPY and RUN
+execute against the running container:
 
-- **COPY** writes directly to the overlayfs upper layer while the
-  container is stopped. This is a filesystem operation; no running
-  container needed.
+- **COPY** writes through the merged overlayfs mount while the
+  container is running. This ensures the kernel's dcache stays
+  consistent and files are immediately visible inside the container.
+  Three source forms are supported: a host path (no prefix), an
+  imported rootfs (`fs:name:/path`), or another container
+  (`container-name:/path`).
 - **RUN** executes a command inside the container via
-  `machinectl shell`. The container must be running.
+  `machinectl shell`.
 
-The engine starts and stops the container as needed: if it encounters a
-RUN after a COPY, it starts the container; if it encounters a COPY
-after a RUN, it stops it first. This means a config with alternating
-COPY and RUN operations will start and stop the container multiple
-times, but in practice most configs group their COPYs at the top and
-RUNs at the bottom.
+Because the container is started once and stays running throughout the
+build, there are no stop/start cycles between COPY and RUN operations.
+`FROM` accepts an optional `fs:` prefix (`FROM fs:ubuntu` is equivalent
+to `FROM ubuntu`).
 
-**Path sanitisation** rejects COPY destinations under directories that
-systemd mounts tmpfs over at boot (`/tmp`, `/run`, `/dev/shm`). Files
-written to the overlayfs upper layer in these locations would be hidden
-by the tmpfs mount when the container starts, a silent data loss that's
-hard to debug. Destinations under overlayfs-opaque directories are also
+**Path sanitisation** rejects COPY destinations under `/run` and
+`/dev/shm`, where systemd mounts tmpfs at boot. `/tmp` is allowed in
+builds because the build container bind-mounts `upper/tmp` over
+nspawn's default tmpfs, making `/tmp` persistent across all build
+steps. Destinations under overlayfs-opaque directories are also
 rejected. Errors include the config file path and line number for easy
 debugging.
+
+**Resource locking.** Builds hold shared `flock` locks on the FROM
+rootfs and any COPY source rootfs or container. `sdme fs rm` and
+`sdme rm` acquire exclusive locks, so they block while a build is using
+the resource.
+
+**Stale build cleanup.** If a prior build was interrupted (Ctrl+C,
+crash), the next `sdme fs build` invocation automatically detects and
+removes the stale staging container before proceeding. Manual cleanup
+is also available via `sdme fs gc`.
 
 After all operations complete, the engine mounts the overlayfs manually
 (the container is stopped), copies the merged view to a staging rootfs

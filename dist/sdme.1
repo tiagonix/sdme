@@ -518,6 +518,12 @@ The build config is a line\-oriented text file with three directives:
 Base rootfs to build on (must be first directive, required, only once).
 Must refer to a rootfs previously imported with
 .BR "sdme fs import" .
+An optional
+.B fs:
+prefix is accepted (e.g.\&
+.B FROM fs:ubuntu
+is equivalent to
+.BR "FROM ubuntu" ).
 .TP
 .BI RUN " command"
 Run a shell command inside the container via
@@ -526,8 +532,12 @@ Supports pipes, redirects, and compound commands.
 The container is started automatically if not already running.
 .TP
 .BI COPY " src dst"
-Copy a host file or directory into the rootfs.
-The container is stopped before copying (overlayfs constraint).
+Copy files or directories into the rootfs.
+Three source forms are supported: a host path (no prefix), an imported
+rootfs
+.RI ( fs:name:/path ),
+or another container
+.RI ( container\-name:/path ).
 If
 .I dst
 is an existing directory, the source is placed inside it.
@@ -535,12 +545,13 @@ Destination paths with
 .B ..
 components are rejected.
 .PP
-Because COPY writes directly to the overlayfs upper layer (while the
-container is stopped), destinations under directories that systemd mounts
-tmpfs over at boot are rejected:
-.BR /tmp ", " /run ", " /dev/shm .
-Files placed there would be hidden by the tmpfs and invisible inside the
-running container.
+COPY writes through the merged overlayfs mount while the container is
+running.
+.B /tmp
+is allowed in builds (persistent via bind mount);
+.BR /run " and " /dev/shm
+are rejected as destinations because systemd mounts tmpfs over them at
+boot.
 Destinations under overlayfs opaque directories are also rejected.
 Use a different path (e.g.\&
 .BR /root ", " /opt ", " /srv ).

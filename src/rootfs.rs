@@ -221,6 +221,10 @@ pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Resul
         bail!("fs not found: {name}");
     }
 
+    // Acquire exclusive lock to prevent removal while a build is using this rootfs.
+    let _lock = crate::lock::lock_exclusive(datadir, "fs", name)
+        .with_context(|| format!("cannot remove rootfs '{name}': in use"))?;
+
     // Check that no container is using this rootfs (first pass).
     check_rootfs_in_use(datadir, name)?;
 

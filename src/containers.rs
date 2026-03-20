@@ -669,6 +669,64 @@ pub fn resolve_name(datadir: &Path, input: &str) -> Result<String> {
     }
 }
 
+/// Mount overlayfs on a stopped container's `merged/` directory (read-write).
+pub(crate) fn mount_overlay(rootfs_dir: &Path, container_dir: &Path) -> Result<()> {
+    let upper_dir = container_dir.join("upper");
+    let work_dir = container_dir.join("work");
+    let merged_dir = container_dir.join("merged");
+
+    let mount_opts = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        rootfs_dir.display(),
+        upper_dir.display(),
+        work_dir.display()
+    );
+
+    let status = std::process::Command::new("mount")
+        .args(["-t", "overlay", "overlay", "-o", &mount_opts])
+        .arg(&merged_dir)
+        .status()
+        .context("failed to run mount")?;
+    crate::check_interrupted()?;
+
+    if !status.success() {
+        bail!("failed to mount overlayfs");
+    }
+    Ok(())
+}
+
+/// Mount a read-only overlay view of a container's merged filesystem.
+///
+/// Uses multi-lower lowerdir (upper:rootfs) — no upperdir/workdir needed.
+/// The resulting mount is inherently read-only and correctly handles
+/// whiteouts and opaque dirs from the upper layer.
+pub(crate) fn mount_overlay_ro(rootfs_dir: &Path, container_dir: &Path) -> Result<()> {
+    let upper_dir = container_dir.join("upper");
+    let merged_dir = container_dir.join("merged");
+
+    let mount_opts = format!("lowerdir={}:{}", upper_dir.display(), rootfs_dir.display());
+
+    let status = std::process::Command::new("mount")
+        .args(["-t", "overlay", "overlay", "-o", &mount_opts])
+        .arg(&merged_dir)
+        .status()
+        .context("failed to run mount")?;
+    crate::check_interrupted()?;
+
+    if !status.success() {
+        bail!("failed to mount read-only overlayfs");
+    }
+    Ok(())
+}
+
+/// Unmount overlayfs from a container's `merged/` directory.
+pub(crate) fn unmount_overlay(container_dir: &Path) {
+    let merged_dir = container_dir.join("merged");
+    let _ = std::process::Command::new("umount")
+        .arg(&merged_dir)
+        .status();
+}
+
 /// Verify that a container's state file and directory exist.
 pub fn ensure_exists(datadir: &Path, name: &str) -> Result<()> {
     let state_file = datadir.join("state").join(name);
@@ -752,6 +810,10 @@ fn mask_host_mount_units(upper_systemd_dir: &Path, verbose: bool) -> Result<()> 
 /// Stop a container if running, then delete its state file and overlayfs directories.
 pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     ensure_exists(datadir, name)?;
+
+    // Acquire exclusive lock to prevent removal while a build is reading from this container.
+    let _lock = crate::lock::lock_exclusive(datadir, "containers", name)
+        .with_context(|| format!("cannot remove container '{name}': in use"))?;
 
     // Read state before removal to check for OCI volumes and enabled state.
     let state_file = datadir.join("state").join(name);

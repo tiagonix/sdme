@@ -22,6 +22,7 @@
 //! | [`rootfs`] | Rootfs listing, removal, os-release parsing |
 //! | [`build`] | Build config parsing and rootfs build execution |
 //! | [`config`] | Configuration file loading and saving |
+//! | [`lock`] | Advisory file locking for build dependency protection |
 //! | [`mounts`] | Bind mount and environment variable config |
 //! | [`network`] | Network configuration and state serialization |
 //! | [`security`] | Capability, seccomp, AppArmor config |
@@ -39,6 +40,7 @@ pub mod export;
 pub mod import;
 pub(crate) mod isolate;
 pub mod kube;
+pub(crate) mod lock;
 pub mod mounts;
 pub(crate) mod names;
 pub mod network;
