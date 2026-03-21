@@ -486,8 +486,6 @@ fn download_file(
         if n == 0 {
             break;
         }
-        std::io::Write::write_all(&mut file, &buf[..n])
-            .with_context(|| format!("failed to write download to {}", dest.display()))?;
         total += n as u64;
         if http.max_download_size > 0 && total > http.max_download_size {
             bail!(
@@ -495,6 +493,8 @@ fn download_file(
                 http.max_download_size
             );
         }
+        std::io::Write::write_all(&mut file, &buf[..n])
+            .with_context(|| format!("failed to write download to {}", dest.display()))?;
     }
 
     if verbose {
@@ -724,6 +724,7 @@ impl ChrootGuard {
                     mount_point.display()
                 );
             }
+            guard.mounts.push(mount_point.clone());
             // Prevent mount events inside the chroot from propagating back
             // to the host. Without this, package managers that trigger udev
             // or systemd inside the chroot can remount the host's /dev.
@@ -736,7 +737,6 @@ impl ChrootGuard {
             if !status.success() {
                 bail!("make-rslave failed: {}", mount_point.display());
             }
-            guard.mounts.push(mount_point);
         }
 
         // Bind mount /dev/pts separately.
@@ -751,6 +751,7 @@ impl ChrootGuard {
         if !status.success() {
             bail!("bind mount failed: /dev/pts -> {}", devpts.display());
         }
+        guard.mounts.push(devpts.clone());
         let status = Command::new("mount")
             .args(["--make-rslave"])
             .arg(&devpts)
@@ -760,7 +761,6 @@ impl ChrootGuard {
         if !status.success() {
             bail!("make-rslave failed: {}", devpts.display());
         }
-        guard.mounts.push(devpts);
 
         // Copy host resolv.conf for DNS resolution.
         let resolv = rootfs.join("etc/resolv.conf");
