@@ -673,6 +673,12 @@ pub(crate) fn setup_kube_container(
             }
         };
         for (k, v) in pairs {
+            if v.contains('\n') || v.contains('\r') {
+                bail!(
+                    "env '{k}': value contains newline characters; \
+                     this is not supported in systemd environment files"
+                );
+            }
             let line = format!("{k}={v}");
             if let Some(&idx) = seen_keys.get(&k) {
                 env_lines[idx] = line;

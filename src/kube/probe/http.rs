@@ -29,6 +29,9 @@ pub fn check(port: u16, path: &str, scheme: &str, headers: &[String], timeout_se
 
     let mut request = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n");
     for h in headers {
+        if h.contains('\r') || h.contains('\n') {
+            continue; // skip malformed headers
+        }
         request.push_str(h);
         request.push_str("\r\n");
     }

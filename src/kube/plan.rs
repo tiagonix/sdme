@@ -446,11 +446,19 @@ fn build_probe_check(probe: &Probe, container_name: &str) -> Result<ProbeCheck> 
         if !path.starts_with('/') {
             bail!("container '{container_name}': httpGet path must start with '/': {path}");
         }
-        let headers = http
+        if path.contains(['\r', '\n']) {
+            bail!("container '{container_name}': httpGet path contains CR/LF");
+        }
+        let headers: Vec<(String, String)> = http
             .http_headers
             .iter()
             .map(|h| (h.name.clone(), h.value.clone()))
             .collect();
+        for (name, value) in &headers {
+            if name.contains(['\r', '\n']) || value.contains(['\r', '\n']) {
+                bail!("container '{container_name}': httpGet header contains CR/LF: {name}");
+            }
+        }
         Ok(ProbeCheck::Http {
             port: http.port,
             path,
@@ -3905,6 +3913,87 @@ spec:
         assert!(
             env_content.contains("DB_USER=admin"),
             "envFrom should produce DB_USER=admin, got: {env_content}"
+        );
+    }
+
+    #[test]
+    fn test_probe_http_crlf_in_path() {
+        let probe = super::super::types::Probe {
+            exec: None,
+            http_get: Some(super::super::types::HttpGetAction {
+                path: Some("/health\r\nX-Injected: true".into()),
+                port: 8080,
+                scheme: None,
+                http_headers: vec![],
+            }),
+            tcp_socket: None,
+            grpc: None,
+            initial_delay_seconds: None,
+            period_seconds: None,
+            timeout_seconds: None,
+            failure_threshold: None,
+            success_threshold: None,
+        };
+        let err = build_probe_check(&probe, "test").unwrap_err();
+        assert!(
+            err.to_string().contains("CR/LF"),
+            "expected CR/LF rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_probe_http_crlf_in_header_name() {
+        let probe = super::super::types::Probe {
+            exec: None,
+            http_get: Some(super::super::types::HttpGetAction {
+                path: Some("/health".into()),
+                port: 8080,
+                scheme: None,
+                http_headers: vec![super::super::types::HttpHeader {
+                    name: "X-Evil\r\nInjected".into(),
+                    value: "ok".into(),
+                }],
+            }),
+            tcp_socket: None,
+            grpc: None,
+            initial_delay_seconds: None,
+            period_seconds: None,
+            timeout_seconds: None,
+            failure_threshold: None,
+            success_threshold: None,
+        };
+        let err = build_probe_check(&probe, "test").unwrap_err();
+        assert!(
+            err.to_string().contains("CR/LF"),
+            "expected CR/LF rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_probe_http_crlf_in_header_value() {
+        let probe = super::super::types::Probe {
+            exec: None,
+            http_get: Some(super::super::types::HttpGetAction {
+                path: Some("/health".into()),
+                port: 8080,
+                scheme: None,
+                http_headers: vec![super::super::types::HttpHeader {
+                    name: "X-Custom".into(),
+                    value: "ok\r\nX-Injected: true".into(),
+                }],
+            }),
+            tcp_socket: None,
+            grpc: None,
+            initial_delay_seconds: None,
+            period_seconds: None,
+            timeout_seconds: None,
+            failure_threshold: None,
+            success_threshold: None,
+        };
+        let err = build_probe_check(&probe, "test").unwrap_err();
+        assert!(
+            err.to_string().contains("CR/LF"),
+            "expected CR/LF rejection, got: {err}"
         );
     }
 }

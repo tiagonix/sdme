@@ -719,7 +719,13 @@ fn export_to_raw(
         .with_context(|| format!("failed to set file size for {}", output.display()))?;
     drop(file);
 
-    let mount_dir = std::env::temp_dir().join(format!("sdme-export-mount-{}", std::process::id()));
+    let run_dir = Path::new("/run/sdme");
+    if !run_dir.exists() {
+        fs::create_dir_all(run_dir).context("failed to create /run/sdme")?;
+        fs::set_permissions(run_dir, fs::Permissions::from_mode(0o700))
+            .context("failed to set permissions on /run/sdme")?;
+    }
+    let mount_dir = run_dir.join(format!("export-mount-{}", std::process::id()));
 
     // VM exports: GPT partition table via sfdisk, then losetup --partscan.
     // Non-VM exports: bare filesystem on the whole image file.
@@ -916,11 +922,17 @@ fn export_raw_gpt(
         let stderr = String::from_utf8_lossy(&lo_output.stderr);
         bail!("losetup failed: {stderr}");
     }
-    let loop_dev = std::path::PathBuf::from(
-        String::from_utf8_lossy(&lo_output.stdout)
-            .trim()
-            .to_string(),
-    );
+    let loop_str = String::from_utf8_lossy(&lo_output.stdout)
+        .trim()
+        .to_string();
+    if !loop_str.starts_with("/dev/loop")
+        || !loop_str["/dev/loop".len()..]
+            .chars()
+            .all(|c| c.is_ascii_digit())
+    {
+        bail!("unexpected losetup output: {loop_str}");
+    }
+    let loop_dev = std::path::PathBuf::from(loop_str);
 
     let mut loop_guard = LoopGuard::new();
     loop_guard.set_active(loop_dev.clone());
@@ -1052,17 +1064,17 @@ fn dir_size(path: &Path) -> Result<u64> {
     for entry in entries {
         check_interrupted()?;
         let entry = entry.with_context(|| format!("failed to read entry in {}", path.display()))?;
-        let meta = entry
-            .metadata()
+        let meta = fs::symlink_metadata(entry.path())
             .with_context(|| format!("failed to stat {}", entry.path().display()))?;
         if meta.is_dir() {
             total += dir_size(&entry.path())?;
-        } else {
+        } else if meta.is_file() {
             // Round up to 4K block boundary to match ext4/btrfs allocation.
             // Without this, rootfs with many small files (e.g. NixOS /nix/store)
             // produce undersized images.
             total += (meta.len() + 4095) & !4095;
         }
+        // Symlinks, sockets, etc: skip (zero on-disk size contribution).
     }
     Ok(total)
 }
@@ -1588,6 +1600,11 @@ fn copy_host_resolv_conf(mount: &Path) -> Result<()> {
 
 /// Write /etc/resolv.conf with the given nameservers.
 fn write_resolv_conf(mount: &Path, nameservers: &[String]) -> Result<()> {
+    for ns in nameservers {
+        if ns.parse::<std::net::IpAddr>().is_err() {
+            bail!("invalid DNS nameserver: {ns}");
+        }
+    }
     let resolv = mount.join("etc/resolv.conf");
     // Remove if it's a symlink (e.g. to ../run/systemd/resolve/stub-resolv.conf).
     if resolv.symlink_metadata().is_ok() {
@@ -2855,5 +2872,41 @@ WantedBy=getty.target
         };
         let err = export(tmp.path(), &source, Path::new("/tmp/nope"), &opts, false).unwrap_err();
         assert!(err.to_string().contains("does not exist"), "got: {err}");
+    }
+
+    #[test]
+    fn test_dir_size_skips_symlinks() {
+        let _guard = lock_and_clear_interrupted();
+        let tmp = crate::testutil::TempDataDir::new("export-dirsize-symlinks");
+        let dir = tmp.path().join("root");
+        fs::create_dir(&dir).unwrap();
+        // Regular file: 100 bytes -> 4096 after block alignment.
+        fs::write(dir.join("file.txt"), vec![0u8; 100]).unwrap();
+        // Symlink to a file — should not add to size.
+        std::os::unix::fs::symlink(dir.join("file.txt"), dir.join("link.txt")).unwrap();
+        // Symlink cycle — must not cause infinite recursion.
+        std::os::unix::fs::symlink(&dir, dir.join("cycle")).unwrap();
+        let size = dir_size(&dir).unwrap();
+        assert_eq!(size, 4096, "expected one block-aligned file, got {size}");
+    }
+
+    #[test]
+    fn test_write_resolv_conf_validates_nameservers() {
+        let tmp = crate::testutil::TempDataDir::new("export-resolv-validate");
+        let mount = tmp.path();
+        fs::create_dir_all(mount.join("etc")).unwrap();
+        // Valid IPs should succeed.
+        write_resolv_conf(mount, &["8.8.8.8".into(), "2001:4860:4860::8888".into()]).unwrap();
+        // Invalid nameserver should fail.
+        let err = write_resolv_conf(mount, &["1.1.1.1\noptions attempts:1".into()]).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid DNS nameserver"),
+            "got: {err}"
+        );
+        let err = write_resolv_conf(mount, &["not-an-ip".into()]).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid DNS nameserver"),
+            "got: {err}"
+        );
     }
 }

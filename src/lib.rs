@@ -278,7 +278,13 @@ impl State {
 
     /// Insert or update a key-value pair.
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.entries.insert(key.into(), value.into());
+        let key = key.into();
+        let value = value.into();
+        debug_assert!(
+            !key.contains('\n') && !value.contains('\n'),
+            "State key/value must not contain newlines: {key}={value}"
+        );
+        self.entries.insert(key, value);
     }
 
     /// Look up a value by key.
