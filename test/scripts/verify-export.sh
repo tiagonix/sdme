@@ -64,7 +64,7 @@ fi
 echo "=== Test 1: Directory export ==="
 
 outdir="$TMPDIR/dir-export"
-if $SDME fs export ubuntu "$outdir" $VFLAG; then
+if $SDME fs export fs:ubuntu "$outdir" $VFLAG; then
     if [[ -d "$outdir" ]] && [[ -f "$outdir/etc/os-release" ]]; then
         ok "dir export"
     else
@@ -81,7 +81,7 @@ rm -rf "$outdir"
 echo "=== Test 2: tar export ==="
 
 tarfile="$TMPDIR/out.tar"
-if $SDME fs export ubuntu "$tarfile" $VFLAG; then
+if $SDME fs export fs:ubuntu "$tarfile" $VFLAG; then
     if [[ -f "$tarfile" ]] && tar_contains "$tarfile" "etc/os-release"; then
         ok "tar export"
     else
@@ -98,7 +98,7 @@ rm -f "$tarfile"
 echo "=== Test 3: tar.gz export ==="
 
 targz="$TMPDIR/out.tar.gz"
-if $SDME fs export ubuntu "$targz" $VFLAG; then
+if $SDME fs export fs:ubuntu "$targz" $VFLAG; then
     if [[ -f "$targz" ]] && tar_contains "$targz" "etc/os-release" -z; then
         ok "tar.gz export"
     else
@@ -115,7 +115,7 @@ rm -f "$targz"
 echo "=== Test 4: tar.bz2 export ==="
 
 tarbz2="$TMPDIR/out.tar.bz2"
-if $SDME fs export ubuntu "$tarbz2" $VFLAG; then
+if $SDME fs export fs:ubuntu "$tarbz2" $VFLAG; then
     if [[ -f "$tarbz2" ]] && tar_contains "$tarbz2" "etc/os-release" -j; then
         ok "tar.bz2 export"
     else
@@ -132,7 +132,7 @@ rm -f "$tarbz2"
 echo "=== Test 5: tar.xz export ==="
 
 tarxz="$TMPDIR/out.tar.xz"
-if $SDME fs export ubuntu "$tarxz" $VFLAG; then
+if $SDME fs export fs:ubuntu "$tarxz" $VFLAG; then
     if [[ -f "$tarxz" ]] && tar_contains "$tarxz" "etc/os-release" -J; then
         ok "tar.xz export"
     else
@@ -150,7 +150,7 @@ echo "=== Test 6: tar.zst export ==="
 
 if [[ "$HAS_ZSTDCAT" == "true" ]]; then
     tarzst="$TMPDIR/out.tar.zst"
-    if $SDME fs export ubuntu "$tarzst" $VFLAG; then
+    if $SDME fs export fs:ubuntu "$tarzst" $VFLAG; then
         if [[ -f "$tarzst" ]] && ( set +o pipefail; zstdcat "$tarzst" | tar t 2>/dev/null | grep -q "etc/os-release" ); then
             ok "tar.zst export"
         else
@@ -171,7 +171,7 @@ echo "=== Test 7: raw export ==="
 
 if [[ "$HAS_MKFS_EXT4" == "true" ]]; then
     rawimg="$TMPDIR/out.raw"
-    if $SDME fs export ubuntu "$rawimg" $VFLAG; then
+    if $SDME fs export fs:ubuntu "$rawimg" $VFLAG; then
         if [[ -f "$rawimg" ]]; then
             mntpoint="$TMPDIR/rawmnt"
             mkdir -p "$mntpoint"
@@ -203,7 +203,7 @@ echo "=== Test 8: raw export --size ==="
 
 if [[ "$HAS_MKFS_EXT4" == "true" ]]; then
     rawimg2="$TMPDIR/out2.raw"
-    if $SDME fs export ubuntu "$rawimg2" --size 2G $VFLAG; then
+    if $SDME fs export fs:ubuntu "$rawimg2" --size 2G $VFLAG; then
         if [[ -f "$rawimg2" ]]; then
             actual_size=$(stat -c%s "$rawimg2")
             expected_size=2147483648
@@ -229,7 +229,7 @@ fi
 echo "=== Test 9: format override ==="
 
 noext="$TMPDIR/noext"
-if $SDME fs export ubuntu "$noext" --fmt tar.gz $VFLAG; then
+if $SDME fs export fs:ubuntu "$noext" --fmt tar.gz $VFLAG; then
     if [[ -f "$noext" ]] && tar_contains "$noext" "etc/os-release" -z; then
         ok "format override (--fmt tar.gz)"
     else
@@ -245,7 +245,7 @@ rm -f "$noext"
 # ---------------------------------------------------------------------------
 echo "=== Test 10: nonexistent rootfs ==="
 
-if $SDME fs export nonexistent "$TMPDIR/nope" 2>/dev/null; then
+if $SDME fs export fs:nonexistent "$TMPDIR/nope" 2>/dev/null; then
     fail "nonexistent rootfs should error"
 else
     ok "nonexistent rootfs rejected"
@@ -258,7 +258,7 @@ echo "=== Test 11: btrfs raw export ==="
 
 if [[ "$HAS_MKFS_BTRFS" == "true" ]]; then
     rawbtrfs="$TMPDIR/out-btrfs.raw"
-    if $SDME fs export ubuntu "$rawbtrfs" --filesystem btrfs $VFLAG; then
+    if $SDME fs export fs:ubuntu "$rawbtrfs" --filesystem btrfs $VFLAG; then
         if [[ -f "$rawbtrfs" ]]; then
             mntpoint="$TMPDIR/btrfsmnt"
             mkdir -p "$mntpoint"
@@ -290,7 +290,7 @@ echo "=== Test 12: btrfs raw export --size ==="
 
 if [[ "$HAS_MKFS_BTRFS" == "true" ]]; then
     rawbtrfs2="$TMPDIR/out-btrfs2.raw"
-    if $SDME fs export ubuntu "$rawbtrfs2" --filesystem btrfs --size 2G $VFLAG; then
+    if $SDME fs export fs:ubuntu "$rawbtrfs2" --filesystem btrfs --size 2G $VFLAG; then
         if [[ -f "$rawbtrfs2" ]]; then
             actual_size=$(stat -c%s "$rawbtrfs2")
             expected_size=2147483648
@@ -316,7 +316,7 @@ fi
 echo "=== Test 13: dir export --timezone ==="
 
 outdir="$TMPDIR/dir-tz-export"
-if $SDME fs export ubuntu "$outdir" --timezone America/New_York $VFLAG; then
+if $SDME fs export fs:ubuntu "$outdir" --timezone America/New_York $VFLAG; then
     if [[ -L "$outdir/etc/localtime" ]]; then
         target=$(readlink "$outdir/etc/localtime")
         if [[ "$target" == "../usr/share/zoneinfo/America/New_York" ]]; then
@@ -348,7 +348,7 @@ rm -rf "$outdir"
 echo "=== Test 14: tar export --timezone ==="
 
 tarfile="$TMPDIR/tz-out.tar"
-if $SDME fs export ubuntu "$tarfile" --timezone UTC $VFLAG; then
+if $SDME fs export fs:ubuntu "$tarfile" --timezone UTC $VFLAG; then
     if [[ -f "$tarfile" ]] && tar_contains "$tarfile" "etc/localtime" && tar_contains "$tarfile" "etc/timezone"; then
         ok "tar export --timezone"
     else
@@ -366,7 +366,7 @@ echo "=== Test 15: raw export --timezone ==="
 
 if [[ "$HAS_MKFS_EXT4" == "true" ]]; then
     rawimg="$TMPDIR/tz-out.raw"
-    if $SDME fs export ubuntu "$rawimg" --timezone Europe/London $VFLAG; then
+    if $SDME fs export fs:ubuntu "$rawimg" --timezone Europe/London $VFLAG; then
         if [[ -f "$rawimg" ]]; then
             mntpoint="$TMPDIR/tz-rawmnt"
             mkdir -p "$mntpoint"
@@ -401,11 +401,66 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Test 16: invalid timezone ==="
 
-if $SDME fs export ubuntu "$TMPDIR/tz-bad" --timezone Fake/Zone 2>/dev/null; then
+if $SDME fs export fs:ubuntu "$TMPDIR/tz-bad" --timezone Fake/Zone 2>/dev/null; then
     fail "invalid timezone should error"
     rm -rf "$TMPDIR/tz-bad"
 else
     ok "invalid timezone rejected"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 17: Smart error — container not found, rootfs exists (hint)
+# ---------------------------------------------------------------------------
+echo "=== Test 17: smart error hint (container not found, rootfs exists) ==="
+
+# Bare name defaults to container; "ubuntu" is a rootfs, not a container.
+err_output=$($SDME fs export ubuntu "$TMPDIR/hint-test" 2>&1 || true)
+if echo "$err_output" | grep -q "fs:ubuntu"; then
+    ok "smart error: hint suggests fs:ubuntu"
+else
+    fail "smart error: expected hint about fs:ubuntu, got: $err_output"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 18: Smart error — rootfs not found, container exists (hint)
+# ---------------------------------------------------------------------------
+echo "=== Test 18: smart error hint (rootfs not found, container exists) ==="
+
+# Create and stop a container for this test.
+ctr_name="export-hint-test"
+if $SDME create -r ubuntu "$ctr_name" $VFLAG 2>/dev/null; then
+    err_output=$($SDME fs export "fs:$ctr_name" "$TMPDIR/hint-test2" 2>&1 || true)
+    if echo "$err_output" | grep -q "without the fs: prefix"; then
+        ok "smart error: hint suggests dropping fs: prefix"
+    else
+        fail "smart error: expected hint about dropping prefix, got: $err_output"
+    fi
+    $SDME rm "$ctr_name" 2>/dev/null || true
+else
+    fail "smart error: failed to create test container"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 19: Container export (stopped)
+# ---------------------------------------------------------------------------
+echo "=== Test 19: container export (stopped) ==="
+
+ctr_name="export-ctr-test"
+if $SDME create -r ubuntu "$ctr_name" $VFLAG 2>/dev/null; then
+    outdir="$TMPDIR/ctr-export"
+    if $SDME fs export "$ctr_name" "$outdir" $VFLAG; then
+        if [[ -d "$outdir" ]] && [[ -f "$outdir/etc/os-release" ]]; then
+            ok "container export (stopped)"
+        else
+            fail "container export: output missing expected files"
+        fi
+    else
+        fail "container export: command failed"
+    fi
+    rm -rf "$outdir"
+    $SDME rm "$ctr_name" 2>/dev/null || true
+else
+    fail "container export: failed to create test container"
 fi
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@
 use std::fs::{self, File};
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
@@ -14,7 +14,9 @@ use std::collections::HashMap;
 
 use crate::config::DistroCommands;
 use crate::import::InstallPackages;
+use crate::lock;
 use crate::rootfs::DistroFamily;
+use crate::txn::{Txn, TxnKind};
 use crate::{check_interrupted, containers, copy, system_check, systemd, validate_name, State};
 
 /// Options for preparing a raw disk image for VM boot.
@@ -103,6 +105,120 @@ impl ExportResult {
                 format!("{size}, {free} free, {parts} {label}")
             }
             _ => size,
+        }
+    }
+}
+
+/// Source for an export operation.
+pub enum ExportSource {
+    /// Export a container's merged overlayfs view.
+    Container(String),
+    /// Export an imported rootfs from the catalogue.
+    Rootfs(String),
+}
+
+/// RAII guard that unmounts overlayfs on drop.
+struct OverlayGuard {
+    container_dir: PathBuf,
+}
+
+impl Drop for OverlayGuard {
+    fn drop(&mut self) {
+        containers::unmount_overlay(&self.container_dir);
+    }
+}
+
+/// Unified export entry point.
+///
+/// Handles source validation, flock locking, overlay mounting for stopped
+/// containers, timezone validation, and delegation to the format-specific
+/// export function.
+pub fn export(
+    datadir: &Path,
+    source: &ExportSource,
+    output: &Path,
+    opts: &ExportOptions,
+    auto_gc: bool,
+) -> Result<ExportResult> {
+    match source {
+        ExportSource::Rootfs(name) => {
+            validate_name(name).context("invalid rootfs name")?;
+            let rootfs_dir = datadir.join("fs").join(name);
+            if !rootfs_dir.is_dir() {
+                bail!("rootfs not found: {name}");
+            }
+            let _lock = lock::lock_shared(datadir, "fs", name)
+                .with_context(|| format!("cannot lock rootfs '{name}' for export"))?;
+            if let Some(tz) = opts.timezone {
+                validate_timezone(&rootfs_dir, tz)?;
+            }
+            export_from_dir(&rootfs_dir, output, opts)
+        }
+        ExportSource::Container(name) => {
+            validate_name(name)?;
+            containers::ensure_exists(datadir, name)?;
+            let _lock = lock::lock_shared(datadir, "containers", name)
+                .with_context(|| format!("cannot lock container '{name}' for export"))?;
+
+            let container_dir = datadir.join("containers").join(name);
+            let merged_dir = container_dir.join("merged");
+
+            let running = systemd::is_active(name)?;
+            if running {
+                eprintln!(
+                    "warning: container '{name}' is running; filesystem is live and \
+                     consistency is not guaranteed"
+                );
+                if let Some(tz) = opts.timezone {
+                    validate_timezone(&merged_dir, tz)?;
+                }
+                export_from_dir(&merged_dir, output, opts)
+            } else {
+                // Read state to find the rootfs.
+                let state_file = datadir.join("state").join(name);
+                let state = State::read_from(&state_file)?;
+                let rootfs_name = state.rootfs();
+                let rootfs_dir = containers::resolve_rootfs(
+                    datadir,
+                    if rootfs_name.is_empty() {
+                        None
+                    } else {
+                        Some(rootfs_name)
+                    },
+                )?;
+
+                // Lock the rootfs to prevent deletion during export.
+                let _rootfs_lock = if !rootfs_name.is_empty() {
+                    Some(
+                        lock::lock_shared(datadir, "fs", rootfs_name).with_context(|| {
+                            format!("cannot lock rootfs '{rootfs_name}' for export")
+                        })?,
+                    )
+                } else {
+                    None
+                };
+
+                // Create a txn marker so fs gc can detect stale overlay mounts.
+                let fs_dir = datadir.join("fs");
+                let mut txn = Txn::new(&fs_dir, name, TxnKind::Export, auto_gc, opts.verbose);
+                txn.prepare()?;
+
+                // Validate timezone against the lower-layer rootfs before mounting.
+                if let Some(tz) = opts.timezone {
+                    validate_timezone(&rootfs_dir, tz)?;
+                }
+
+                containers::mount_overlay_ro(&rootfs_dir, &container_dir)?;
+                let _guard = OverlayGuard {
+                    container_dir: container_dir.clone(),
+                };
+
+                let result = export_from_dir(&merged_dir, output, opts);
+                // OverlayGuard unmounts on drop, then txn staging dir cleaned.
+                drop(_guard);
+                txn.done();
+                result
+            }
         }
     }
 }
@@ -313,9 +429,9 @@ pub fn export_container(
             validate_timezone(&rootfs_dir, tz)?;
         }
 
-        mount_overlay(&rootfs_dir, &container_dir)?;
+        containers::mount_overlay_ro(&rootfs_dir, &container_dir)?;
         let result = export_from_dir(&merged_dir, output, opts);
-        unmount_overlay(&container_dir);
+        containers::unmount_overlay(&container_dir);
         result
     }
 }
@@ -410,6 +526,8 @@ fn write_tar<W: std::io::Write>(
 }
 
 /// Export by creating a tar archive, optionally compressed.
+///
+/// On error, removes the partially-written output file.
 fn export_to_tar(src: &Path, output: &Path, opts: &ExportOptions) -> Result<()> {
     if output.exists() {
         if opts.force {
@@ -426,34 +544,40 @@ fn export_to_tar(src: &Path, output: &Path, opts: &ExportOptions) -> Result<()> 
     let file =
         File::create(output).with_context(|| format!("failed to create {}", output.display()))?;
 
-    match opts.format {
-        ExportFormat::Tar => {
-            write_tar(file, src, opts.verbose, opts.timezone)?;
+    let result = (|| -> Result<()> {
+        match opts.format {
+            ExportFormat::Tar => {
+                write_tar(file, src, opts.verbose, opts.timezone)?;
+            }
+            ExportFormat::TarGz => {
+                let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+                let encoder = write_tar(encoder, src, opts.verbose, opts.timezone)?;
+                encoder.finish()?;
+            }
+            ExportFormat::TarBz2 => {
+                let encoder = bzip2::write::BzEncoder::new(file, bzip2::Compression::default());
+                let encoder = write_tar(encoder, src, opts.verbose, opts.timezone)?;
+                encoder.finish()?;
+            }
+            ExportFormat::TarXz => {
+                let encoder = xz2::write::XzEncoder::new(file, 6);
+                let encoder = write_tar(encoder, src, opts.verbose, opts.timezone)?;
+                encoder.finish()?;
+            }
+            ExportFormat::TarZst => {
+                let encoder = zstd::stream::write::Encoder::new(file, 0)?;
+                let encoder = write_tar(encoder, src, opts.verbose, opts.timezone)?;
+                encoder.finish()?;
+            }
+            _ => unreachable!(),
         }
-        ExportFormat::TarGz => {
-            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-            let encoder = write_tar(encoder, src, opts.verbose, opts.timezone)?;
-            encoder.finish()?;
-        }
-        ExportFormat::TarBz2 => {
-            let encoder = bzip2::write::BzEncoder::new(file, bzip2::Compression::default());
-            let encoder = write_tar(encoder, src, opts.verbose, opts.timezone)?;
-            encoder.finish()?;
-        }
-        ExportFormat::TarXz => {
-            let encoder = xz2::write::XzEncoder::new(file, 6);
-            let encoder = write_tar(encoder, src, opts.verbose, opts.timezone)?;
-            encoder.finish()?;
-        }
-        ExportFormat::TarZst => {
-            let encoder = zstd::stream::write::Encoder::new(file, 0)?;
-            let encoder = write_tar(encoder, src, opts.verbose, opts.timezone)?;
-            encoder.finish()?;
-        }
-        _ => unreachable!(),
-    }
+        Ok(())
+    })();
 
-    Ok(())
+    if result.is_err() {
+        let _ = fs::remove_file(output);
+    }
+    result
 }
 
 /// Recursively append directory entries to a tar builder, preserving
@@ -941,40 +1065,6 @@ fn dir_size(path: &Path) -> Result<u64> {
         }
     }
     Ok(total)
-}
-
-/// Mount overlayfs on a stopped container's `merged/` directory.
-fn mount_overlay(rootfs_dir: &Path, container_dir: &Path) -> Result<()> {
-    let upper_dir = container_dir.join("upper");
-    let work_dir = container_dir.join("work");
-    let merged_dir = container_dir.join("merged");
-
-    let mount_opts = format!(
-        "lowerdir={},upperdir={},workdir={}",
-        rootfs_dir.display(),
-        upper_dir.display(),
-        work_dir.display()
-    );
-
-    let status = std::process::Command::new("mount")
-        .args(["-t", "overlay", "overlay", "-o", &mount_opts])
-        .arg(&merged_dir)
-        .status()
-        .context("failed to run mount")?;
-    crate::check_interrupted()?;
-
-    if !status.success() {
-        bail!("failed to mount overlayfs for export");
-    }
-    Ok(())
-}
-
-/// Unmount overlayfs from a container's `merged/` directory.
-fn unmount_overlay(container_dir: &Path) {
-    let merged_dir = container_dir.join("merged");
-    let _ = std::process::Command::new("umount")
-        .arg(&merged_dir)
-        .status();
 }
 
 /// Align a raw disk image to a 512-byte sector boundary.
@@ -2709,5 +2799,61 @@ WantedBy=getty.target
         }
         assert!(found_localtime, "etc/localtime not found in tarball");
         assert!(found_timezone, "etc/timezone not found in tarball");
+    }
+
+    // --- ExportSource tests ---
+
+    #[test]
+    fn test_export_source_rootfs_invalid_name() {
+        let tmp = crate::testutil::TempDataDir::new("export-src-rootfs-inv");
+        let source = ExportSource::Rootfs("INVALID".to_string());
+        let opts = ExportOptions {
+            format: &ExportFormat::Dir,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: None,
+        };
+        let err = export(tmp.path(), &source, Path::new("/tmp/nope"), &opts, false).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid rootfs name"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_export_source_rootfs_not_found() {
+        let tmp = crate::testutil::TempDataDir::new("export-src-rootfs-nf");
+        let source = ExportSource::Rootfs("noexist".to_string());
+        let opts = ExportOptions {
+            format: &ExportFormat::Dir,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: None,
+        };
+        let err = export(tmp.path(), &source, Path::new("/tmp/nope"), &opts, false).unwrap_err();
+        assert!(err.to_string().contains("rootfs not found"), "got: {err}");
+    }
+
+    #[test]
+    fn test_export_source_container_not_found() {
+        let tmp = crate::testutil::TempDataDir::new("export-src-ctr-nf");
+        let source = ExportSource::Container("noexist".to_string());
+        let opts = ExportOptions {
+            format: &ExportFormat::Dir,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: None,
+        };
+        let err = export(tmp.path(), &source, Path::new("/tmp/nope"), &opts, false).unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "got: {err}");
     }
 }

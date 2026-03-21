@@ -394,26 +394,27 @@ and `oci_cache_max_size` (default: 10G).
 
 ### 4.5 Exporting root filesystems
 
-`sdme fs export` exports an imported rootfs or a container's merged
-overlayfs view to a directory, tarball, or raw disk image. The output
-format is auto-detected from the file extension:
+`sdme fs export` exports a container (default) or rootfs (with `fs:`
+prefix) to a directory, tarball, or raw disk image. The output format
+is auto-detected from the file extension:
 
 ```bash
-# Export an imported rootfs
-sudo sdme fs export ubuntu /tmp/ubuntu-rootfs             # directory copy
-sudo sdme fs export ubuntu /tmp/ubuntu.tar.gz             # gzip tarball
-sudo sdme fs export ubuntu /tmp/ubuntu.raw                # ext4 disk image
-sudo sdme fs export ubuntu /tmp/ubuntu.raw --size 2G      # explicit size
-sudo sdme fs export ubuntu /tmp/ubuntu.raw --filesystem btrfs  # btrfs disk image
-sudo sdme fs export ubuntu /tmp/ubuntu.raw --timezone America/New_York  # set timezone
+# Export a container's merged view (default — bare name = container)
+sudo sdme fs export mybox /tmp/mybox.tar.xz
+sudo sdme fs export mybox /tmp/mybox                       # directory copy
 
-# Export a container's merged view
-sudo sdme fs export mybox /tmp/mybox.tar.xz --container
+# Export an imported rootfs (fs: prefix)
+sudo sdme fs export fs:ubuntu /tmp/ubuntu-rootfs            # directory copy
+sudo sdme fs export fs:ubuntu /tmp/ubuntu.tar.gz            # gzip tarball
+sudo sdme fs export fs:ubuntu /tmp/ubuntu.raw               # ext4 disk image
+sudo sdme fs export fs:ubuntu /tmp/ubuntu.raw --size 2G     # explicit size
+sudo sdme fs export fs:ubuntu /tmp/ubuntu.raw --filesystem btrfs  # btrfs
+sudo sdme fs export fs:ubuntu /tmp/ubuntu.raw --timezone America/New_York
 ```
 
 Supported tarball formats: `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`,
 `.tar.xz`/`.txz`, `.tar.zst`/`.tzst`. Use `--fmt` to override auto-detection
-(e.g. `sdme fs export ubuntu /tmp/output --fmt tar.gz`).
+(e.g. `sdme fs export fs:ubuntu /tmp/output --fmt tar.gz`).
 
 Raw disk images are bare ext4 (default) or btrfs filesystems (no partition
 table), selectable with `--filesystem`. The default can be changed with
@@ -424,9 +425,11 @@ space is guaranteed in the image (default from config
 `default_export_free_space`, initially `256M`). When `--size` is set,
 `--free-space` is ignored. Change the default with
 `sdme config set default_export_free_space 512M`.
-Container exports: running containers are exported from the live
-filesystem (with a consistency warning); stopped containers have overlayfs
-temporarily mounted.
+Container export is the default (bare name without `fs:` prefix).
+Running containers are exported from the live filesystem (with a
+consistency warning); stopped containers get a temporary read-only
+overlayfs mount. Exports hold shared flock locks to prevent `sdme rm`
+or `sdme fs rm` from deleting resources during export.
 
 Use `--timezone` to set the timezone in the exported rootfs (e.g.
 `--timezone America/New_York`). This symlinks `/etc/localtime` to the
@@ -474,7 +477,7 @@ ls /boot/vmlinuz-*                  # Debian, Ubuntu
 sudo sdme fs import debian docker.io/debian:stable
 
 # Export as a VM image
-sudo sdme fs export debian /tmp/debian-vm.raw \
+sudo sdme fs export fs:debian /tmp/debian-vm.raw \
     --vm --hostname debian --root-password test
 ```
 
@@ -487,7 +490,7 @@ udev.
 ```bash
 sudo sdme fs import fedora quay.io/fedora/fedora:41
 
-sudo sdme fs export fedora /tmp/fedora-vm.raw \
+sudo sdme fs export fs:fedora /tmp/fedora-vm.raw \
     --vm --hostname fedora --root-password test
 ```
 
@@ -496,7 +499,7 @@ sudo sdme fs export fedora /tmp/fedora-vm.raw \
 ```bash
 sudo sdme fs import archlinux docker.io/archlinux
 
-sudo sdme fs export archlinux /tmp/archlinux-vm.raw \
+sudo sdme fs export fs:archlinux /tmp/archlinux-vm.raw \
     --vm --hostname archlinux --root-password test
 ```
 

@@ -183,13 +183,25 @@ resolution), and bridge connectivity (HTTP via IP, networkd enabled).
 sudo ./test/scripts/verify-network.sh
 ```
 
+### verify-interrupt.sh
+
+Signal handling validation. Tests that SIGINT (Ctrl+C) during batch
+operations (`rm -a`, `start --all`, `fs rm`) exits immediately with
+code 130 instead of continuing to process remaining items.
+
+```bash
+sudo ./test/scripts/verify-interrupt.sh
+```
+
 ### verify-export.sh
 
-Rootfs export end-to-end validation. Tests all output formats: directory
-copy, tarballs (uncompressed, gzip, bzip2, xz, zstd), raw ext4 disk
-images (auto-size and explicit `--size`), format override (`-f`),
-`--timezone` (dir, tar, raw image, invalid timezone rejection), and
-error handling for nonexistent rootfs.
+Export end-to-end validation. Tests rootfs catalogue exports (`fs:`
+prefix) for all output formats: directory copy, tarballs (uncompressed,
+gzip, bzip2, xz, zstd), raw ext4 and btrfs disk images (auto-size and
+explicit `--size`), format override (`--fmt`), `--timezone` (dir, tar,
+raw image, invalid timezone rejection), nonexistent rootfs error, smart
+error hints (rootfs exists but no container, container exists but no
+rootfs), and stopped container export.
 
 ```bash
 sudo ./test/scripts/verify-export.sh
@@ -309,6 +321,7 @@ sudo ./test/scripts/verify-oci.sh
 sudo ./test/scripts/verify-security.sh
 sudo ./test/scripts/verify-network.sh
 sudo ./test/scripts/verify-export.sh
+sudo ./test/scripts/verify-interrupt.sh
 sudo ./test/scripts/verify-usage.sh
 sudo ./test/scripts/verify-nixos.sh   # builds NixOS rootfs externally
 

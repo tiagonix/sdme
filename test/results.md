@@ -1,6 +1,6 @@
 # Test Results
 
-Last verified: 2026-03-20
+Last verified: 2026-03-21
 
 System: Linux 6.17.0-19-generic (aarch64), systemd 257, sdme 0.4.6, AppArmor enabled
 
@@ -10,25 +10,26 @@ See [README.md](README.md) for how to run the tests and known limitations.
 
 | # | Test Suite | Status | Passed | Failed | Skipped | Total |
 |---|-----------|--------|--------|--------|---------|-------|
-| 1 | verify-export.sh | PASS | 17 | 0 | 0 | 17 |
-| 2 | verify-pods.sh | PASS | 9 | 0 | 0 | 9 |
-| 3 | verify-security.sh | PASS | 31 | 0 | 0 | 31 |
-| 4 | verify-network.sh | PASS | 9 | 0 | 0 | 9 |
-| 5 | verify-oci.sh | PASS | 20 | 0 | 0 | 20 |
-| 6 | verify-usage.sh | PASS* | 48 | 1 | 0 | 49 |
-| 7 | verify-matrix.sh | PASS | 237 | 0 | 0 | 237 |
-| 8 | verify-nixos.sh | PASS | 27 | 0 | 0 | 27 |
-| 9 | verify-kube-L1-basic.sh | PASS | 14 | 0 | 0 | 14 |
-| 10 | verify-kube-L2-spec.sh | PASS | 12 | 0 | 0 | 12 |
-| 11 | verify-kube-L2-probes.sh | PASS | 41 | 0 | 0 | 41 |
-| 12 | verify-kube-L2-security.sh | PASS | 17 | 0 | 0 | 17 |
-| 13 | verify-kube-L3-volumes.sh | PASS | 39 | 0 | 0 | 39 |
-| 14 | verify-kube-L3-secrets.sh | PASS | 16 | 0 | 0 | 16 |
-| 15 | verify-kube-L4-networking.sh | PASS | 6 | 0 | 0 | 6 |
-| 16 | verify-kube-L5-redis-stack.sh | PASS | 6 | 0 | 0 | 6 |
-| 17 | verify-kube-L6-gitea-stack.sh | PASS | 15 | 0 | 0 | 15 |
+| 1 | verify-export.sh | PASS | 20 | 0 | 0 | 20 |
+| 2 | verify-interrupt.sh | PASS | 8 | 0 | 0 | 8 |
+| 3 | verify-pods.sh | PASS | 9 | 0 | 0 | 9 |
+| 4 | verify-security.sh | PASS | 31 | 0 | 0 | 31 |
+| 5 | verify-network.sh | PASS | 9 | 0 | 0 | 9 |
+| 6 | verify-oci.sh | PASS | 20 | 0 | 0 | 20 |
+| 7 | verify-usage.sh | PASS* | 48 | 1 | 0 | 49 |
+| 8 | verify-matrix.sh | PASS | 237 | 0 | 0 | 237 |
+| 9 | verify-nixos.sh | PASS | 27 | 0 | 0 | 27 |
+| 10 | verify-kube-L1-basic.sh | PASS | 14 | 0 | 0 | 14 |
+| 11 | verify-kube-L2-spec.sh | PASS | 12 | 0 | 0 | 12 |
+| 12 | verify-kube-L2-probes.sh | PASS | 41 | 0 | 0 | 41 |
+| 13 | verify-kube-L2-security.sh | PASS | 17 | 0 | 0 | 17 |
+| 14 | verify-kube-L3-volumes.sh | PASS | 39 | 0 | 0 | 39 |
+| 15 | verify-kube-L3-secrets.sh | PASS | 16 | 0 | 0 | 16 |
+| 16 | verify-kube-L4-networking.sh | PASS | 6 | 0 | 0 | 6 |
+| 17 | verify-kube-L5-redis-stack.sh | PASS | 6 | 0 | 0 | 6 |
+| 18 | verify-kube-L6-gitea-stack.sh | PASS | 15 | 0 | 0 | 15 |
 
-**Totals: 564 passed, 1 failed, 0 skipped (565 tests), 17/17 suites pass**
+**Totals: 575 passed, 1 failed, 0 skipped (576 tests), 18/18 suites pass**
 
 \* Known platform issue only (no code regression); see below.
 
@@ -45,6 +46,11 @@ configuration); the same test passes on x86_64 with kernel 6.19.
 No known issues at this time.
 
 ## Previous Results
+
+### 0.4.6 -- fs build refactoring (2026-03-20, aarch64)
+
+568 passed, 1 failed, 0 skipped (568 tests), 17/17 suites pass.
+Same known platform issue (opaque xattr on aarch64).
 
 ### 0.4.5 -- nix-build pipeline removal (2026-03-19, aarch64)
 

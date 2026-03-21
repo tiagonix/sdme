@@ -26,6 +26,8 @@ pub(crate) enum TxnKind {
     Remove,
     /// Rootfs build from config.
     Build,
+    /// Rootfs or container export (marks overlay mount lifetime).
+    Export,
 }
 
 impl TxnKind {
@@ -34,6 +36,7 @@ impl TxnKind {
             Self::Import => "import",
             Self::Remove => "remove",
             Self::Build => "build",
+            Self::Export => "export",
         }
     }
 }
@@ -272,6 +275,17 @@ mod tests {
         let path = txn.path().to_path_buf();
         let name = path.file_name().unwrap().to_string_lossy();
         assert!(name.starts_with(".ubuntu.import-txn-"));
+        assert!(name.ends_with(&std::process::id().to_string()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_txn_export_staging_path_format() {
+        let dir = setup_dir("export-path-format");
+        let txn = Txn::new(&dir, "mycontainer", TxnKind::Export, false, false);
+        let path = txn.path().to_path_buf();
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with(".mycontainer.export-txn-"));
         assert!(name.ends_with(&std::process::id().to_string()));
         let _ = fs::remove_dir_all(&dir);
     }

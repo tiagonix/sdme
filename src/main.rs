@@ -506,15 +506,12 @@ EXAMPLE:
         #[arg(short, long)]
         force: bool,
     },
-    /// Export a root filesystem or container to a directory, tarball, or disk image
+    /// Export a container or rootfs to a directory, tarball, or disk image
     Export {
-        /// Name of the rootfs or container to export
+        /// Container name, or fs:<name> for rootfs catalogue export
         name: String,
         /// Output path (format auto-detected from extension, or use --fmt)
         output: String,
-        /// Export a container's merged rootfs instead of an imported rootfs
-        #[arg(long)]
-        container: bool,
         /// Overwrite output path if it already exists
         #[arg(short = 'f', long)]
         force: bool,
@@ -2613,7 +2610,6 @@ fn run() -> Result<()> {
             RootfsCommand::Export {
                 name,
                 output,
-                container,
                 force,
                 format,
                 size,
@@ -2629,6 +2625,36 @@ fn run() -> Result<()> {
                 install_packages,
                 timezone,
             } => {
+                // Parse fs: prefix for rootfs catalogue export vs container export.
+                let source = if let Some(fs_name) = name.strip_prefix("fs:") {
+                    let fs_dir = cfg.datadir.join("fs").join(fs_name);
+                    if !fs_dir.is_dir() {
+                        let state_file = cfg.datadir.join("state").join(fs_name);
+                        if state_file.exists() {
+                            bail!(
+                                "rootfs '{fs_name}' does not exist; \
+                                 did you mean '{fs_name}' (without the fs: prefix) \
+                                 to export container '{fs_name}'?"
+                            );
+                        }
+                        bail!("rootfs not found: {fs_name}");
+                    }
+                    export::ExportSource::Rootfs(fs_name.to_string())
+                } else {
+                    let state_file = cfg.datadir.join("state").join(&name);
+                    if !state_file.exists() {
+                        let fs_dir = cfg.datadir.join("fs").join(&name);
+                        if fs_dir.is_dir() {
+                            bail!(
+                                "container '{name}' does not exist; \
+                                 did you mean fs:{name} to export rootfs '{name}'?"
+                            );
+                        }
+                        bail!("container does not exist: {name}");
+                    }
+                    export::ExportSource::Container(name.clone())
+                };
+
                 let fmt = export::detect_format(&output, format.as_deref())?;
                 let fs_str = filesystem.as_deref().unwrap_or(&cfg.default_export_fs);
                 let fmt = match fmt {
@@ -2707,11 +2733,13 @@ fn run() -> Result<()> {
                     force,
                     timezone: timezone.as_deref(),
                 };
-                let result = if container {
-                    export::export_container(&cfg.datadir, &name, &output_path, &export_opts)?
-                } else {
-                    export::export_rootfs(&cfg.datadir, &name, &output_path, &export_opts)?
-                };
+                let result = export::export(
+                    &cfg.datadir,
+                    &source,
+                    &output_path,
+                    &export_opts,
+                    cfg.auto_fs_gc,
+                )?;
                 println!("{} ({})", output_path.display(), result.summary());
             }
             RootfsCommand::Cache(cmd) => match cmd {
