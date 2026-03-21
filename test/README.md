@@ -123,54 +123,46 @@ automatically via `fix_redis_oci()` in lib.sh.
 
 Last verified: 2026-03-21
 
-System: Linux 6.17.0-19-generic (aarch64), systemd 257, sdme 0.4.8,
+System: Linux 6.19.6-2-cachyos (x86_64), systemd 259, sdme 0.5.0,
 AppArmor enabled
 
 | # | Test Suite | Status | Pass | Fail | Skip |
 |---|-----------|--------|------|------|------|
 | 1 | verify-export | PASS | 20 | 0 | 0 |
-| 2 | verify-interrupt | PASS | 8 | 0 | 0 |
-| 3 | verify-build | PASS | 11 | 0 | 0 |
-| 4 | verify-security | PASS | 31 | 0 | 0 |
-| 5 | verify-pods | PASS | 9 | 0 | 0 |
-| 6 | verify-network | PASS | 9 | 0 | 0 |
-| 7 | verify-oci | PASS | 20 | 0 | 0 |
-| 8 | verify-distro-boot | PASS | 121 | 0 | 0 |
-| 9 | verify-distro-oci | PASS | 116 | 0 | 0 |
-| 10 | verify-nixos | PASS | 27 | 0 | 0 |
-| 11 | verify-usage | PASS* | 48 | 1 | 0 |
-| 12 | verify-kube-L1-basic | PASS | 14 | 0 | 0 |
-| 13 | verify-kube-L2-spec | PASS | 12 | 0 | 0 |
-| 14 | verify-kube-L2-probes | PASS | 41 | 0 | 0 |
-| 15 | verify-kube-L2-security | PASS | 17 | 0 | 0 |
-| 16 | verify-kube-L3-secrets | PASS | 16 | 0 | 0 |
-| 17 | verify-kube-L3-volumes | PASS | 39 | 0 | 0 |
-| 18 | verify-kube-L4-networking | PASS | 6 | 0 | 0 |
-| 19 | verify-kube-L5-redis-stack | PASS | 6 | 0 | 0 |
-| 20 | verify-kube-L6-gitea-stack | PASS | 15 | 0 | 0 |
+| 2 | verify-build | PASS | 11 | 0 | 0 |
+| 3 | verify-security | PASS | 31 | 0 | 0 |
+| 4 | verify-pods | PASS | 9 | 0 | 0 |
+| 5 | verify-network | PASS | 9 | 0 | 0 |
+| 6 | verify-oci | PASS | 18 | 0 | 0 |
+| 7 | verify-distro-boot | PASS | 63 | 0 | 0 |
+| 8 | verify-distro-oci | PASS | 175 | 0 | 0 |
+| 9 | verify-nixos | PASS | 26 | 0 | 0 |
+| 10 | verify-usage | PASS | 49 | 0 | 0 |
+| 11 | verify-kube-L1-basic | PASS | 14 | 0 | 0 |
+| 12 | verify-kube-L2-spec | PASS | 12 | 0 | 0 |
+| 13 | verify-kube-L2-probes | PASS | 41 | 0 | 0 |
+| 14 | verify-kube-L2-security | PASS | 17 | 0 | 0 |
+| 15 | verify-kube-L3-secrets | PASS | 16 | 0 | 0 |
+| 16 | verify-kube-L3-volumes | PASS | 39 | 0 | 0 |
+| 17 | verify-kube-L4-networking | PASS | 6 | 0 | 0 |
+| 18 | verify-kube-L5-redis-stack | PASS | 6 | 0 | 0 |
+| 19 | verify-kube-L6-gitea-stack | PASS | 15 | 0 | 0 |
 
-**Totals: 583 passed, 1 failed, 0 skipped -- 20 suites**
-
-\* Known platform issue only (no code regression); see below.
-
-Note: verify-distro-boot and verify-distro-oci replace the former
-verify-matrix.sh (237 tests split into boot tests and OCI app tests).
-The pass counts above are derived from the last full matrix run.
-
-### Failures
-
-**verify-usage: opaque/verify** -- `getfattr` did not find the
-`trusted.overlay.opaque` xattr on the upper layer directory. This is
-environment-specific (kernel/filesystem configuration); the same test
-passes on x86_64 with kernel 6.19.
+**Totals: 577 passed, 0 failed, 0 skipped -- 19 suites**
 
 ## Log
 
-### 0.4.8 -- test infrastructure revamp (2026-03-21)
+### 0.5.0 -- version bump, clean run (2026-03-21, x86_64)
+
+577 passed, 0 failed, 0 skipped across 19 suites. All tests pass
+on x86_64 with kernel 6.19.6, systemd 259. Wall clock: 9m34s.
+
+### 0.4.8 -- test infrastructure revamp (2026-03-21, aarch64)
 
 Staged runner with preflight, smoke, and interrupt gates. Matrix split
 into verify-distro-boot.sh and verify-distro-oci.sh. Timeout scaling,
 stale cleanup, kube-L1 gating. Makefile e2e targets added.
+583 passed, 1 failed, 0 skipped -- 20 suites.
 
 ### 0.4.6 -- parallel runner (2026-03-21, aarch64)
 
