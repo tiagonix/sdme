@@ -402,6 +402,12 @@ WantedBy=multi-user.target
     // 5. Atomic rename.
     txn.commit(&final_dir)?;
 
+    // Release the exclusive rootfs lock before container creation.
+    // containers::create() acquires a shared lock on the same rootfs,
+    // and Linux flock blocks a shared lock when an exclusive lock is
+    // held via a different file descriptor by the same process.
+    drop(_rootfs_lock);
+
     eprintln!("created rootfs: {rootfs_name}");
 
     // 5. Create the sdme container.

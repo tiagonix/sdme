@@ -11,7 +11,8 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -322,7 +323,7 @@ const MANIFEST_ACCEPT: &str = "\
     application/vnd.docker.distribution.manifest.list.v2+json";
 
 /// A layer descriptor from an image manifest.
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
 struct LayerDescriptor {
     digest: String,
     #[allow(dead_code)]
@@ -333,13 +334,13 @@ struct LayerDescriptor {
 }
 
 /// A config descriptor from an image manifest.
-#[derive(serde::Deserialize, Debug, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 struct ConfigDescriptor {
     digest: String,
 }
 
 /// An image manifest (OCI or Docker v2).
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
 struct ImageManifest {
     config: Option<ConfigDescriptor>,
     layers: Vec<LayerDescriptor>,
@@ -382,7 +383,7 @@ fn host_arch() -> &'static str {
 }
 
 /// The `config` object inside an OCI image config blob.
-#[derive(serde::Deserialize, Debug, Default)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Default, Clone)]
 pub(crate) struct OciContainerConfig {
     #[serde(rename = "Entrypoint")]
     pub(crate) entrypoint: Option<Vec<String>>,
@@ -702,11 +703,84 @@ fn download_blob(opts: &DownloadBlobOptions<'_>) -> Result<()> {
     Ok(())
 }
 
+// --- Manifest cache ---
+
+/// Default manifest cache TTL: 15 minutes.
+const MANIFEST_CACHE_TTL_SECS: u64 = 900;
+
+/// Cached manifest data: resolved manifest + container config.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedManifest {
+    /// Unix epoch seconds when this entry was cached.
+    timestamp: u64,
+    /// The resolved platform-specific image manifest.
+    manifest: serde_json::Value,
+    /// The container config blob (if available).
+    container_config: Option<OciContainerConfig>,
+}
+
+/// Build a cache key path for a manifest.
+fn manifest_cache_path(cache_dir: &Path, image: &ImageReference) -> PathBuf {
+    let arch = host_arch();
+    let key = format!(
+        "{}/{}:{}:{}",
+        image.registry, image.repository, image.reference, arch
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    cache_dir.join("manifests").join(hash)
+}
+
+/// Try to load a cached manifest. Returns None if missing or expired.
+fn load_cached_manifest(cache_dir: &Path, image: &ImageReference) -> Option<CachedManifest> {
+    let path = manifest_cache_path(cache_dir, image);
+    let data = fs::read_to_string(&path).ok()?;
+    let cached: CachedManifest = serde_json::from_str(&data).ok()?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if now.saturating_sub(cached.timestamp) > MANIFEST_CACHE_TTL_SECS {
+        return None;
+    }
+    Some(cached)
+}
+
+/// Save a resolved manifest to the cache.
+fn save_cached_manifest(
+    cache_dir: &Path,
+    image: &ImageReference,
+    manifest: &ImageManifest,
+    container_config: &Option<OciContainerConfig>,
+) {
+    let path = manifest_cache_path(cache_dir, image);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let cached = CachedManifest {
+        timestamp: now,
+        manifest: serde_json::to_value(manifest).unwrap_or_default(),
+        container_config: container_config.clone(),
+    };
+    if let Ok(json) = serde_json::to_string(&cached) {
+        let _ = fs::write(&path, json);
+    }
+}
+
 /// Import an image from an OCI registry.
 ///
 /// Downloads layers one at a time to temp files, verifies digests,
 /// and extracts each layer using the OCI whiteout-aware extractor.
 /// Also fetches the image config blob and returns the container config.
+///
+/// Manifest resolution is cached locally (15-minute TTL) to avoid
+/// repeated registry API calls when importing the same image multiple
+/// times (e.g. parallel test runs).
 pub(crate) fn import_registry_image(
     image: &ImageReference,
     staging_dir: &Path,
@@ -716,6 +790,42 @@ pub(crate) fn import_registry_image(
     http: &crate::config::HttpConfig,
 ) -> Result<Option<OciContainerConfig>> {
     eprintln!("pulling {image}");
+
+    // Check manifest cache first.
+    let cache_dir = cache.dir();
+    if let Some(cached) = load_cached_manifest(cache_dir, image) {
+        let manifest: ImageManifest =
+            serde_json::from_value(cached.manifest).context("failed to parse cached manifest")?;
+        if !manifest.layers.is_empty() {
+            eprintln!("manifest cache hit");
+            if verbose {
+                eprintln!("image has {} layer(s) (cached)", manifest.layers.len());
+            }
+            // Still need auth for blob downloads (cache misses).
+            let agent = build_http_agent(verbose, http.connect_timeout, http.body_timeout)?;
+            let token = obtain_token(
+                &agent,
+                &image.registry,
+                &image.repository,
+                docker_credentials,
+                verbose,
+                http.connect_timeout,
+                http.body_timeout,
+            )?;
+            let token_ref = token.as_deref();
+            download_layers(
+                &agent,
+                image,
+                &manifest,
+                staging_dir,
+                token_ref,
+                cache,
+                verbose,
+                http.max_download_size,
+            )?;
+            return Ok(cached.container_config);
+        }
+    }
 
     let agent = build_http_agent(verbose, http.connect_timeout, http.body_timeout)?;
     let token = obtain_token(
@@ -795,12 +905,38 @@ pub(crate) fn import_registry_image(
         None
     };
 
+    // Save manifest + config to cache.
+    save_cached_manifest(cache_dir, image, &manifest, &container_config);
+
+    download_layers(
+        &agent,
+        image,
+        &manifest,
+        staging_dir,
+        token_ref,
+        cache,
+        verbose,
+        http.max_download_size,
+    )?;
+
+    Ok(container_config)
+}
+
+/// Download and extract all layers from a resolved manifest.
+#[allow(clippy::too_many_arguments)]
+fn download_layers(
+    agent: &ureq::Agent,
+    image: &ImageReference,
+    manifest: &ImageManifest,
+    staging_dir: &Path,
+    token: Option<&str>,
+    cache: &crate::oci::cache::BlobCache,
+    verbose: bool,
+    max_download_size: u64,
+) -> Result<()> {
     fs::create_dir_all(staging_dir)
         .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
 
-    // Download and extract layers one at a time.
-    // Temp files go in the staging dir (unique per import) to avoid
-    // collisions when multiple imports run in parallel.
     for (i, layer) in manifest.layers.iter().enumerate() {
         check_interrupted()?;
 
@@ -815,15 +951,15 @@ pub(crate) fn import_registry_image(
             );
 
             download_blob(&DownloadBlobOptions {
-                agent: &agent,
+                agent,
                 registry: &image.registry,
                 repository: &image.repository,
                 digest: &layer.digest,
                 dest: &temp_path,
-                token: token_ref,
+                token,
                 cache,
                 verbose,
-                max_download_size: http.max_download_size,
+                max_download_size,
             })?;
 
             let decoder = open_decoder(&temp_path)?;
@@ -832,13 +968,12 @@ pub(crate) fn import_registry_image(
             Ok(())
         })();
 
-        // Clean up temp file regardless of success/failure.
         let _ = fs::remove_file(&temp_path);
 
         result?;
     }
 
-    Ok(container_config)
+    Ok(())
 }
 
 #[cfg(test)]

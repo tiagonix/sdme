@@ -1252,7 +1252,8 @@ fn find_app_pid(service_cgroup: &Path, app_name: &str) -> Result<u32> {
 /// Run a command inside a container's OCI app namespaces using `nsenter`.
 ///
 /// Discovers the app's host PID via its cgroup, then enters its PID, IPC,
-/// and mount namespaces so that `ps` shows only the app's processes.
+/// mount, and network namespaces so the command sees the app's filesystem,
+/// processes, and network.
 pub fn exec_oci(
     datadir: &Path,
     name: &str,
@@ -1270,7 +1271,7 @@ pub fn exec_oci(
 
     let pid_str = app_pid.to_string();
     let mut cmd = std::process::Command::new("nsenter");
-    cmd.args(["-t", &pid_str, "--pid", "--ipc", "--mount", "--"]);
+    cmd.args(["-t", &pid_str, "--pid", "--ipc", "--mount", "--net", "--"]);
     cmd.args(command);
 
     if verbose {

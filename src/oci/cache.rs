@@ -74,6 +74,11 @@ impl BlobCache {
         Ok(Self { dir, max_size })
     }
 
+    /// Cache directory path.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Whether the cache is enabled (max_size > 0).
     pub fn is_enabled(&self) -> bool {
         self.max_size > 0
