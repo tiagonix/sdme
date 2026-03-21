@@ -830,6 +830,7 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
 | `docker_token`            | (empty)                          |
 | `oci_cache_dir`           | (empty = `{datadir}/cache/oci`)  |
 | `oci_cache_max_size`      | `10G`                            |
+| `oci_manifest_cache_ttl`  | `900`                            |
 | `http_timeout`            | `30`                             |
 | `http_body_timeout`       | `300`                            |
 | `max_download_size`       | `50G`                            |
@@ -857,6 +858,10 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
 - `docker_token`: Docker Hub personal access token.
 - `oci_cache_dir`: OCI blob cache directory.
 - `oci_cache_max_size`: max cache size (`0` disables).
+- `oci_manifest_cache_ttl`: seconds to cache OCI manifests before
+  re-fetching from the registry (default 900; `0` disables).
+  `--no-cache` on `fs import`, `kube apply`, and `kube create`
+  overrides this to 0 for a single invocation.
 - `http_timeout`: HTTP connect/resolve timeout in seconds for
   downloads and OCI registry pulls.
 - `http_body_timeout`: HTTP body receive timeout in seconds.

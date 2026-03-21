@@ -384,7 +384,7 @@ This runs journalctl inside the container via
 For multi\-container kube pods, pass the app name:
 .BR "\-\-oci redis" .
 Single\-container pods auto\-select the only app.
-.SS sdme fs import \fIname\fR \fIsource\fR [\-f] [\-\-install\-packages \fImode\fR] [\-\-oci\-mode \fImode\fR] [\-\-base\-fs \fIrootfs\fR] [\-\-nix\-config \fIpath\fR]
+.SS sdme fs import \fIname\fR \fIsource\fR [\-f] [\-\-install\-packages \fImode\fR] [\-\-oci\-mode \fImode\fR] [\-\-base\-fs \fIrootfs\fR] [\-\-nix\-config \fIpath\fR] [\-\-no\-cache]
 Import a root filesystem.
 After import, systemd is detected in the rootfs; if missing, distro\-specific
 packages can be installed via chroot.
@@ -481,6 +481,11 @@ config key), or manually via
 Use
 .B \-f
 to force overwrite of an existing rootfs with the same name.
+.PP
+The
+.B \-\-no\-cache
+flag skips the OCI manifest cache and re\-fetches manifests from the registry.
+Useful after pushing a new image with the same tag.
 .SS sdme fs ls
 List imported root filesystems with distro detection and paths.
 .SS sdme fs rm [\-a] [\-f] \fIname\fR...
@@ -800,7 +805,7 @@ or
 keys) unless
 .B \-f
 is given.
-.SS sdme kube apply \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-t \fIseconds\fR] [\fIsecurity\fR] [\-\-masked\-services \fIlist\fR]
+.SS sdme kube apply \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-t \fIseconds\fR] [\fIsecurity\fR] [\-\-masked\-services \fIlist\fR] [\-\-no\-cache]
 Create, start, and enter a container from a Kubernetes Pod YAML file.
 Equivalent to
 .B kube create
@@ -820,6 +825,9 @@ config value.
 Use
 .B \-t
 to override the boot timeout.
+Use
+.B \-\-no\-cache
+to skip the OCI manifest cache and re\-fetch manifests from the registry.
 .PP
 Security hardening options can be set with
 .BR \-\-strict ,
@@ -837,7 +845,7 @@ below.
 .PP
 If boot fails or is interrupted (Ctrl+C or SIGTERM), the container is
 automatically stopped but preserved on disk for debugging or manual cleanup.
-.SS sdme kube create \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\fIsecurity\fR] [\-\-masked\-services \fIlist\fR]
+.SS sdme kube create \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\fIsecurity\fR] [\-\-masked\-services \fIlist\fR] [\-\-no\-cache]
 Create a container from a Kubernetes Pod YAML file without starting it.
 .PP
 Parses the YAML, pulls each container's OCI image from the registry, builds
@@ -848,6 +856,9 @@ Each pod container becomes a separate systemd service
 .RI ( sdme\-oci\-{name}.service )
 chrooted into its own rootfs under
 .IR /oci/apps/{name}/root .
+Use
+.B \-\-no\-cache
+to skip the OCI manifest cache and re\-fetch manifests from the registry.
 .PP
 Security hardening options can be set with
 .BR \-\-strict ,
@@ -1200,6 +1211,16 @@ to disable caching.
 Default:
 .BR 10G .
 .TP
+.B oci_manifest_cache_ttl
+TTL in seconds for cached OCI manifests.
+Cached manifests older than this are re\-fetched from the registry.
+Set to
+.B 0
+to disable manifest caching.
+Default:
+.BR 900
+(15 minutes).
+.TP
 .B auto_fs_gc
 Automatically clean up stale transaction staging directories before
 mutating filesystem operations.
@@ -1403,6 +1424,26 @@ Set to
 to disable caching.
 Default:
 .BR 10G .
+.TP
+.B oci_manifest_cache_ttl
+Integer.
+Time\-to\-live in seconds for cached OCI manifests.
+When importing or pulling an OCI image, sdme caches the resolved manifest
+locally so repeated pulls of the same image skip the registry API.
+Set to
+.B 0
+to disable manifest caching entirely.
+The
+.B \-\-no\-cache
+flag on
+.BR "sdme fs import" ,
+.BR "sdme kube apply" ,
+and
+.B "sdme kube create"
+overrides this to 0 for a single invocation.
+Default:
+.BR 900
+(15 minutes).
 .TP
 .B tasks_max
 Integer.

@@ -271,6 +271,14 @@ sudo sdme fs import ubuntu docker.io/ubuntu:24.04
 sudo sdme fs import fedora quay.io/fedora/fedora:41
 ```
 
+OCI manifests are cached locally for 15 minutes (configurable via
+`oci_manifest_cache_ttl`) to avoid redundant registry API calls. Use
+`--no-cache` to force a fresh pull:
+
+```bash
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04 --no-cache
+```
+
 If systemd is missing from the imported image, sdme will prompt to install
 it (along with packages needed for `machinectl shell`, like `util-linux`
 and `pam` on RHEL-family distros).
@@ -718,6 +726,12 @@ waits for a container to reach the running state. The `-t`/`--timeout`
 flag on `new`, `start`, `join --start`, `fs build`, and `kube apply`
 overrides this value for a single invocation.
 
+The `oci_manifest_cache_ttl` config key (default 900 seconds / 15 minutes)
+controls how long resolved OCI manifests are cached locally before
+re-fetching from the registry. Set to `0` to disable. The `--no-cache`
+flag on `fs import`, `kube apply`, and `kube create` overrides this for a
+single invocation.
+
 ## 6. OCI applications
 
 ### 6.1 Base OS vs application images
@@ -1039,7 +1053,8 @@ Then apply it:
 
 ```bash
 sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu
-sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu -t 120   # custom boot timeout
+sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu -t 120       # custom boot timeout
+sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu --no-cache   # skip manifest cache
 ```
 
 This pulls the image, builds a combined rootfs (base OS plus the app

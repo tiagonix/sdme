@@ -326,6 +326,7 @@ mod tests {
                     connect_timeout: cfg.http_timeout,
                     body_timeout: cfg.http_body_timeout,
                     max_download_size: 0,
+                    manifest_cache_ttl: cfg.oci_manifest_cache_ttl,
                 },
                 auto_gc: true,
                 distros: &std::collections::HashMap::new(),

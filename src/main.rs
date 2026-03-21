@@ -441,6 +441,10 @@ OCI REGISTRY IMAGES:
         /// Base rootfs for OCI application images (must have systemd; OCI rootfs goes under /oci/apps/{name}/root)
         #[arg(long)]
         base_fs: Option<String>,
+
+        /// Skip the OCI manifest cache and re-fetch from the registry
+        #[arg(long)]
+        no_cache: bool,
     },
     /// List imported root filesystems
     Ls,
@@ -657,6 +661,10 @@ enum KubeCommand {
         /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
         #[arg(long, value_delimiter = ',')]
         masked_services: Option<Vec<String>>,
+
+        /// Skip the OCI manifest cache and re-fetch from the registry
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Create a kube pod from a YAML file (without starting)
     Create {
@@ -682,6 +690,10 @@ enum KubeCommand {
         /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
         #[arg(long, value_delimiter = ',')]
         masked_services: Option<Vec<String>>,
+
+        /// Skip the OCI manifest cache and re-fetch from the registry
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Delete a kube pod (stop, remove container and rootfs)
     Delete {
@@ -1556,6 +1568,13 @@ fn run() -> Result<()> {
                         toml_key = key.clone();
                         toml_val = Some(V::String(value));
                     }
+                    "oci_manifest_cache_ttl" => {
+                        let v: u64 = value
+                            .parse()
+                            .context("oci_manifest_cache_ttl must be a number of seconds")?;
+                        toml_key = key.clone();
+                        toml_val = Some(V::Integer(v as i64));
+                    }
                     "http_timeout" => {
                         let v: u64 = value
                             .parse()
@@ -2254,6 +2273,7 @@ fn run() -> Result<()> {
                 oci_pod,
                 security: security_args,
                 masked_services,
+                no_cache,
             } => {
                 system_check::check_systemd_version(252)?;
                 let (sec, hardened) = parse_security(security_args, &cfg)?;
@@ -2278,6 +2298,10 @@ fn run() -> Result<()> {
                     resolve_masked_services(masked_services, &NetworkConfig::default(), &cfg)?;
                 let docker_creds = docker_credentials(&cfg);
                 let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
+                let mut http = cfg.http_config()?;
+                if no_cache {
+                    http.manifest_cache_ttl = 0;
+                }
                 let name = kube::kube_create(
                     &cfg.datadir,
                     &kube::KubeCreateOptions {
@@ -2288,7 +2312,7 @@ fn run() -> Result<()> {
                         pod: pod.as_deref(),
                         oci_pod: oci_pod.as_deref(),
                         verbose: cli.verbose,
-                        http: &cfg.http_config()?,
+                        http: &http,
                         auto_gc: cfg.auto_fs_gc,
                         security: sec,
                         hardened,
@@ -2336,6 +2360,7 @@ fn run() -> Result<()> {
                 oci_pod,
                 security: security_args,
                 masked_services,
+                no_cache,
             } => {
                 system_check::check_systemd_version(252)?;
                 let (sec, hardened) = parse_security(security_args, &cfg)?;
@@ -2357,6 +2382,10 @@ fn run() -> Result<()> {
                     resolve_masked_services(masked_services, &NetworkConfig::default(), &cfg)?;
                 let docker_creds = docker_credentials(&cfg);
                 let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
+                let mut http = cfg.http_config()?;
+                if no_cache {
+                    http.manifest_cache_ttl = 0;
+                }
                 let name = kube::kube_create(
                     &cfg.datadir,
                     &kube::KubeCreateOptions {
@@ -2367,7 +2396,7 @@ fn run() -> Result<()> {
                         pod: pod.as_deref(),
                         oci_pod: oci_pod.as_deref(),
                         verbose: cli.verbose,
-                        http: &cfg.http_config()?,
+                        http: &http,
                         auto_gc: cfg.auto_fs_gc,
                         security: sec,
                         hardened,
@@ -2490,6 +2519,7 @@ fn run() -> Result<()> {
                 install_packages,
                 oci_mode,
                 base_fs,
+                no_cache,
             } => {
                 system_check::check_systemd_version(252)?;
                 // Fall back to config default_base_fs when --base-fs is not given.
@@ -2505,6 +2535,10 @@ fn run() -> Result<()> {
                 }
                 let docker_creds = docker_credentials(&cfg);
                 let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
+                let mut http = cfg.http_config()?;
+                if no_cache {
+                    http.manifest_cache_ttl = 0;
+                }
                 rootfs::import(
                     &cfg.datadir,
                     &ImportOptions {
@@ -2518,7 +2552,7 @@ fn run() -> Result<()> {
                         base_fs: effective_base_fs.as_deref(),
                         docker_credentials: docker_creds_ref,
                         cache: &blob_cache,
-                        http: cfg.http_config()?,
+                        http,
                         auto_gc: cfg.auto_fs_gc,
                         distros: &cfg.distros,
                     },

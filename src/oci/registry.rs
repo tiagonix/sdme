@@ -705,9 +705,6 @@ fn download_blob(opts: &DownloadBlobOptions<'_>) -> Result<()> {
 
 // --- Manifest cache ---
 
-/// Default manifest cache TTL: 15 minutes.
-const MANIFEST_CACHE_TTL_SECS: u64 = 900;
-
 /// Cached manifest data: resolved manifest + container config.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedManifest {
@@ -732,8 +729,15 @@ fn manifest_cache_path(cache_dir: &Path, image: &ImageReference) -> PathBuf {
     cache_dir.join("manifests").join(hash)
 }
 
-/// Try to load a cached manifest. Returns None if missing or expired.
-fn load_cached_manifest(cache_dir: &Path, image: &ImageReference) -> Option<CachedManifest> {
+/// Try to load a cached manifest. Returns None if missing, expired, or cache disabled (ttl=0).
+fn load_cached_manifest(
+    cache_dir: &Path,
+    image: &ImageReference,
+    ttl_secs: u64,
+) -> Option<CachedManifest> {
+    if ttl_secs == 0 {
+        return None;
+    }
     let path = manifest_cache_path(cache_dir, image);
     let data = fs::read_to_string(&path).ok()?;
     let cached: CachedManifest = serde_json::from_str(&data).ok()?;
@@ -741,7 +745,7 @@ fn load_cached_manifest(cache_dir: &Path, image: &ImageReference) -> Option<Cach
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    if now.saturating_sub(cached.timestamp) > MANIFEST_CACHE_TTL_SECS {
+    if now.saturating_sub(cached.timestamp) > ttl_secs {
         return None;
     }
     Some(cached)
@@ -793,7 +797,7 @@ pub(crate) fn import_registry_image(
 
     // Check manifest cache first.
     let cache_dir = cache.dir();
-    if let Some(cached) = load_cached_manifest(cache_dir, image) {
+    if let Some(cached) = load_cached_manifest(cache_dir, image, http.manifest_cache_ttl) {
         let manifest: ImageManifest =
             serde_json::from_value(cached.manifest).context("failed to parse cached manifest")?;
         if !manifest.layers.is_empty() {

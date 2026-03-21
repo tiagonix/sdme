@@ -325,6 +325,14 @@ impl BlobCache {
         let _ = fs::remove_file(self.index_path());
         // Remove the sha256 directory if empty.
         let _ = fs::remove_dir(self.dir.join("sha256"));
+        // Remove cached OCI manifests.
+        let manifests_dir = self.dir.join("manifests");
+        if manifests_dir.is_dir() {
+            if verbose {
+                eprintln!("cache: removing manifest cache");
+            }
+            let _ = fs::remove_dir_all(&manifests_dir);
+        }
 
         Ok(freed)
     }

@@ -88,6 +88,11 @@ pub struct Config {
     #[serde(default = "default_oci_cache_max_size")]
     pub oci_cache_max_size: String,
 
+    /// OCI manifest cache TTL in seconds. Cached manifests older than this
+    /// are re-fetched from the registry. Default: 900 (15 minutes). 0 disables.
+    #[serde(default = "default_oci_manifest_cache_ttl")]
+    pub oci_manifest_cache_ttl: u64,
+
     /// HTTP connect/resolve timeout in seconds for downloads and OCI pulls.
     #[serde(default = "default_http_timeout")]
     pub http_timeout: u64,
@@ -174,6 +179,10 @@ fn default_oci_cache_max_size() -> String {
     "10G".to_string()
 }
 
+fn default_oci_manifest_cache_ttl() -> u64 {
+    900
+}
+
 fn default_http_timeout() -> u64 {
     30
 }
@@ -223,6 +232,7 @@ impl Default for Config {
             docker_token: String::new(),
             oci_cache_dir: String::new(),
             oci_cache_max_size: default_oci_cache_max_size(),
+            oci_manifest_cache_ttl: default_oci_manifest_cache_ttl(),
             http_timeout: default_http_timeout(),
             http_body_timeout: default_http_body_timeout(),
             max_download_size: default_max_download_size(),
@@ -245,6 +255,8 @@ pub struct HttpConfig {
     pub body_timeout: u64,
     /// Maximum download size in bytes (0 = unlimited).
     pub max_download_size: u64,
+    /// OCI manifest cache TTL in seconds (0 = disabled).
+    pub manifest_cache_ttl: u64,
 }
 
 impl Config {
@@ -254,6 +266,7 @@ impl Config {
             connect_timeout: self.http_timeout,
             body_timeout: self.http_body_timeout,
             max_download_size: crate::parse_size(&self.max_download_size)?,
+            manifest_cache_ttl: self.oci_manifest_cache_ttl,
         })
     }
 
@@ -292,6 +305,7 @@ impl Config {
         println!("docker_token = {docker_token_display}");
         println!("oci_cache_dir = {}", self.oci_cache_dir);
         println!("oci_cache_max_size = {}", self.oci_cache_max_size);
+        println!("oci_manifest_cache_ttl = {}", self.oci_manifest_cache_ttl);
         println!("http_timeout = {}", self.http_timeout);
         println!("http_body_timeout = {}", self.http_body_timeout);
         println!("max_download_size = {}", self.max_download_size);
