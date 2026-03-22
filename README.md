@@ -18,6 +18,9 @@ configs, break things; the host is untouched.
 sudo sdme new
 ```
 
+See [docs/usage.md](docs/usage.md) for the full guide covering installation,
+importing distros, OCI apps, networking, security, and more.
+
 On macOS? See [docs/macos.md](docs/macos.md) for setting up a Linux VM
 with lima-vm, then install sdme inside it.
 
