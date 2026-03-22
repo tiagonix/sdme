@@ -2203,6 +2203,21 @@ fn run() -> Result<()> {
                     _ => bail!("unknown config key: {key}"),
                 }
 
+                if let Some(ref val) = toml_val {
+                    if let Some(default_val) = config::default_value_for_key(&toml_key) {
+                        if *val == default_val {
+                            if config::key_exists_in_file(config_path, &toml_key)? {
+                                config::save_key(config_path, &toml_key, None)?;
+                                eprintln!(
+                                    "{toml_key} is the built-in default; removed override from config file"
+                                );
+                            } else {
+                                eprintln!("{toml_key} is already the built-in default");
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
                 config::save_key(config_path, &toml_key, toml_val)?;
             }
             // Handled before root check above.

@@ -404,6 +404,42 @@ fn set_nested(table: &mut toml::Table, parts: &[&str], value: toml::Value) {
     }
 }
 
+/// Look up a value at a dot-separated key path.
+fn get_nested<'a>(table: &'a toml::Table, parts: &[&str]) -> Option<&'a toml::Value> {
+    let val = table.get(*parts.first()?)?;
+    if parts.len() == 1 {
+        return Some(val);
+    }
+    val.as_table()
+        .and_then(|inner| get_nested(inner, &parts[1..]))
+}
+
+/// Return the default [`toml::Value`] for a config key, if one exists.
+///
+/// Serializes [`Config::default()`] to TOML and walks the key path.
+/// Returns `None` for keys with no built-in default (e.g. `distros.*`).
+pub fn default_value_for_key(key: &str) -> Option<toml::Value> {
+    let defaults = toml::Value::try_from(Config::default()).ok()?;
+    let table = defaults.as_table()?;
+    let parts: Vec<&str> = key.split('.').collect();
+    get_nested(table, &parts).cloned()
+}
+
+/// Check whether a key is present in the on-disk config file.
+pub fn key_exists_in_file(path: Option<&Path>, key: &str) -> Result<bool> {
+    let path = resolve_path(path);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let contents = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let table: toml::Table = contents
+        .parse()
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let parts: Vec<&str> = key.split('.').collect();
+    Ok(get_nested(&table, &parts).is_some())
+}
+
 /// Remove a value at a dot-separated key path, cleaning up empty parent tables.
 fn remove_nested(table: &mut toml::Table, parts: &[&str]) {
     if parts.len() == 1 {
@@ -733,6 +769,78 @@ export_vm_prehook = ["dnf install -y udev-vm"]
             !contents.contains("distros"),
             "empty distros table should be cleaned up: {contents}"
         );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_nested() {
+        let toml: toml::Table = r#"
+boot_timeout = 60
+
+[distros.debian]
+import_prehook = ["echo hi"]
+"#
+        .parse()
+        .unwrap();
+
+        assert_eq!(
+            get_nested(&toml, &["boot_timeout"]),
+            Some(&toml::Value::Integer(60))
+        );
+        assert_eq!(
+            get_nested(&toml, &["distros", "debian", "import_prehook"]),
+            Some(&toml::Value::Array(vec![toml::Value::String(
+                "echo hi".into()
+            )]))
+        );
+        assert_eq!(get_nested(&toml, &["nonexistent"]), None);
+        assert_eq!(get_nested(&toml, &["distros", "fedora"]), None);
+        assert_eq!(get_nested(&toml, &[]), None);
+    }
+
+    #[test]
+    fn test_default_value_for_key() {
+        assert_eq!(
+            default_value_for_key("boot_timeout"),
+            Some(toml::Value::Integer(60))
+        );
+        assert_eq!(
+            default_value_for_key("interactive"),
+            Some(toml::Value::Boolean(true))
+        );
+        assert_eq!(
+            default_value_for_key("default_export_fs"),
+            Some(toml::Value::String("ext4".into()))
+        );
+        // Keys with no built-in default return None.
+        assert_eq!(default_value_for_key("distros.debian.import_prehook"), None);
+        assert_eq!(default_value_for_key("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_key_exists_in_file() {
+        let path = temp_config_path();
+        let _ = fs::remove_file(&path);
+
+        // Missing file → false.
+        assert!(!key_exists_in_file(Some(&path), "boot_timeout").unwrap());
+
+        // Key present in file.
+        fs::write(&path, "boot_timeout = 30\n").unwrap();
+        assert!(key_exists_in_file(Some(&path), "boot_timeout").unwrap());
+
+        // Key absent from file.
+        assert!(!key_exists_in_file(Some(&path), "interactive").unwrap());
+
+        // Nested key.
+        fs::write(
+            &path,
+            "[distros.debian]\nimport_prehook = [\"echo hi\"]\n",
+        )
+        .unwrap();
+        assert!(key_exists_in_file(Some(&path), "distros.debian.import_prehook").unwrap());
+        assert!(!key_exists_in_file(Some(&path), "distros.fedora.import_prehook").unwrap());
+
         let _ = fs::remove_file(&path);
     }
 }
