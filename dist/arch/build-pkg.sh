@@ -30,12 +30,11 @@ PKGVER="${VERSION}-${PKGREL}"
 PKGNAME="sdme"
 
 # Locate pre-built artifacts
-MANPAGE="$PROJECT_DIR/dist/sdme.1"
 COMPLETIONS_DIR="$PROJECT_DIR/dist/out/completions"
 APPARMOR_DIR="$PROJECT_DIR/dist/out/apparmor"
 INSTALL_FILE="$PROJECT_DIR/dist/arch/sdme.install"
 
-for f in "$BINARY" "$MANPAGE" "$COMPLETIONS_DIR/sdme.bash" "$COMPLETIONS_DIR/_sdme" \
+for f in "$BINARY" "$COMPLETIONS_DIR/sdme.bash" "$COMPLETIONS_DIR/_sdme" \
          "$COMPLETIONS_DIR/sdme.fish" "$APPARMOR_DIR/sdme-default" "$INSTALL_FILE"; do
     if [[ ! -f "$f" ]]; then
         echo "error: required file not found: $f" >&2
@@ -66,7 +65,6 @@ trap 'rm -rf "$STAGING"' EXIT
 
 # Stage package contents
 install -Dm755 "$BINARY" "$STAGING/usr/bin/sdme"
-install -Dm644 "$MANPAGE" "$STAGING/usr/share/man/man1/sdme.1"
 install -Dm644 "$COMPLETIONS_DIR/sdme.bash" "$STAGING/usr/share/bash-completion/completions/sdme"
 install -Dm644 "$COMPLETIONS_DIR/_sdme" "$STAGING/usr/share/zsh/site-functions/_sdme"
 install -Dm644 "$COMPLETIONS_DIR/sdme.fish" "$STAGING/usr/share/fish/vendor_completions.d/sdme.fish"

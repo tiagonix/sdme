@@ -47,7 +47,38 @@ COMMON COMMANDS:
     sdme rm <name>          Remove a container
     sdme logs <name>        View container logs
     sdme fs ls              List imported root filesystems
-    sdme config get         Show configuration";
+    sdme config get         Show configuration
+
+ENVIRONMENT:
+    SUDO_USER           When set, 'join' and 'exec' run as this user (see
+                        join_as_sudo_user config key)
+    https_proxy, ...    HTTP proxy for downloads (pass through sudo with -E)
+    no_proxy            Hosts that bypass the proxy
+
+FILES:
+    /etc/sdme.conf                          Configuration file (TOML)
+    /var/lib/sdme/fs/<name>/                Imported root filesystems
+    /var/lib/sdme/state/<name>              Container state files (KEY=VALUE)
+    /var/lib/sdme/containers/<name>/        Overlayfs upper/work/merged dirs
+    /var/lib/sdme/volumes/<name>/           OCI volume data (survives rm)
+    /var/lib/sdme/pods/<name>/state         Pod state files
+    /var/lib/sdme/secrets/<name>/data/      Kube secret data (mode 0600)
+    /var/lib/sdme/configmaps/<name>/data/   Kube configmap data
+    /etc/systemd/system/sdme@.service       Template unit (auto-managed)
+
+EXIT STATUS:
+    0       Success
+    130     Interrupted by Ctrl+C (SIGINT)
+    143     Interrupted by SIGTERM
+
+NOTES:
+    Container creation requires a permissive umask (default 022 is fine).
+    Restrictive umasks (e.g. 077) are rejected because non-root services
+    inside the container need to traverse the overlayfs upper layer.
+
+    Ctrl+C during 'new' or 'start' stops the container but preserves it
+    on disk for debugging. Batch operations (rm -a, start --all, stop)
+    abort immediately; remaining items are not processed.";
 
 const NEW_HELP: &str = "\
 Create a new container, start it, and open a shell. Accepts the same flags as
@@ -86,7 +117,20 @@ EXAMPLES:
     sdme new -r ubuntu -t 120
 
     # Specific shell or command
-    sdme new -r ubuntu -- /bin/bash";
+    sdme new -r ubuntu -- /bin/bash
+
+OCI AUTO-BEHAVIORS:
+    OCI images that declare ports get automatic --port rules when the
+    container has a private network. User --port flags take priority.
+    Use --no-oci-ports to suppress. On host-network containers, ports
+    are informational only.
+
+    OCI images that declare volumes get automatic bind mounts to
+    {datadir}/volumes/{container}/{vol}. User --bind flags take priority.
+    Use --no-oci-volumes to suppress. Volume data survives 'sdme rm'.
+
+    --oci-env sets env vars for the OCI app service (via EnvironmentFile).
+    -e/--env sets env vars for the container's systemd init (via --setenv).";
 
 const CREATE_HELP: &str = "\
 Create a new container without starting it. Use 'sdme start' to start it later.
@@ -113,7 +157,16 @@ EXAMPLES:
     sdme create mybox -r ubuntu --userns
 
     # Read-only rootfs with dropped capabilities
-    sdme create mybox -r ubuntu --read-only --drop-capability CAP_NET_RAW";
+    sdme create mybox -r ubuntu --read-only --drop-capability CAP_NET_RAW
+
+SERVICE MASKING:
+    At create time, services listed in default_create_masked_services are
+    masked (symlinked to /dev/null) in the overlayfs upper layer.
+    Default: systemd-resolved.service (prevents DNS conflict on host network).
+    --masked-services overrides this entirely. An empty value masks nothing.
+    With --network-zone and no explicit --masked-services, resolved is
+    auto-unmasked for inter-container LLMNR/mDNS name resolution.
+    NixOS rootfs skip masking (activation replaces /etc/systemd/system).";
 
 const STOP_HELP: &str = "\
 Three shutdown tiers, in order of escalation:
@@ -255,6 +308,9 @@ EXAMPLES:
 
     # Force re-fetch from registry (skip manifest cache)
     sdme fs import ubuntu docker.io/ubuntu:24.04 --no-cache -v
+
+    # Import through an HTTP proxy
+    sudo -E sdme fs import ubuntu docker.io/ubuntu:24.04 -v
 
     # Override distro import prehook via config
     sdme config set distros.debian.import_prehook '[\"apt-get update\",\"apt-get install -y systemd dbus\"]'";

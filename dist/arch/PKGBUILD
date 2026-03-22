@@ -31,7 +31,6 @@ package() {
     cd "$pkgname-$pkgver"
 
     install -Dm755 target/release/sdme "$pkgdir/usr/bin/sdme"
-    install -Dm644 dist/sdme.1 "$pkgdir/usr/share/man/man1/sdme.1"
 
     # Generate completions
     mkdir -p "$pkgdir/usr/share/bash-completion/completions"

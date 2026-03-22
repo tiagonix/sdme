@@ -7,10 +7,7 @@ all:
 install:
 	install -Dm755 target/release/sdme $(DESTDIR)/bin/sdme
 
-install-extras: install-man install-completions
-
-install-man:
-	install -Dm644 dist/sdme.1 $(DESTDIR)/share/man/man1/sdme.1
+install-extras: install-completions
 
 install-completions:
 	install -dm755 $(DESTDIR)/share/bash-completion/completions
@@ -20,11 +17,8 @@ install-completions:
 	install -dm755 $(DESTDIR)/share/fish/vendor_completions.d
 	target/release/sdme config completions fish > $(DESTDIR)/share/fish/vendor_completions.d/sdme.fish
 
-uninstall: uninstall-man uninstall-completions
+uninstall: uninstall-completions
 	rm -f $(DESTDIR)/bin/sdme
-
-uninstall-man:
-	rm -f $(DESTDIR)/share/man/man1/sdme.1
 
 uninstall-completions:
 	rm -f $(DESTDIR)/share/bash-completion/completions/sdme
@@ -63,4 +57,4 @@ e2e-smoke:
 e2e-preflight:
 	sudo test/scripts/preflight.sh
 
-.PHONY: all install install-extras install-man install-completions uninstall uninstall-man uninstall-completions deb rpm pkg clean e2e e2e-quick e2e-smoke e2e-preflight
+.PHONY: all install install-extras install-completions uninstall uninstall-completions deb rpm pkg clean e2e e2e-quick e2e-smoke e2e-preflight
