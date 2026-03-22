@@ -360,6 +360,26 @@ OCI REGISTRY IMAGES:
     The default_base_fs config key provides a default --base-fs value for OCI
     app imports when the flag is not specified on the command line.
 
+PACKAGE INSTALLATION (--install-packages):
+    When a rootfs lacks systemd or dbus, --install-packages runs distro-specific
+    commands via chroot to make it bootable under systemd-nspawn. The default
+    packages are systemd, dbus, and login/pam utilities; the exact commands
+    vary per distro family. To view the effective commands:
+
+      sdme config get
+
+    To override the default commands for a distro family:
+
+      sdme config set distros.debian.import_prehook '[\"cmd1\",\"cmd2\"]'
+
+    To reset back to the defaults, set to an empty string:
+
+      sdme config set distros.debian.import_prehook ''
+
+    NixOS rootfs are supported but expected to already include systemd and
+    dbus. For unrecognized distros, the rootfs must already be bootable,
+    otherwise it cannot be imported.
+
 TESTED DISTROS:
     docker.io/ubuntu:24.04
     docker.io/debian:bookworm
@@ -466,8 +486,26 @@ VM EXPORT:
       qemu-system-x86_64 -drive file=disk.raw,format=raw -nographic
 
     Optional flags: --dns (copy host resolv.conf or specify IPs), --swap 512M,
-    --hostname myvm, --install-packages yes (installs udev), --timezone UTC,
+    --hostname myvm, --install-packages yes, --timezone UTC,
     --net-ifaces 2 (number of DHCP interfaces).
+
+PACKAGE INSTALLATION (--install-packages, --vm only):
+    When building a VM image, --install-packages runs distro-specific commands
+    via chroot to install packages needed for VM boot (e.g. udev). The exact
+    commands vary per distro family. To view the effective commands:
+
+      sdme config get
+
+    To override the default commands for a distro family:
+
+      sdme config set distros.debian.export_vm_prehook '[\"cmd1\",\"cmd2\"]'
+
+    To reset back to the defaults, set to an empty string:
+
+      sdme config set distros.debian.export_vm_prehook ''
+
+    Non-VM exports use export_prehook instead (e.g. to restore file
+    capabilities stripped during import).
 
 CONFIG KEYS:
     default_export_fs           Filesystem type for raw images (default: ext4)
