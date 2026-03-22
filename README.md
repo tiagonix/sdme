@@ -29,12 +29,8 @@ sdme containers are full systems, not single processes.
 
 ## Install
 
-Download the latest release:
-
 ```bash
-curl -L https://github.com/fiorix/sdme/releases/latest/download/sdme-x86_64-linux -o sdme
-chmod +x sdme
-sudo mv sdme /usr/local/bin/
+curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh
 ```
 
 Install the container runtime for your distro:
