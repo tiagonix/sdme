@@ -36,7 +36,7 @@ PostgreSQL requires a password to be set via the `POSTGRES_PASSWORD`
 environment variable. Use `--oci-env` to pass it:
 
 ```sh
-sudo sdme create mydb -r postgres --oci-env POSTGRES_PASSWORD=secret
+sudo sdme create mydb -r postgres --network-zone=services --hardened --oci-env POSTGRES_PASSWORD=secret
 sudo sdme start mydb
 ```
 
@@ -60,9 +60,6 @@ sudo sdme logs mydb --oci
 PostgreSQL should be running and ready to accept connections.
 
 ## Connect to the database
-
-Since the container shares the host network, PostgreSQL is
-accessible on localhost:5432. From the host:
 
 ```sh
 sudo sdme exec mydb --oci -- psql -U postgres -c 'SELECT version();'
@@ -99,7 +96,7 @@ sudo ls -la /var/lib/sdme/volumes/mydb/
 Create a new container from the same rootfs:
 
 ```sh
-sudo sdme create mydb -r postgres --oci-env POSTGRES_PASSWORD=secret
+sudo sdme create mydb -r postgres --network-zone=services --hardened --oci-env POSTGRES_PASSWORD=secret
 sudo sdme start mydb
 ```
 
