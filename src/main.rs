@@ -26,7 +26,7 @@ Each container gets its own upper layer; the base rootfs stays untouched.
 By default, the host root filesystem is used as the base layer. Other distros
 can be imported and used instead.
 
-Requires root. Runs on Linux with systemd >= 252.
+Requires root. Runs on Linux with systemd >= 255.
 
 GETTING STARTED:
     # Clone the host as a throwaway container
@@ -2409,7 +2409,7 @@ fn run() -> Result<()> {
             enable,
             masked_services,
         } => {
-            system_check::check_systemd_version(252)?;
+            system_check::check_systemd_version(255)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let (mut sec, hardened) = parse_security(security, &cfg)?;
             let mut network = parse_network(network)?;
@@ -2517,7 +2517,7 @@ fn run() -> Result<()> {
             all,
             timeout,
         } => {
-            system_check::check_systemd_version(252)?;
+            system_check::check_systemd_version(255)?;
             let targets: Vec<String> = if all {
                 containers::list(&cfg.datadir)?
                     .into_iter()
@@ -2587,7 +2587,7 @@ fn run() -> Result<()> {
                     bail!("aborted");
                 }
 
-                system_check::check_systemd_version(252)?;
+                system_check::check_systemd_version(255)?;
                 eprintln!("starting '{name}'");
                 let boot_timeout =
                     std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
@@ -2686,7 +2686,7 @@ fn run() -> Result<()> {
             masked_services,
             command,
         } => {
-            system_check::check_systemd_version(252)?;
+            system_check::check_systemd_version(255)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let (mut sec, hardened) = parse_security(security, &cfg)?;
             let mut network = parse_network(network)?;
@@ -3044,7 +3044,7 @@ fn run() -> Result<()> {
                 masked_services,
                 no_cache,
             } => {
-                system_check::check_systemd_version(252)?;
+                system_check::check_systemd_version(255)?;
                 let (mut sec, hardened) = parse_security(security_args, &cfg)?;
                 validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
                 validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref())?;
@@ -3132,7 +3132,7 @@ fn run() -> Result<()> {
                 masked_services,
                 no_cache,
             } => {
-                system_check::check_systemd_version(252)?;
+                system_check::check_systemd_version(255)?;
                 let (mut sec, hardened) = parse_security(security_args, &cfg)?;
                 validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
                 validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref())?;
@@ -3295,7 +3295,7 @@ fn run() -> Result<()> {
                 base_fs,
                 no_cache,
             } => {
-                system_check::check_systemd_version(252)?;
+                system_check::check_systemd_version(255)?;
                 // Fall back to config default_base_fs when --base-fs is not given.
                 let effective_base_fs = base_fs.or_else(|| {
                     if cfg.default_base_fs.is_empty() {
@@ -3420,7 +3420,7 @@ fn run() -> Result<()> {
                 force,
                 no_cache,
             } => {
-                system_check::check_systemd_version(252)?;
+                system_check::check_systemd_version(255)?;
                 let boot_timeout = timeout.unwrap_or(cfg.boot_timeout);
                 sdme::build::build(
                     &cfg.datadir,

@@ -25,7 +25,7 @@
       type: 'binary',
       title: 'Static Binaries',
       distros: 'Any Linux distro',
-      deps: 'Requires <strong>systemd &ge; 252</strong> and <strong>systemd-container</strong> at runtime',
+      deps: 'Requires <strong>systemd &ge; 255</strong> and <strong>systemd-container</strong> at runtime',
       cmdTemplate: function(url, filename) {
         return 'curl -fSL -o /usr/local/bin/sdme ' + url + ' && chmod +x /usr/local/bin/sdme';
       }
@@ -34,7 +34,7 @@
       type: 'deb',
       title: '.deb Packages',
       distros: 'Debian, Ubuntu, and derivatives',
-      deps: 'Dependencies auto-resolved: <strong>systemd (&ge; 252)</strong>, <strong>systemd-container</strong>. Suggests: qemu-utils, apparmor',
+      deps: 'Dependencies auto-resolved: <strong>systemd (&ge; 255)</strong>, <strong>systemd-container</strong>. Suggests: qemu-utils, apparmor',
       cmdTemplate: function(url, filename) {
         return 'curl -fSLO ' + url + ' && sudo apt install ./' + filename;
       }
@@ -43,7 +43,7 @@
       type: 'rpm',
       title: '.rpm Packages',
       distros: 'Fedora, CentOS Stream, AlmaLinux, openSUSE, RHEL, and derivatives',
-      deps: 'Dependencies auto-resolved: <strong>systemd &ge; 252</strong>, <strong>systemd-container</strong>',
+      deps: 'Dependencies auto-resolved: <strong>systemd &ge; 255</strong>, <strong>systemd-container</strong>',
       cmdTemplate: function(url, filename) {
         return 'curl -fSLO ' + url + ' && sudo dnf install ./' + filename;
       }
@@ -52,7 +52,7 @@
       type: 'pkg',
       title: '.pkg.tar.zst Packages',
       distros: 'Arch Linux, CachyOS, and derivatives',
-      deps: 'Requires <strong>systemd &ge; 252</strong> (includes systemd-nspawn on Arch)',
+      deps: 'Requires <strong>systemd &ge; 255</strong> (includes systemd-nspawn on Arch)',
       cmdTemplate: function(url, filename) {
         return 'curl -fSLO ' + url + ' && sudo pacman -U ' + filename;
       }

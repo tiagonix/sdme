@@ -63,14 +63,14 @@ else
     req_fail "sdme not found in PATH or target/release/"
 fi
 
-# systemd version >= 252
+# systemd version >= 255
 if has_binary systemctl; then
     sd_ver_str=$(systemctl --version 2>/dev/null | head -1 || true)
     sd_ver=$(echo "$sd_ver_str" | grep -oP '\d+' | head -1 || true)
-    if [[ -n "$sd_ver" && "$sd_ver" -ge 252 ]]; then
-        req_ok "systemd >= 252 ($sd_ver_str)"
+    if [[ -n "$sd_ver" && "$sd_ver" -ge 255 ]]; then
+        req_ok "systemd >= 255 ($sd_ver_str)"
     else
-        req_fail "systemd >= 252 required (found: ${sd_ver_str:-unknown})"
+        req_fail "systemd >= 255 required (found: ${sd_ver_str:-unknown})"
     fi
 else
     req_fail "systemctl not found"

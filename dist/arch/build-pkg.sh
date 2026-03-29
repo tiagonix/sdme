@@ -84,7 +84,7 @@ packager = CI
 size = ${INSTALLED_SIZE}
 arch = ${ARCH}
 license = MIT
-depend = systemd>=252
+depend = systemd>=255
 optdepend = qemu-base: QCOW2 disk image import support
 optdepend = apparmor: security profile support
 backup = etc/apparmor.d/sdme-default

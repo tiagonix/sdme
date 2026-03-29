@@ -7,7 +7,7 @@
 //! gets `upper/work/merged` directories under the data directory and a
 //! KEY=VALUE state file that tracks its metadata.
 //!
-//! Requires Linux with systemd (>= 252) and root privileges.
+//! Requires Linux with systemd (>= 255) and root privileges.
 //!
 //! # Modules
 //!

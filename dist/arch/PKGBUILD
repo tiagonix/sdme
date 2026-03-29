@@ -6,7 +6,7 @@ pkgdesc='The systemd machine editor'
 arch=('x86_64' 'aarch64')
 url='https://github.com/fiorix/sdme'
 license=('MIT')
-depends=('systemd>=252')
+depends=('systemd>=255')
 optdepends=(
     'qemu-base: QCOW2 disk image import support'
     'apparmor: security profile support'

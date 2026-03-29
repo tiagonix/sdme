@@ -51,7 +51,7 @@ tokio = { version = "1", features = ["rt", "net", "time"], optional = true }
 
 [package.metadata.deb]
 maintainer = "Alexandre Fiori"
-depends = "systemd (>= 252), systemd-container"
+depends = "systemd (>= 255), systemd-container"
 suggests = "qemu-utils, apparmor"
 section = "admin"
 priority = "optional"
@@ -75,5 +75,5 @@ assets = [
 post_install_script = "if command -v apparmor_parser >/dev/null 2>&1; then apparmor_parser -r /etc/apparmor.d/sdme-default 2>/dev/null || true; fi"
 
 [package.metadata.generate-rpm.requires]
-systemd = ">= 252"
+systemd = ">= 255"
 systemd-container = "*"

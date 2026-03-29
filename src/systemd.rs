@@ -1093,8 +1093,9 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     }
     nspawn_args.extend(net_args);
 
+    let userns = state.is_yes("USERNS");
     let binds = BindConfig::from_state(&state);
-    nspawn_args.extend(binds.to_nspawn_args());
+    nspawn_args.extend(binds.to_nspawn_args(userns));
 
     let envs = EnvConfig::from_state(&state);
     nspawn_args.extend(envs.to_nspawn_args());

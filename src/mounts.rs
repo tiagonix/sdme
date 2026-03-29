@@ -42,8 +42,11 @@ impl BindConfig {
     ///
     /// Returns individual arguments suitable for direct inclusion in a
     /// systemd unit file's `ExecStart` line. Each element is one nspawn flag.
-    pub fn to_nspawn_args(&self) -> Vec<String> {
+    /// When `userns` is true, appends `:idmap` so that UID/GID mappings are
+    /// applied to the bind mount (requires systemd >= 255 and kernel >= 5.12).
+    pub fn to_nspawn_args(&self, userns: bool) -> Vec<String> {
         let mut args = Vec::new();
+        let opts = if userns { ":idmap" } else { "" };
 
         for bind in &self.binds {
             // Parse "host:container:mode".
@@ -58,9 +61,9 @@ impl BindConfig {
             let mode = parts[2];
 
             if mode == "ro" {
-                args.push(format!("--bind-ro={host}:{container}"));
+                args.push(format!("--bind-ro={host}:{container}{opts}"));
             } else {
-                args.push(format!("--bind={host}:{container}"));
+                args.push(format!("--bind={host}:{container}{opts}"));
             }
         }
 
@@ -314,7 +317,7 @@ mod tests {
                 "/data:/mnt:ro".to_string(),
             ],
         };
-        let args = binds.to_nspawn_args();
+        let args = binds.to_nspawn_args(false);
         assert_eq!(
             args,
             vec!["--bind=/host:/container", "--bind-ro=/data:/mnt"]
@@ -322,9 +325,27 @@ mod tests {
     }
 
     #[test]
+    fn test_bind_to_nspawn_args_userns_idmap() {
+        let binds = BindConfig {
+            binds: vec![
+                "/host:/container:rw".to_string(),
+                "/data:/mnt:ro".to_string(),
+            ],
+        };
+        let args = binds.to_nspawn_args(true);
+        assert_eq!(
+            args,
+            vec![
+                "--bind=/host:/container:idmap",
+                "--bind-ro=/data:/mnt:idmap"
+            ]
+        );
+    }
+
+    #[test]
     fn test_bind_to_nspawn_args_empty() {
         let binds = BindConfig::default();
-        assert!(binds.to_nspawn_args().is_empty());
+        assert!(binds.to_nspawn_args(false).is_empty());
     }
 
     #[test]

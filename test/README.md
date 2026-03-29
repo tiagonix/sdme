@@ -2,7 +2,7 @@
 
 End-to-end tests for sdme. Runs real containers via systemd-nspawn,
 imports rootfs from OCI registries, and validates the full lifecycle.
-Requires root and a working systemd >= 252.
+Requires root and a working systemd >= 255.
 
 ## Quick start
 
@@ -81,7 +81,7 @@ Runner options: `--jobs N`, `--timeout-scale N`, `--stagger N`,
 ## Prerequisites
 
 - Root access
-- systemd >= 252 with systemd-nspawn, machinectl, journalctl, busctl
+- systemd >= 255 with systemd-nspawn, machinectl, journalctl, busctl
 - nsenter (util-linux)
 - systemd-networkd running on host (for --network-veth tests)
 - AppArmor with sdme-default profile loaded (for --strict tests)

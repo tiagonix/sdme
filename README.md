@@ -41,7 +41,7 @@ sudo dnf install systemd-container   # Fedora / CentOS
 sudo pacman -S systemd               # Arch (included in base)
 ```
 
-Requires Linux with systemd 252+. Runs as root.
+Requires Linux with systemd 255+. Runs as root.
 
 On macOS? See the [macOS tutorial](https://fiorix.github.io/sdme/tutorial/macos/)
 for setting up a Linux VM with lima-vm, then install sdme inside it.
