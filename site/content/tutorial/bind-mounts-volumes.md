@@ -7,7 +7,7 @@ weight = 7
 Bind mounts let you share directories between the host and a container.
 This is useful for serving content you're actively editing, sharing
 configuration files, or persisting data outside the container. See
-also the [architecture documentation](https://github.com/fiorix/sdme/blob/main/docs/architecture.md#11-bind-mounts-and-environment-variables).
+also the [architecture documentation](@/docs/architecture.md#11-bind-mounts-and-environment-variables).
 
 ## Bind mounts with a regular service
 

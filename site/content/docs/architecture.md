@@ -1,4 +1,10 @@
-# sdme: Architecture and Design
++++
+title = "Architecture and Design"
+description = "How sdme works: overlayfs, systemd integration, OCI support, and Kubernetes pods."
+weight = 1
+template = "doc.html"
++++
+
 
 ## 1. Introduction
 
@@ -360,12 +366,14 @@ mode and device numbers. This matters for rootfs that include
 **Compression auto-detection** uses magic bytes rather than file
 extensions. The first few bytes of a file reveal its compression format:
 
-| Magic bytes          | Format |
-|----------------------|--------|
-| `1f 8b`              | gzip   |
-| `BZh`                | bzip2  |
-| `fd 37 7a 58 5a 00`  | xz     |
-| `28 b5 2f fd`        | zstd   |
+```
+Magic bytes           Format
+--------------------  ------
+1f 8b                 gzip
+BZh                   bzip2
+fd 37 7a 58 5a 00     xz
+28 b5 2f fd           zstd
+```
 
 This means `sdme fs import ubuntu rootfs.tar.zst` works even if the
 file is named `rootfs.tar`, because the content, not the name,
@@ -481,15 +489,17 @@ The output format is determined by file extension, following the same
 convention as import's compression detection but using extensions
 instead of magic bytes (since we are creating, not reading):
 
-| Extension              | Format           |
-|------------------------|------------------|
-| `.tar`                 | uncompressed tar |
-| `.tar.gz`, `.tgz`      | gzip tar         |
-| `.tar.bz2`, `.tbz2`    | bzip2 tar        |
-| `.tar.xz`, `.txz`      | xz tar           |
-| `.tar.zst`, `.tzst`    | zstandard tar    |
-| `.img`, `.raw`         | raw disk image   |
-| anything else          | directory copy   |
+```
+Extension               Format
+----------------------  ----------------
+.tar                    uncompressed tar
+.tar.gz, .tgz           gzip tar
+.tar.bz2, .tbz2         bzip2 tar
+.tar.xz, .txz           xz tar
+.tar.zst, .tzst         zstandard tar
+.img, .raw              raw disk image
+anything else           directory copy
+```
 
 The `--fmt` flag overrides detection. Format names match the extension
 without the dot: `dir`, `tar`, `tar.gz`, `tar.bz2`, `tar.xz`,
@@ -767,11 +777,13 @@ pipe-separated) and reconstituted into nspawn arguments on every start.
 
 sdme exposes three cgroup-based resource controls:
 
-| Flag                     | systemd property | Example            |
-|--------------------------|------------------|--------------------|
-| `--memory <size>`        | `MemoryMax=`     | `--memory 2G`      |
-| `--cpus <count>`         | `CPUQuota=`      | `--cpus 0.5` (50%) |
-| `--cpu-weight <1-10000>` | `CPUWeight=`     | `--cpu-weight 100` |
+```
+Flag                      systemd property  Example
+------------------------  ----------------  -------------------
+--memory <size>           MemoryMax=        --memory 2G
+--cpus <count>            CPUQuota=         --cpus 0.5 (50%)
+--cpu-weight <1-10000>    CPUWeight=        --cpu-weight 100
+```
 
 These flags are available on `sdme create`, `sdme new`, and `sdme set`.
 They are applied via a systemd drop-in file (`limits.conf`) installed
@@ -790,33 +802,38 @@ contended.
 
 ## 13. Configuration
 
-sdme stores its settings in a TOML file at `/etc/sdme.conf`:
+sdme stores its settings in a TOML file at `/etc/sdme.conf`, managed
+via `sdme config get` (show all settings) and `sdme config set KEY VALUE`
+(change a setting):
 
-| Setting                          | Default                          |
-|----------------------------------|----------------------------------|
-| `interactive`                    | `true`                           |
-| `datadir`                        | `/var/lib/sdme`                  |
-| `boot_timeout`                   | `60`                             |
-| `join_as_sudo_user`              | `true`                           |
-| `host_rootfs_opaque_dirs`        | `/etc/systemd/system,/var/log`   |
-| `hardened_drop_caps`             | `CAP_SYS_PTRACE,CAP_NET_RAW,...` |
-| `default_base_fs`                | (empty)                          |
-| `default_export_fs`              | `ext4`                           |
-| `tasks_max`                      | `16384`                          |
-| `docker_user`                    | (empty)                          |
-| `docker_token`                   | (empty)                          |
-| `oci_cache_dir`                  | (empty = `{datadir}/cache/oci`)  |
-| `oci_cache_max_size`             | `10G`                            |
-| `oci_manifest_cache_ttl`         | `900`                            |
-| `http_timeout`                   | `30`                             |
-| `http_body_timeout`              | `300`                            |
-| `max_download_size`              | `50G`                            |
-| `default_create_masked_services` | `systemd-resolved.service`       |
-| `stop_timeout_graceful`          | `90`                             |
-| `stop_timeout_terminate`         | `30`                             |
-| `stop_timeout_kill`              | `15`                             |
-| `auto_fs_gc`                     | `true`                           |
-| `default_export_free_space`      | `256M`                           |
+```
+Setting                           Default
+--------------------------------  --------------------------------
+interactive                       true
+datadir                           /var/lib/sdme
+boot_timeout                      60
+join_as_sudo_user                 true
+host_rootfs_opaque_dirs           /etc/systemd/system,/var/log
+hardened_drop_caps                CAP_SYS_PTRACE,CAP_NET_RAW,...
+default_base_fs                   (empty)
+default_output_format             (empty)
+default_export_fs                 ext4
+tasks_max                         16384
+docker_user                       (empty)
+docker_token                      (empty)
+oci_cache_dir                     (empty = {datadir}/cache/oci)
+oci_cache_max_size                10G
+oci_manifest_cache_ttl            900
+http_timeout                      30
+http_body_timeout                 300
+max_download_size                 50G
+default_create_masked_services    systemd-resolved.service
+stop_timeout_graceful             90
+stop_timeout_terminate            30
+stop_timeout_kill                 15
+auto_fs_gc                        true
+default_export_free_space         256M
+```
 
 - `interactive`: enable interactive prompts.
 - `datadir`: root directory for all container and rootfs data.
@@ -827,6 +844,8 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
   containers (empty string disables).
 - `hardened_drop_caps`: capabilities dropped by `--hardened`.
 - `default_base_fs`: default base rootfs for OCI app images.
+- `default_output_format`: default output format for `ps` and
+  `fs ls` (empty = table, `json`, `json-pretty`).
 - `default_export_fs`: filesystem type for raw disk image export
   (`ext4` or `btrfs`).
 - `tasks_max`: maximum tasks (processes/threads) per container
@@ -872,7 +891,7 @@ Config files are written with mode `0600`.
 This section documents sdme's security implementation: capabilities,
 seccomp, AppArmor, the `--hardened` and `--strict` flags, and input
 sanitization. For comparisons with Docker and Podman, see
-[docs/security.md](security.md).
+[Security documentation](@/docs/security.md).
 
 ### Capability bounding set
 
@@ -1301,10 +1320,12 @@ destination directory.
 When importing an OCI image, sdme classifies it as either a **base OS
 image** or an **application image** based on the image config:
 
-| Classification    | Criteria                                |
-|-------------------|-----------------------------------------|
-| Base OS image     | No entrypoint, shell default, no ports  |
-| Application image | Has entrypoint, non-shell cmd, or ports |
+```
+Classification     Criteria
+-----------------  ----------------------------------------
+Base OS image      No entrypoint, shell default, no ports
+Application image  Has entrypoint, non-shell cmd, or ports
+```
 
 - **Base OS image**: extracted as a first-class sdme rootfs.
 - **Application image**: placed under `/oci/apps/{name}/root`
@@ -1325,11 +1346,13 @@ sudo sdme config set default_base_fs ubuntu
 
 The `--oci-mode` flag overrides auto-detection:
 
-| Flag              | Behavior                                     |
-|-------------------|----------------------------------------------|
-| `--oci-mode=auto` | Auto-detect from image config (default)      |
-| `--oci-mode=base` | Force base OS mode                           |
-| `--oci-mode=app`  | Force application mode (requires `--base-fs`)|
+```
+Flag               Behavior
+-----------------  ---------------------------------------------
+--oci-mode=auto    Auto-detect from image config (default)
+--oci-mode=base    Force base OS mode
+--oci-mode=app     Force application mode (requires --base-fs)
+```
 
 **Base OS import** (debian, ubuntu, fedora) is straightforward: extract
 the rootfs and install systemd if missing. The result is a first-class
@@ -1468,13 +1491,15 @@ applies.
 **User resolution.** The OCI `User` field is resolved at import time
 against `etc/passwd` and `etc/group` inside the OCI rootfs:
 
-| Format            | Behavior                                            |
-|-------------------|-----------------------------------------------------|
-| `""`, `"root"`    | Root; uid=0 gid=0 (namespace isolation only)        |
-| `"name"`          | Resolved via `etc/passwd` in OCI rootfs             |
-| `"uid"`           | Used directly; primary GID from passwd if found     |
-| `"name:group"`    | User from `etc/passwd`, group from `etc/group`      |
-| `"uid:gid"`       | Both used directly                                  |
+```
+Format             Behavior
+-----------------  ---------------------------------------------------
+"", "root"         Root; uid=0 gid=0 (namespace isolation only)
+"name"             Resolved via etc/passwd in OCI rootfs
+"uid"              Used directly; primary GID from passwd if found
+"name:group"       User from etc/passwd, group from etc/group
+"uid:gid"          Both used directly
+```
 
 **Security model.** The privilege-dropping sequence is designed to be
 irreversible:
@@ -1542,17 +1567,19 @@ real `openat` syscall.
 
 Intercepted paths:
 
-| Path               | Result   |
-|--------------------|----------|
-| `/dev/stdin`       | `dup(0)` |
-| `/dev/stdout`      | `dup(1)` |
-| `/dev/stderr`      | `dup(2)` |
-| `/dev/fd/0`        | `dup(0)` |
-| `/dev/fd/1`        | `dup(1)` |
-| `/dev/fd/2`        | `dup(2)` |
-| `/proc/self/fd/0`  | `dup(0)` |
-| `/proc/self/fd/1`  | `dup(1)` |
-| `/proc/self/fd/2`  | `dup(2)` |
+```
+Path                Result
+------------------  --------
+/dev/stdin          dup(0)
+/dev/stdout         dup(1)
+/dev/stderr         dup(2)
+/dev/fd/0           dup(0)
+/dev/fd/1           dup(1)
+/dev/fd/2           dup(2)
+/proc/self/fd/0     dup(0)
+/proc/self/fd/1     dup(1)
+/proc/self/fd/2     dup(2)
+```
 
 **Why dup() instead of returning the raw fd.** Returning the raw fd
 number (0, 1, or 2) would work for simple cases, but callers expect
@@ -1638,10 +1665,12 @@ isolation, but privilege dropping is skipped.
 
 Both binaries are generated at import time for the host architecture:
 
-| Binary       | x86_64            | aarch64          | Size    |
-|--------------|-------------------|------------------|---------|
-| `isolate`    | `syscall`, rax=nr | `svc #0`, x8=nr  | < 2 KiB |
-| `devfd_shim` | `syscall`, rax=nr | `svc #0`, x8=nr  | ~ 4 KiB |
+```
+Binary        x86_64             aarch64           Size
+------------  -----------------  ----------------  -------
+isolate       syscall, rax=nr    svc #0, x8=nr     < 2 KiB
+devfd_shim    syscall, rax=nr    svc #0, x8=nr     ~ 4 KiB
+```
 
 Both are generated entirely in Rust with no assembler, no external tools,
 and no libc. Each architecture module contains its own `Asm` struct with
@@ -1670,16 +1699,18 @@ fixed 4-byte instructions.
 
 **Module layout:**
 
-| File                        | Purpose                              |
-|-----------------------------|--------------------------------------|
-| `src/elf.rs`                | Shared `Arch` enum + ELF builder     |
-| `src/isolate/mod.rs`        | Public API: `generate(Arch)`         |
-| `src/isolate/x86_64.rs`     | x86_64 emitter (PID/IPC ns + privs)  |
-| `src/isolate/aarch64.rs`    | AArch64 emitter (PID/IPC ns + privs) |
-| `src/devfd_shim/mod.rs`     | Public API: `generate(Arch)`         |
-| `src/devfd_shim/elf.rs`     | ET_DYN ELF builder (SysV hash)       |
-| `src/devfd_shim/x86_64.rs`  | x86_64 emitter                       |
-| `src/devfd_shim/aarch64.rs` | AArch64 emitter                      |
+```
+File                         Purpose
+---------------------------  --------------------------------------
+src/elf.rs                   Shared Arch enum + ELF builder
+src/isolate/mod.rs           Public API: generate(Arch)
+src/isolate/x86_64.rs       x86_64 emitter (PID/IPC ns + privs)
+src/isolate/aarch64.rs       AArch64 emitter (PID/IPC ns + privs)
+src/devfd_shim/mod.rs        Public API: generate(Arch)
+src/devfd_shim/elf.rs        ET_DYN ELF builder (SysV hash)
+src/devfd_shim/x86_64.rs     x86_64 emitter
+src/devfd_shim/aarch64.rs    AArch64 emitter
+```
 
 Both architecture modules use the same pattern: an `Asm` struct that emits
 machine code bytes, a label system for forward references, and a fixup pass
@@ -1807,34 +1838,36 @@ usage examples and CLI reference, see `sdme kube --help`.
 
 ### Supported Pod spec fields
 
-| Field                              | Description                        |
-|------------------------------------|------------------------------------|
-| `containers[].image`               | OCI image reference                |
-| `containers[].name`                | Container name (service name)      |
-| `containers[].command`             | Override ENTRYPOINT                |
-| `containers[].args`                | Override CMD                       |
-| `containers[].env`                 | Per-container env vars             |
-| `containers[].env[].valueFrom`     | secretKeyRef or configMapKeyRef    |
-| `containers[].envFrom`             | Bulk-import from configMap/secret  |
-| `containers[].ports`               | Port forwarding (private network)  |
-| `containers[].volumeMounts`        | Bind volumes into app rootfs       |
-| `containers[].workingDir`          | Override working directory         |
-| `containers[].imagePullPolicy`     | Always, IfNotPresent, or Never     |
-| `containers[].resources`           | Memory/CPU limits and weights      |
-| `containers[].startupProbe`        | exec, httpGet, tcpSocket, grpc     |
-| `containers[].livenessProbe`       | exec, httpGet, tcpSocket, grpc     |
-| `containers[].readinessProbe`      | exec, httpGet, tcpSocket, grpc     |
-| `initContainers[]`                 | Run-to-completion before app start |
-| `volumes` (emptyDir)               | Shared directory between apps      |
-| `volumes` (hostPath)               | Mount host directory into the pod  |
-| `volumes` (secret)                 | From sdme kube secret              |
-| `volumes` (configMap)              | From sdme kube configmap           |
-| `volumes` (persistentVolumeClaim)  | Host dir at {datadir}/volumes/     |
-| `restartPolicy`                    | Maps to systemd Restart=           |
-| `terminationGracePeriodSeconds`    | Shutdown timeout                   |
-| `securityContext.runAsUser`        | Pod-level UID for all containers   |
-| `securityContext.runAsGroup`       | Pod-level GID for all containers   |
-| `securityContext.runAsNonRoot`     | Validates runAsUser is non-zero    |
+```
+Field                               Description
+----------------------------------  ------------------------------------
+containers[].image                  OCI image reference
+containers[].name                   Container name (service name)
+containers[].command                Override ENTRYPOINT
+containers[].args                   Override CMD
+containers[].env                    Per-container env vars
+containers[].env[].valueFrom        secretKeyRef or configMapKeyRef
+containers[].envFrom                Bulk-import from configMap/secret
+containers[].ports                  Port forwarding (private network)
+containers[].volumeMounts           Bind volumes into app rootfs
+containers[].workingDir             Override working directory
+containers[].imagePullPolicy        Always, IfNotPresent, or Never
+containers[].resources              Memory/CPU limits and weights
+containers[].startupProbe           exec, httpGet, tcpSocket, grpc
+containers[].livenessProbe          exec, httpGet, tcpSocket, grpc
+containers[].readinessProbe         exec, httpGet, tcpSocket, grpc
+initContainers[]                    Run-to-completion before app start
+volumes (emptyDir)                  Shared directory between apps
+volumes (hostPath)                  Mount host directory into the pod
+volumes (secret)                    From sdme kube secret
+volumes (configMap)                 From sdme kube configmap
+volumes (persistentVolumeClaim)     Host dir at {datadir}/volumes/
+restartPolicy                       Maps to systemd Restart=
+terminationGracePeriodSeconds       Shutdown timeout
+securityContext.runAsUser           Pod-level UID for all containers
+securityContext.runAsGroup          Pod-level GID for all containers
+securityContext.runAsNonRoot        Validates runAsUser is non-zero
+```
 
 Secret and configMap volumes support `items` for projected key
 paths and `defaultMode` for file permissions.

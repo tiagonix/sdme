@@ -43,8 +43,8 @@ sudo pacman -S systemd               # Arch (included in base)
 
 Requires Linux with systemd 252+. Runs as root.
 
-On macOS? See [docs/macos.md](docs/macos.md) for setting up a Linux VM
-with lima-vm, then install sdme inside it.
+On macOS? See the [macOS tutorial](https://fiorix.github.io/sdme/tutorial/macos/)
+for setting up a Linux VM with lima-vm, then install sdme inside it.
 
 ## Quick start
 
@@ -107,7 +107,7 @@ pods from standard Kubernetes manifests.
 
 Every command is documented via `sdme <command> --help`.
 
-- [docs/architecture.md](docs/architecture.md): internals, design, OCI
-  bridging, Kubernetes mapping
-- [docs/security.md](docs/security.md): container isolation model,
-  comparison with other container runtimes
+- [Architecture](https://fiorix.github.io/sdme/docs/architecture/): internals,
+  design, OCI bridging, Kubernetes mapping
+- [Security](https://fiorix.github.io/sdme/docs/security/): container
+  isolation model, comparison with other container runtimes

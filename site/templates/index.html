@@ -36,6 +36,19 @@
 
   <hr>
 
+  {% set docs = get_section(path="docs/_index.md") %}
+  <section>
+    <h2>Documentation</h2>
+    {% for page in docs.pages %}
+    <div class="card">
+      <h3><a href="{{ page.permalink }}">{{ page.title }}</a></h3>
+      <p>{{ page.description }}</p>
+    </div>
+    {% endfor %}
+  </section>
+
+  <hr>
+
   {% set tutorials = get_section(path="tutorial/_index.md") %}
   <section>
     <h2>Tutorials</h2>

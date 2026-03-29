@@ -30,9 +30,9 @@ internally) is placed under `/oci/apps/{name}/root` and runs as a
 chrooted systemd service inside that container. The application is
 isolated with its own PID and IPC namespaces, just as it would expect
 in a traditional container runtime. For more details, see the
-[OCI integration](https://github.com/fiorix/sdme/blob/main/docs/architecture.md#16-oci-integration)
+[OCI integration](@/docs/architecture.md#16-oci-integration)
 architecture and
-[OCI app isolation](https://github.com/fiorix/sdme/blob/main/docs/security.md#13-oci-app-isolation-architecture)
+[OCI app isolation](@/docs/security.md#13-oci-app-isolation-architecture)
 security documentation.
 
 <pre class="diagram">
