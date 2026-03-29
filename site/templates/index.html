@@ -34,6 +34,26 @@
     </div>
   </section>
 
+  <hr>
+
+  {% set tutorials = get_section(path="tutorial/_index.md") %}
+  <section>
+    <h2>Tutorials</h2>
+    {% for page in tutorials.pages %}
+    <div class="card">
+      <h3>
+        {% if page.extra.status is defined and page.extra.status == "soon" %}
+          <a href="{{ page.permalink }}">{{ page.title }}</a>
+          <span class="badge badge-soon">coming soon</span>
+        {% else %}
+          <a href="{{ page.permalink }}">{{ page.title }}</a>
+        {% endif %}
+      </h3>
+      <p>{{ page.description }}</p>
+    </div>
+    {% endfor %}
+  </section>
+
   <footer>
     <p class="note">All release artifacts include
       <a href="https://github.com/fiorix/sdme/releases/latest/download/SHA256SUMS">SHA256 checksums</a>.</p>
