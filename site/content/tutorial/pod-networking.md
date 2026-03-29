@@ -1,12 +1,157 @@
 +++
 title = "Multi-Container Pod Networking"
-description = "Create pods with shared network namespaces for multi-container communication."
+description = "Share a network namespace between containers so they communicate via localhost."
 weight = 10
-
-[extra]
-status = "soon"
 +++
 
-<div class="coming-soon">
-<p>This tutorial is coming soon.</p>
-</div>
+Pods let multiple containers share a network namespace, so they can
+communicate over `127.0.0.1` without any port forwarding or bridge
+configuration. This is the same model used by Kubernetes pods.
+
+See also the [architecture documentation](@/docs/architecture.md#10-pods)
+for implementation details.
+
+## Creating a pod
+
+```sh
+sudo sdme pod new mypod
+```
+
+This creates an isolated network namespace with only a loopback
+interface. Containers that join the pod share this namespace and
+can reach each other on localhost.
+
+List and remove pods:
+
+```sh
+sudo sdme pod ls
+```
+
+```sh
+sudo sdme pod rm mypod
+```
+
+## Example: nginx and curl via --pod
+
+The `--pod` flag puts the entire container into the pod's network
+namespace. All processes inside the container share it.
+
+Create a pod and two containers. We use the OCI nginx rootfs (from
+the [OCI tutorial](@/tutorial/oci-apps.md)) since pod containers
+only have loopback and cannot download packages.
+
+```sh
+sudo sdme pod new webpod
+```
+
+Start an nginx server in the pod:
+
+```sh
+sudo sdme create http-server -r nginx --pod webpod
+sudo sdme start http-server
+```
+
+Start a client in the same pod and drop into a shell. The client
+uses a host clone which already has curl:
+
+```sh
+sudo sdme new http-client --pod webpod
+```
+
+Inside the client, curl the server via localhost:
+
+```sh
+curl localhost
+```
+
+You should see the nginx welcome page. Both containers share the
+same loopback interface.
+
+You can see both containers and their pod association with:
+
+```sh
+sudo sdme ps
+```
+
+The POD column shows which pod each container belongs to.
+
+### Limitations of --pod
+
+Pod network namespaces only have a loopback interface. Containers
+in a pod have no external connectivity: they cannot reach the
+internet, download packages, or communicate with anything outside
+the pod. Install any software you need before joining the pod, or
+use pre-built OCI rootfs images.
+
+`--pod` is also incompatible with `--userns`, `--hardened`, and
+`--strict`. The kernel blocks `setns(CLONE_NEWNET)` across user
+namespace boundaries. Use `--oci-pod` instead for hardened
+containers.
+
+## Example: redis via --oci-pod
+
+The `--oci-pod` flag is for OCI application containers. Only the OCI
+app service process enters the pod's network namespace; the
+container's init and other services remain in their own namespace.
+
+This works with `--hardened` and `--strict` because the network
+namespace join happens inside the container's own namespace.
+
+Create a pod and import redis:
+
+```sh
+sudo sdme pod new dbpod
+```
+
+```sh
+sudo sdme fs import redis docker.io/redis --base-fs ubuntu
+```
+
+Start redis in the pod with hardened security:
+
+```sh
+sudo sdme create redis-server -r redis --oci-pod dbpod --hardened
+sudo sdme start redis-server
+```
+
+Verify redis is running:
+
+```sh
+sudo sdme logs redis-server --oci
+```
+
+Start a client container in the same pod using the same redis
+rootfs, so `redis-cli` is available. Both containers use
+`--oci-pod` with `--hardened`:
+
+```sh
+sudo sdme create redis-client -r redis --oci-pod dbpod --hardened
+sudo sdme start redis-client
+```
+
+Test the connection from the client:
+
+```sh
+sudo sdme exec redis-client --oci -- redis-cli ping
+```
+
+You should see `PONG`. Both containers share the pod's network
+namespace and communicate over localhost, each running with
+hardened security.
+
+## --pod vs --oci-pod
+
+<pre class="diagram">
+Feature            --pod                  --oci-pod
+-----------------  ---------------------  -------------------------
+Scope              Entire container       OCI app service only
+Container types    Any                    OCI app rootfs required
+Userns/hardened    Incompatible           Compatible
+Requires           (nothing extra)        --private-network or
+                                          --hardened/--strict
+Use case           General-purpose pods   Security-hardened apps
+</pre>
+
+Both flags can be used on different containers in the same pod.
+The pod's network namespace is shared regardless of which flag
+each container uses to join it.
