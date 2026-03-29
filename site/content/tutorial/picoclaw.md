@@ -1,7 +1,7 @@
 +++
 title = "Running PicoClaw in a Container"
 description = "Install and run PicoClaw inside an sdme container."
-weight = 11
+weight = 12
 
 [extra]
 status = "soon"

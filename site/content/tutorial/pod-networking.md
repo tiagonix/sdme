@@ -1,7 +1,7 @@
 +++
 title = "Multi-Container Pod Networking"
 description = "Create pods with shared network namespaces for multi-container communication."
-weight = 9
+weight = 10
 
 [extra]
 status = "soon"

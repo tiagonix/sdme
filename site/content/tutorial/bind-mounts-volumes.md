@@ -88,31 +88,8 @@ you into a shell.
 
 ## OCI auto-volumes
 
-Some OCI images declare volumes (like Docker's `VOLUME` directive).
-When sdme imports an OCI app that declares volumes, it automatically
-creates host-side directories and bind-mounts them into the container
-at creation time.
-
-You can check if an imported OCI rootfs declares any volumes:
-
-```sh
-cat /var/lib/sdme/fs/{name}/oci/apps/{app}/volumes
-```
-
-If volumes are declared, sdme creates a host directory for each one
-at `/var/lib/sdme/volumes/{container}/{sanitized-path}` and
-bind-mounts it into the container.
-
-### Volume data persistence
-
-Volume data survives container removal. When you run `sdme rm`, it
-prints the volume path but does not delete the data. This means you
-can recreate a container and the volume data is still there.
-
-### Overriding auto-volumes
-
-Your `--bind` flags take priority over auto-volumes. If you bind-mount
-to the same container path that an auto-volume would use, the
-auto-volume is skipped.
-
-To suppress auto-volumes entirely, use `--no-oci-volumes`.
+Some OCI images declare volumes for data directories that should
+persist independently from the container. sdme detects these and
+manages them automatically. See the
+[OCI volumes with PostgreSQL](/tutorial/oci-volumes/) tutorial for
+a complete walkthrough.

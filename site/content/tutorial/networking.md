@@ -1,7 +1,7 @@
 +++
 title = "Network Configuration"
 description = "Configure private networks, veth links, zones, bridges, and port forwarding."
-weight = 8
+weight = 9
 
 [extra]
 status = "soon"
