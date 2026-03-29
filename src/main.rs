@@ -692,6 +692,12 @@ IMAGE RESOLUTION:
     are used as-is. Change the default with:
         sdme config set default_kube_registry registry.example.com
 
+NETWORKING:
+    Network flags (--network-veth, --network-zone, --network-bridge, --port)
+    are available and merged with ports declared in the Pod YAML. The Pod
+    spec hostNetwork field is supported: hostNetwork: true keeps the
+    container on the host network.
+
 SUPPORTED FEATURES:
     - Multi-container pods (shared network namespace via localhost)
     - command/args (overrides Docker ENTRYPOINT/CMD)
@@ -700,6 +706,7 @@ SUPPORTED FEATURES:
     - Volume mounts with readOnly and subPath
     - Probes: startup, liveness, readiness (exec, httpGet, tcpSocket, grpc)
     - Restart policy: Always, OnFailure, Never
+    - Networking: hostNetwork, --network-veth, --network-zone, --network-bridge, --port
     - Security: --strict, --hardened, --userns (nspawn-level)
     - Secrets and configmaps: sdme kube secret create, sdme kube configmap create
 
@@ -1317,6 +1324,9 @@ enum KubeCommand {
         oci_pod: Option<String>,
 
         #[command(flatten)]
+        network: NetworkArgs,
+
+        #[command(flatten)]
         security: SecurityArgs,
 
         /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
@@ -1344,6 +1354,9 @@ enum KubeCommand {
         /// Join a pod network namespace for all OCI app processes (requires private network)
         #[arg(long)]
         oci_pod: Option<String>,
+
+        #[command(flatten)]
+        network: NetworkArgs,
 
         #[command(flatten)]
         security: SecurityArgs,
@@ -2989,6 +3002,7 @@ fn run() -> Result<()> {
                 timeout,
                 pod,
                 oci_pod,
+                network: net_args,
                 security: security_args,
                 masked_services,
                 no_cache,
@@ -3009,11 +3023,9 @@ fn run() -> Result<()> {
                 let base_fs = effective_base_fs
                     .as_deref()
                     .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
-                // Kube containers always use an imported rootfs (never host),
-                // so network_zone is not applicable (kube doesn't expose it).
-                // Resolve masked services with a default NetworkConfig.
+                let kube_network = parse_network(net_args)?;
                 let masked_services =
-                    resolve_masked_services(masked_services, &NetworkConfig::default(), &cfg)?;
+                    resolve_masked_services(masked_services, &kube_network, &cfg)?;
                 let docker_creds = docker_credentials(&cfg);
                 let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
                 let mut http = cfg.http_config()?;
@@ -3031,6 +3043,7 @@ fn run() -> Result<()> {
                         oci_pod: oci_pod.as_deref(),
                         verbose: cli.verbose,
                         default_kube_registry: &cfg.default_kube_registry,
+                        network: kube_network,
                         http: &http,
                         auto_gc: cfg.auto_fs_gc,
                         security: sec,
@@ -3076,6 +3089,7 @@ fn run() -> Result<()> {
                 base_fs,
                 pod,
                 oci_pod,
+                network: net_args,
                 security: security_args,
                 masked_services,
                 no_cache,
@@ -3096,8 +3110,9 @@ fn run() -> Result<()> {
                 let base_fs = effective_base_fs
                     .as_deref()
                     .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
+                let kube_network = parse_network(net_args)?;
                 let masked_services =
-                    resolve_masked_services(masked_services, &NetworkConfig::default(), &cfg)?;
+                    resolve_masked_services(masked_services, &kube_network, &cfg)?;
                 let docker_creds = docker_credentials(&cfg);
                 let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
                 let mut http = cfg.http_config()?;
@@ -3115,6 +3130,7 @@ fn run() -> Result<()> {
                         oci_pod: oci_pod.as_deref(),
                         verbose: cli.verbose,
                         default_kube_registry: &cfg.default_kube_registry,
+                        network: kube_network,
                         http: &http,
                         auto_gc: cfg.auto_fs_gc,
                         security: sec,

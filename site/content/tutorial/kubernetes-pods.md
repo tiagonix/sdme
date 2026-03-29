@@ -139,6 +139,22 @@ Then `--base-fs` can be omitted:
 sudo sdme kube apply -f redis-pod.yaml
 ```
 
+## Networking
+
+By default, kube containers share the host network. You can use the
+same network flags as regular containers:
+
+```sh
+sudo sdme kube apply -f redis-pod.yaml --base-fs ubuntu --network-veth --port 6379:6379
+```
+
+Network flags are merged with ports declared in the Pod YAML.
+See the [network configuration](@/tutorial/networking.md) tutorial
+for details on each mode.
+
+The Kubernetes `hostNetwork: true` field is supported and keeps the
+container on the host network (the default sdme behavior).
+
 ## What's supported
 
 sdme supports a subset of the Kubernetes Pod spec:
@@ -151,6 +167,8 @@ sdme supports a subset of the Kubernetes Pod spec:
 - Container command/args (Kubernetes semantics: command overrides
   entrypoint, args overrides cmd)
 - Restart policies (Always, OnFailure, Never)
+- Networking: `hostNetwork`, `--network-veth`, `--network-zone`,
+  `--network-bridge`, `--port`
 - Security context at the pod and container level
 - Deployments (extracts the pod template)
 

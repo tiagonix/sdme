@@ -53,6 +53,8 @@ pub struct KubeCreateOptions<'a> {
     pub verbose: bool,
     /// Default registry for unqualified image names in kube YAML.
     pub default_kube_registry: &'a str,
+    /// CLI-provided network configuration.
+    pub network: crate::NetworkConfig,
     /// HTTP configuration for downloads and OCI pulls.
     pub http: &'a crate::config::HttpConfig,
     /// Automatically clean up stale transactions before creating.
@@ -436,25 +438,38 @@ WantedBy=multi-user.target
         binds: bind_strings,
     };
 
-    // Build port forwarding.
-    let mut network = crate::NetworkConfig::default();
+    // Build network config: start from CLI flags, merge auto-detected ports.
+    let mut network = opts.network.clone();
     if !plan.ports.is_empty() {
         network.private_network = true;
         for p in &plan.ports {
             let proto = p.protocol.as_deref().unwrap_or("tcp").to_lowercase();
             let port_str = format!("{proto}:{0}:{0}", p.container_port);
-            network.ports.push(port_str);
+            // Skip if user already specified this port via CLI.
+            if !network
+                .ports
+                .iter()
+                .any(|existing| existing.contains(&format!(":{}", p.container_port)))
+            {
+                network.ports.push(port_str);
+            }
         }
     }
 
-    // --oci-pod requires private network for CAP_NET_ADMIN.
-    if opts.oci_pod.is_some() {
-        network.private_network = true;
-    }
+    // hostNetwork from Pod spec: keep host networking (don't force private).
+    // CLI flags still override if explicitly provided.
+    if plan.host_network && !network.private_network {
+        // Host network requested and no CLI override, keep defaults.
+    } else {
+        // --oci-pod requires private network for CAP_NET_ADMIN.
+        if opts.oci_pod.is_some() {
+            network.private_network = true;
+        }
 
-    // --hardened/--strict forces private network.
-    if opts.hardened && !network.private_network {
-        network.private_network = true;
+        // --hardened/--strict forces private network.
+        if opts.hardened && !network.private_network {
+            network.private_network = true;
+        }
     }
 
     let create_opts = crate::containers::CreateOptions {

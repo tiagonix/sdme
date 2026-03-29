@@ -42,6 +42,8 @@ pub(crate) struct PodSpec {
     pub(crate) init_containers: Vec<Container>,
     #[serde(default)]
     pub(crate) volumes: Vec<Volume>,
+    #[serde(default, rename = "hostNetwork")]
+    pub(crate) host_network: bool,
     #[serde(default)]
     pub(crate) restart_policy: Option<String>,
     #[serde(default)]

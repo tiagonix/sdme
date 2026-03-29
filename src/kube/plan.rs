@@ -21,6 +21,8 @@ pub(crate) struct KubePlan {
     pub(crate) restart_policy: String,
     /// Aggregated ports from all containers.
     pub(crate) ports: Vec<ContainerPort>,
+    /// Whether the pod uses host networking (hostNetwork: true).
+    pub(crate) host_network: bool,
     /// Host-path binds needed at nspawn level.
     pub(crate) host_binds: Vec<(String, String)>,
     pub(crate) termination_grace_period: Option<u32>,
@@ -1015,6 +1017,7 @@ pub(crate) fn validate_and_plan(
         volumes,
         restart_policy,
         ports,
+        host_network: spec.host_network,
         host_binds,
         termination_grace_period: spec.termination_grace_period_seconds,
         run_as_user,
@@ -2140,6 +2143,7 @@ spec:
             volumes: vec![],
             restart_policy: "always".to_string(),
             ports: vec![],
+            host_network: false,
             host_binds: vec![],
             termination_grace_period: None,
             run_as_user: None,
