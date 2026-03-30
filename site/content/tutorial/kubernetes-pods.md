@@ -1,13 +1,13 @@
 +++
 title = "Running Kubernetes Pods"
-description = "Deploy multi-container applications from standard Kubernetes Pod YAML manifests."
+description = "Deploy OCI applications from Kubernetes Pod YAML manifests."
 weight = 11
 +++
 
 sdme can create containers from Kubernetes Pod YAML manifests. This
 is not the same as the [sdme pod](@/tutorial/pod-networking.md)
-networking feature. Kubernetes Pod YAML describes a complete
-multi-container application (images, environment variables, volumes,
+networking feature. Kubernetes Pod YAML describes one or more OCI
+images to run as isolated services (environment variables, volumes,
 probes) in a single file that sdme parses and deploys.
 
 See also the [architecture documentation](@/docs/architecture.md#17-kubernetes-pod-support)
@@ -17,9 +17,9 @@ for implementation details.
 
 `sdme kube apply` reads a Pod (or Deployment) YAML, pulls the
 specified OCI images, builds a combined rootfs on a base OS, and
-starts a single nspawn container with one systemd service per
-application container. All containers in the pod share localhost,
-just like in Kubernetes.
+starts a single nspawn container with one systemd service per OCI
+image. All services in the pod share localhost, just like in
+Kubernetes.
 
 ## A simple example
 
@@ -39,12 +39,12 @@ spec:
 Deploy it:
 
 ```sh
-sudo sdme kube apply -f redis-pod.yaml --base-fs ubuntu
+sudo sdme kube apply -f redis-pod.yaml --base-fs ubuntu --hardened --network-zone=services
 ```
 
 This pulls the redis image, builds a rootfs called `kube-my-redis`
-on top of the ubuntu base, starts the container, and drops you into
-a shell.
+on top of the ubuntu base, starts the container with user namespace
+isolation and its own network, and drops you into a shell.
 
 Check the redis service:
 
@@ -56,9 +56,9 @@ sudo sdme logs my-redis --oci redis
 Short image names like `redis` or `nginx` are resolved using the `default_kube_registry` config (default: `docker.io`). Fully qualified names like `quay.io/nginx/nginx-unprivileged` are used as-is. To use a different default registry: `sudo sdme config set default_kube_registry registry.example.com`
 {% end %}
 
-## Multi-container pod
+## Multi-service pod
 
-A pod can run multiple containers that communicate over localhost.
+A pod can run multiple OCI services that communicate over localhost.
 Create `web-pod.yaml`:
 
 ```yaml
@@ -75,15 +75,15 @@ spec:
 ```
 
 ```sh
-sudo sdme kube apply -f web-pod.yaml --base-fs ubuntu
+sudo sdme kube apply -f web-pod.yaml --base-fs ubuntu --hardened --network-zone=services
 ```
 
-Inside the pod, nginx runs on port 80 and redis on port 6379,
+Inside the container, nginx runs on port 80 and redis on port 6379,
 both reachable via `127.0.0.1`.
 
 ## Environment variables
 
-Pass configuration to containers via `env`:
+Pass configuration to OCI services via `env`:
 
 ```yaml
 apiVersion: v1
@@ -105,7 +105,7 @@ Use `sdme kube create` to build the pod without starting it or
 dropping into a shell:
 
 ```sh
-sudo sdme kube create -f redis-pod.yaml --base-fs ubuntu
+sudo sdme kube create -f redis-pod.yaml --base-fs ubuntu --hardened --network-zone=services
 ```
 
 Then start and manage it with the usual commands:
@@ -136,30 +136,33 @@ sudo sdme config set default_base_fs ubuntu
 Then `--base-fs` can be omitted:
 
 ```sh
-sudo sdme kube apply -f redis-pod.yaml
+sudo sdme kube apply -f redis-pod.yaml --hardened --network-zone=services
 ```
 
 ## Networking
 
-By default, kube containers share the host network. You can use the
-same network flags as regular containers:
+All examples in this tutorial use `--network-zone=services`, which
+gives each container its own network namespace with automatic DNS
+between containers in the same zone. Ports declared in the Pod YAML
+are automatically forwarded from the host.
+
+To forward additional ports from the host:
 
 ```sh
-sudo sdme kube apply -f redis-pod.yaml --base-fs ubuntu --network-veth --port 6379:6379
+sudo sdme kube apply -f redis-pod.yaml --base-fs ubuntu --hardened --network-zone=services --port 6379:6379
 ```
 
-Network flags are merged with ports declared in the Pod YAML.
 See the [network configuration](@/tutorial/networking.md) tutorial
 for details on each mode.
 
 The Kubernetes `hostNetwork: true` field is supported and keeps the
-container on the host network (the default sdme behavior).
+container on the host network.
 
 ## What's supported
 
 sdme supports a subset of the Kubernetes Pod spec:
 
-- Multiple containers per pod (shared localhost)
+- Multiple OCI services per pod (shared localhost)
 - Environment variables (`env`, `envFrom`)
 - Secrets and ConfigMaps (`sdme kube secret`, `sdme kube configmap`)
 - Volumes: emptyDir, hostPath, secret, configMap, persistentVolumeClaim
