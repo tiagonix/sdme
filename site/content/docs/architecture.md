@@ -1632,8 +1632,8 @@ Both binaries are deployed during `sdme fs import` of an OCI application
 image (one imported with `--base-fs`):
 
 1. The OCI image config's `User` field is parsed.
-2. The `devfd_shim` shared library is written to `/.sdme-devfd-shim.so`
-   inside the OCI root (mode `0o444`, readable for mmap).
+2. The `devfd_shim` shared library is written to `/usr/lib/sdme-devfd-shim.so`
+   inside the OCI root (mode `0o555`).
 3. The `isolate` binary is written to `/.sdme-isolate` (mode `0o111`,
    execute-only). If the user is non-root, the name is resolved against
    `etc/passwd` and `etc/group` inside the OCI rootfs.
@@ -1647,7 +1647,7 @@ Generated unit (non-root user):
 Type=exec
 RootDirectory=/oci/apps/nginx/root
 MountAPIVFS=yes
-Environment=LD_PRELOAD=/.sdme-devfd-shim.so
+Environment=LD_PRELOAD=/usr/lib/sdme-devfd-shim.so
 EnvironmentFile=-/oci/apps/nginx/env
 ExecStart=/.sdme-isolate 101 101 / /docker-entrypoint.sh nginx -g 'daemon off;'
 ```
@@ -1663,7 +1663,7 @@ Generated unit (root user):
 Type=exec
 RootDirectory=/oci/apps/nginx/root
 MountAPIVFS=yes
-Environment=LD_PRELOAD=/.sdme-devfd-shim.so
+Environment=LD_PRELOAD=/usr/lib/sdme-devfd-shim.so
 EnvironmentFile=-/oci/apps/nginx/env
 ExecStart=/.sdme-isolate 0 0 / /docker-entrypoint.sh nginx -g 'daemon off;'
 ```
@@ -1827,7 +1827,7 @@ OCI images, builds a combined rootfs on a base OS, and starts a single
 nspawn container with one systemd service per OCI image. All services in
 the pod share localhost, just like in Kubernetes.
 
-The base OS is any imported rootfs — the same Pod YAML runs on Ubuntu,
+The base OS is any imported rootfs; the same Pod YAML runs on Ubuntu,
 Fedora, Arch Linux, or any other supported distribution. Each OCI container becomes a separate systemd service isolated in its own
 PID/IPC namespaces and chrooted into its own rootfs under
 `/oci/apps/{name}/root`.
@@ -1938,7 +1938,7 @@ Requires=sdme-kube-volumes.service
 Type=exec
 RootDirectory=/oci/apps/nginx/root
 MountAPIVFS=yes
-Environment=LD_PRELOAD=/.sdme-devfd-shim.so
+Environment=LD_PRELOAD=/usr/lib/sdme-devfd-shim.so
 EnvironmentFile=-/oci/apps/nginx/env
 ExecStart=/.sdme-isolate 0 0 / /docker-entrypoint.sh nginx -g 'daemon off;'
 Restart=always

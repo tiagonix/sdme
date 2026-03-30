@@ -132,9 +132,9 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
 ## Documentation
 
 - **CLI reference**: `sdme --help` and each subcommand's `--help`. There is no manpage. Each command includes manpage-style reference sections (examples, environment, files, exit status, notes). The help text lives in `*_HELP` constants at the top of `src/main.rs` and is wired to clap via `after_long_help`.
-- **Architecture and design**: `site/content/docs/architecture.md` — comprehensive coverage of overlayfs, systemd integration, networking, pods, OCI, Kubernetes, security hardening, reliability, and all design decisions.
-- **Security model**: `site/content/docs/security.md` — nspawn isolation compared to Docker/Podman, OCI workload security, Kubernetes pod security.
-- **Tutorials**: `site/content/tutorial/` — getting started, networking, OCI apps, Kubernetes pods, etc.
+- **Architecture and design**: `site/content/docs/architecture.md`: comprehensive coverage of overlayfs, systemd integration, networking, pods, OCI, Kubernetes, security hardening, reliability, and all design decisions.
+- **Security model**: `site/content/docs/security.md`: nspawn isolation compared to Docker/Podman, OCI workload security, Kubernetes pod security.
+- **Tutorials**: `site/content/tutorial/`: getting started, networking, OCI apps, Kubernetes pods, etc.
 
 ## Contributor Patterns
 

@@ -70,7 +70,7 @@ Port forwarding creates nftables DNAT rules for incoming traffic.
 It works for connections from other machines on the network and
 from the host via its external IP, but **not via localhost**
 (127.0.0.1). To reach a container from the host, use the
-container's IP directly — find it with `sdme ps`.
+container's IP directly; find it with `sdme ps`.
 
 ## Zones
 

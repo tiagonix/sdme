@@ -43,7 +43,7 @@ spec:
 
 The base rootfs can be any
 [supported distribution](@/tutorial/different-rootfs.md#supported-distributions).
-Import one if you haven't already — Ubuntu for example:
+Import one if you haven't already (Ubuntu for example):
 
 ```sh
 sudo sdme fs import ubuntu docker.io/ubuntu
@@ -67,7 +67,7 @@ systemctl status sdme-oci-nginx.service
 journalctl -u sdme-oci-nginx.service
 ```
 
-Exit the shell with `Ctrl+D` — the container keeps running. From
+Exit the shell with `Ctrl+D`; the container keeps running. From
 the host, you can still check the logs:
 
 ```sh
@@ -83,7 +83,7 @@ Short image names like `redis` or `nginx` are resolved using the `default_kube_r
 All containers on the same network zone can reach each other by
 hostname. You can use any
 [supported distribution](@/tutorial/different-rootfs.md#supported-distributions)
-here — Arch Linux for example:
+here (Arch Linux for example):
 
 ```sh
 sudo sdme fs import archlinux docker.io/lopsided/archlinux
@@ -104,13 +104,13 @@ curl http://my-nginx
 
 This works because `--network-zone` uses LLMNR for automatic
 hostname discovery between containers in the same zone. Any sdme
-container — kube or regular — can join the zone and communicate
+container (kube or regular) can join the zone and communicate
 with the others.
 
 ## Running a database with secrets
 
 This example deploys PostgreSQL on a Fedora base and shows how to
-configure it using environment variables, secrets, and configmaps —
+configure it using environment variables, secrets, and configmaps,
 the same way you would in Kubernetes.
 
 Import Fedora if you haven't already:
@@ -136,6 +136,10 @@ spec:
     - name: POSTGRES_PASSWORD
       value: "secret"
 ```
+
+Here we use `kube create` instead of `kube apply` to build the pod
+without starting it or dropping into a shell, then start it
+separately:
 
 ```sh
 sudo sdme kube create -f db-pod.yaml --base-fs fedora --hardened --network-zone=kube
@@ -228,23 +232,6 @@ sudo sdme kube secret ls
 sudo sdme kube secret rm db-credentials
 sudo sdme kube configmap ls
 sudo sdme kube configmap rm db-config
-```
-
-## Create without entering
-
-Use `sdme kube create` to build the pod without starting it or
-dropping into a shell:
-
-```sh
-sudo sdme kube create -f nginx-pod.yaml --base-fs ubuntu --hardened --network-zone=kube
-```
-
-Then start and manage it with the usual commands:
-
-```sh
-sudo sdme start my-nginx
-sudo sdme logs my-nginx --oci nginx
-sudo sdme stop my-nginx
 ```
 
 ## Deleting a kube pod

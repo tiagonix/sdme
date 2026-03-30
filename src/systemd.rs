@@ -585,7 +585,7 @@ mod dbus {
                         result.push(ip.to_string());
                     }
                     10 if bytes.len() == 16 => {
-                        // AF_INET6 — skip link-local (fe80::/10)
+                        // AF_INET6: skip link-local (fe80::/10)
                         let octets: [u8; 16] = bytes.try_into().expect("length already checked");
                         let ip = Ipv6Addr::from(octets);
                         if (ip.segments()[0] & 0xffc0) != 0xfe80 {
