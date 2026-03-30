@@ -23,47 +23,68 @@ Kubernetes.
 
 ## A simple example
 
-Create a file called `redis-pod.yaml`:
+Create a file called `nginx-pod.yaml`:
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: my-redis
+  name: my-nginx
 spec:
   containers:
-  - name: redis
-    image: redis
+  - name: nginx
+    image: nginx
 ```
 
 Deploy it:
 
 ```sh
-sudo sdme kube apply -f redis-pod.yaml --base-fs ubuntu --hardened --network-zone=services
+sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu --hardened --network-zone=kube
 ```
 
-This pulls the redis image, builds a rootfs called `kube-my-redis`
+This pulls the nginx image, builds a rootfs called `kube-my-nginx`
 on top of the ubuntu base, starts the container with user namespace
 isolation and its own network, and drops you into a shell.
 
-Inside the container, you can verify the redis service with standard
+Inside the container, you can verify the nginx service with standard
 systemd commands:
 
 ```sh
-systemctl status sdme-oci-redis.service
-journalctl -u sdme-oci-redis.service
+systemctl status sdme-oci-nginx.service
+journalctl -u sdme-oci-nginx.service
 ```
 
 Exit the shell with `Ctrl+D` — the container keeps running. From
 the host, you can still check the logs:
 
 ```sh
-sudo sdme logs my-redis --oci redis
+sudo sdme logs my-nginx --oci nginx
 ```
 
 {% callout(type="tip", title="Image registry") %}
 Short image names like `redis` or `nginx` are resolved using the `default_kube_registry` config (default: `docker.io`). Fully qualified names like `quay.io/nginx/nginx-unprivileged` are used as-is. To use a different default registry: `sudo sdme config set default_kube_registry registry.example.com`
 {% end %}
+
+## Reaching kube pods from other containers
+
+All containers on the same network zone can reach each other by
+hostname. Create a regular Arch Linux container on the `kube` zone
+and curl the nginx pod:
+
+```sh
+sudo sdme new myclient -r archlinux --hardened --network-zone=kube
+```
+
+Inside the client container:
+
+```sh
+curl http://my-nginx
+```
+
+This works because `--network-zone` uses LLMNR for automatic
+hostname discovery between containers in the same zone. Any sdme
+container — kube or regular — can join the zone and communicate
+with the others.
 
 ## Multi-service pod
 
@@ -84,7 +105,7 @@ spec:
 ```
 
 ```sh
-sudo sdme kube apply -f web-pod.yaml --base-fs ubuntu --hardened --network-zone=services
+sudo sdme kube apply -f web-pod.yaml --base-fs ubuntu --hardened --network-zone=kube
 ```
 
 Inside the container, nginx runs on port 80 and redis on port 6379,
@@ -114,15 +135,15 @@ Use `sdme kube create` to build the pod without starting it or
 dropping into a shell:
 
 ```sh
-sudo sdme kube create -f redis-pod.yaml --base-fs ubuntu --hardened --network-zone=services
+sudo sdme kube create -f nginx-pod.yaml --base-fs ubuntu --hardened --network-zone=kube
 ```
 
 Then start and manage it with the usual commands:
 
 ```sh
-sudo sdme start my-redis
-sudo sdme logs my-redis --oci redis
-sudo sdme stop my-redis
+sudo sdme start my-nginx
+sudo sdme logs my-nginx --oci nginx
+sudo sdme stop my-nginx
 ```
 
 ## Deleting a kube pod
@@ -131,7 +152,7 @@ sudo sdme stop my-redis
 generated rootfs:
 
 ```sh
-sudo sdme kube delete my-redis
+sudo sdme kube delete my-nginx
 ```
 
 ## Setting a default base rootfs
@@ -145,12 +166,12 @@ sudo sdme config set default_base_fs ubuntu
 Then `--base-fs` can be omitted:
 
 ```sh
-sudo sdme kube apply -f redis-pod.yaml --hardened --network-zone=services
+sudo sdme kube apply -f nginx-pod.yaml --hardened --network-zone=kube
 ```
 
 ## Networking
 
-All examples in this tutorial use `--network-zone=services`, which
+All examples in this tutorial use `--network-zone=kube`, which
 gives each container its own network namespace with automatic DNS
 between containers in the same zone. Ports declared in the Pod YAML
 are automatically forwarded from the host.
@@ -158,7 +179,7 @@ are automatically forwarded from the host.
 To forward additional ports from the host:
 
 ```sh
-sudo sdme kube apply -f redis-pod.yaml --base-fs ubuntu --hardened --network-zone=services --port 6379:6379
+sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu --hardened --network-zone=kube --port 8080:80
 ```
 
 See the [network configuration](@/tutorial/networking.md) tutorial
