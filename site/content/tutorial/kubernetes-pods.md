@@ -36,6 +36,12 @@ spec:
     image: nginx
 ```
 
+Make sure you have a base rootfs imported. If not:
+
+```sh
+sudo sdme fs import ubuntu docker.io/ubuntu
+```
+
 Deploy it:
 
 ```sh
@@ -68,8 +74,14 @@ Short image names like `redis` or `nginx` are resolved using the `default_kube_r
 ## Reaching kube pods from other containers
 
 All containers on the same network zone can reach each other by
-hostname. Create a regular Arch Linux container on the `kube` zone
-and curl the nginx pod:
+hostname. Import an Arch Linux rootfs if you haven't already:
+
+```sh
+sudo sdme fs import archlinux docker.io/lopsided/archlinux
+```
+
+Create a regular container on the `kube` zone and curl the nginx
+pod:
 
 ```sh
 sudo sdme new myclient -r archlinux --hardened --network-zone=kube
