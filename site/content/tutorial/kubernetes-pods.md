@@ -46,7 +46,16 @@ This pulls the redis image, builds a rootfs called `kube-my-redis`
 on top of the ubuntu base, starts the container with user namespace
 isolation and its own network, and drops you into a shell.
 
-Check the redis service:
+Inside the container, you can verify the redis service with standard
+systemd commands:
+
+```sh
+systemctl status sdme-oci-redis.service
+journalctl -u sdme-oci-redis.service
+```
+
+Exit the shell with `Ctrl+D` — the container keeps running. From
+the host, you can still check the logs:
 
 ```sh
 sudo sdme logs my-redis --oci redis
