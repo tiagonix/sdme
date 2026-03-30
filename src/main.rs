@@ -172,8 +172,10 @@ SERVICE MASKING:
     masked (symlinked to /dev/null) in the overlayfs upper layer.
     Default: systemd-resolved.service (prevents DNS conflict on host network).
     --masked-services overrides this entirely. An empty value masks nothing.
-    With --network-zone and no explicit --masked-services, resolved is
-    auto-unmasked for inter-container LLMNR/mDNS name resolution.
+    With --network-veth, --network-zone, or --network-bridge and no
+    explicit --masked-services, resolved is auto-unmasked and enabled
+    for DNS. Zone containers also get LLMNR/mDNS for inter-container
+    name resolution.
     NixOS rootfs skip masking (activation replaces /etc/systemd/system).";
 
 const STOP_HELP: &str = "\
@@ -1771,9 +1773,10 @@ fn resolve_opaque_dirs(
 /// Resolve which systemd services to mask at create time.
 ///
 /// If the user passed explicit `--masked-services`, use that as-is.
-/// Otherwise, use the config default. When using defaults and
-/// `--network-zone` is set, automatically remove `systemd-resolved.service`
-/// from the list (zones enable inter-container DNS via resolved).
+/// Otherwise, use the config default. When using defaults and a
+/// network interface is configured (veth, zone, or bridge),
+/// automatically remove `systemd-resolved.service` from the list
+/// so resolved can provide DNS inside the container.
 fn resolve_masked_services(
     cli_masked: Option<Vec<String>>,
     network: &NetworkConfig,
