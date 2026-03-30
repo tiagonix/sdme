@@ -430,7 +430,7 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
     fs::write(&shim_path, &shim_bytes)
         .with_context(|| format!("failed to write {}", shim_path.display()))?;
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o444))
+    fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o555))
         .with_context(|| format!("failed to set permissions on {}", shim_path.display()))?;
     if opts.verbose {
         eprintln!("wrote devfd shim: {}", shim_path.display());
