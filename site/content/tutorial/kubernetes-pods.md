@@ -204,11 +204,11 @@ the same zone can reach it:
 sudo sdme new dbclient -r archlinux --hardened --network-zone=kube
 ```
 
-Inside the client container, connect to PostgreSQL by hostname:
+Inside the client container, verify PostgreSQL is reachable by
+hostname (curl ships with the archlinux rootfs):
 
 ```sh
-pacman -Sy --noconfirm postgresql
-psql -h my-db -U postgres -d myapp
+curl -v telnet://my-db:5432
 ```
 
 ### Managing secrets and configmaps
