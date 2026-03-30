@@ -4,11 +4,15 @@ description = "Deploy OCI applications from Kubernetes Pod YAML manifests."
 weight = 11
 +++
 
-sdme can create containers from Kubernetes Pod YAML manifests. This
-is not the same as the [sdme pod](@/tutorial/pod-networking.md)
-networking feature. Kubernetes Pod YAML describes one or more OCI
-images to run as isolated services (environment variables, volumes,
-probes) in a single file that sdme parses and deploys.
+sdme can create containers from Kubernetes Pod YAML manifests
+without requiring Kubernetes, Docker, Podman, or any OCI runtime.
+sdme pulls OCI images directly from registries and runs them as
+systemd services inside nspawn containers.
+
+Kubernetes Pod YAML describes one or more OCI images to run as
+isolated services (environment variables, volumes, probes) in a
+single file that sdme parses and deploys. This is not the same as
+the [sdme pod](@/tutorial/pod-networking.md) networking feature.
 
 See also the [architecture documentation](@/docs/architecture.md#17-kubernetes-pod-support)
 for implementation details.
