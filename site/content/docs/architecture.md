@@ -317,7 +317,7 @@ Containers reference them by name.
 - **URL**: `http://` or `https://` prefix. Downloads the file, then
   extracts as a tarball.
 - **OCI registry**: looks like a domain with a path
-  (e.g. `docker.io/ubuntu:24.04`, `quay.io/fedora/fedora`). Pulled via
+  (e.g. `docker.io/ubuntu`, `quay.io/fedora/fedora`). Pulled via
   the OCI Distribution Spec.
 - **Directory**: path is a directory. Copied with `copy_tree()`
   preserving ownership, permissions, xattrs, hard links, and special
@@ -1344,7 +1344,7 @@ Application image  Has entrypoint, non-shell cmd, or ports
 Application images require a base rootfs specified with `--base-fs`:
 
 ```bash
-sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+sudo sdme fs import ubuntu docker.io/ubuntu -v --install-packages=yes
 sudo sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
 ```
 

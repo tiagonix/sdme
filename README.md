@@ -53,7 +53,7 @@ for setting up a Linux VM with lima-vm, then install sdme inside it.
 sudo sdme new
 
 # Import and boot Ubuntu
-sudo sdme fs import ubuntu docker.io/ubuntu:24.04
+sudo sdme fs import ubuntu docker.io/ubuntu
 sudo sdme new -r ubuntu
 
 # Import and boot Fedora

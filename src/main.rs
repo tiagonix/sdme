@@ -33,7 +33,7 @@ GETTING STARTED:
     sdme new
 
     # Import Ubuntu from Docker Hub and create a named container
-    sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+    sdme fs import ubuntu docker.io/ubuntu -v --install-packages=yes
     sdme new mybox -r ubuntu
 
     # Run an OCI application image (nginx) on top of ubuntu
@@ -358,7 +358,7 @@ The default output format for fs ls can be set with:
 See also: sdme ps (list containers and their rootfs).
 
 EXAMPLES:
-    sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+    sdme fs import ubuntu docker.io/ubuntu -v --install-packages=yes
     sdme fs import debian /tmp/debootstrap-output
     sdme fs ls
     sdme fs ls --json
@@ -370,7 +370,7 @@ SUPPORTED SOURCES:
     Tarball             .tar, .tar.gz, .tar.bz2, .tar.xz, .tar.zst
     URL                 http:// or https:// (downloads, then auto-detects)
     OCI tarball         Tarball containing an oci-layout file
-    OCI registry        docker.io/ubuntu:24.04, ghcr.io/org/app:v1, etc.
+    OCI registry        docker.io/ubuntu, ghcr.io/org/app:v1, etc.
     QCOW2 disk image    Requires qemu-nbd
 
 OCI REGISTRY IMAGES:
@@ -413,7 +413,7 @@ PACKAGE INSTALLATION (--install-packages):
     otherwise it cannot be imported.
 
 TESTED DISTROS:
-    docker.io/ubuntu:24.04
+    docker.io/ubuntu
     docker.io/debian:bookworm
     docker.io/fedora:41
     docker.io/archlinux:latest
@@ -421,7 +421,7 @@ TESTED DISTROS:
 
 EXAMPLES:
     # Import from Docker Hub
-    sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+    sdme fs import ubuntu docker.io/ubuntu -v --install-packages=yes
 
     # Import an OCI app image with a base filesystem
     sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
@@ -433,10 +433,10 @@ EXAMPLES:
     sdme fs import arch https://example.com/archlinux-rootfs.tar.zst
 
     # Force re-fetch from registry (skip manifest cache)
-    sdme fs import ubuntu docker.io/ubuntu:24.04 --no-cache -v
+    sdme fs import ubuntu docker.io/ubuntu --no-cache -v
 
     # Import through an HTTP proxy
-    sudo -E sdme fs import ubuntu docker.io/ubuntu:24.04 -v
+    sudo -E sdme fs import ubuntu docker.io/ubuntu -v
 
     # Override distro import prehook via config
     sdme config set distros.debian.import_prehook '[\"apt-get update\",\"apt-get install -y systemd dbus\"]'";
@@ -671,7 +671,7 @@ pods run as a single nspawn container with one systemd service per app.
 
 WORKFLOW:
     # Import a base filesystem
-    sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+    sdme fs import ubuntu docker.io/ubuntu -v --install-packages=yes
 
     # Apply a Pod YAML
     sdme kube apply -f pod.yaml --base-fs ubuntu

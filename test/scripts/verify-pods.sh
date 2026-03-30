@@ -34,7 +34,7 @@ ensure_root
 ensure_sdme
 require_gate smoke
 require_gate interrupt
-ensure_base_fs ubuntu docker.io/ubuntu:24.04
+ensure_base_fs ubuntu docker.io/ubuntu
 
 # ---------------------------------------------------------------------------
 # Test 1: nspawn pods (--pod)

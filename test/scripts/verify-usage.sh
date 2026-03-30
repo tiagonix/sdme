@@ -15,7 +15,7 @@ DATADIR="/var/lib/sdme"
 REPORT_DIR="."
 
 # Base distro for most tests (fast to import)
-BASE_IMAGE="docker.io/ubuntu:24.04"
+BASE_IMAGE="docker.io/ubuntu"
 BASE_FS="vfy-usage-ubuntu"
 
 # OCI app images
@@ -180,7 +180,7 @@ test_import_oci() {
 
     local output
 
-    # sdme fs import ubuntu docker.io/ubuntu:24.04
+    # sdme fs import ubuntu docker.io/ubuntu
     if ensure_base_fs "$BASE_FS" "$BASE_IMAGE"; then
         record "import/base" PASS
     else

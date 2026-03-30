@@ -224,7 +224,7 @@ ensure_root() {
 
 declare -A DISTRO_IMAGES=(
     [debian]="docker.io/debian:stable"
-    [ubuntu]="docker.io/ubuntu:24.04"
+    [ubuntu]="docker.io/ubuntu"
     [fedora]="quay.io/fedora/fedora:41"
     [centos]="quay.io/centos/centos:stream10"
     [almalinux]="quay.io/almalinuxorg/almalinux:9"
