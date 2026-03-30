@@ -162,7 +162,7 @@ test_unit_working_dir() {
 
     local unit
     unit=$(read_unit "testapp")
-    # With isolate mode, the working dir is passed as an argument to .sdme-isolate,
+    # With isolate mode, the working dir is passed as an argument to sdme-isolate,
     # so it appears in ExecStart rather than WorkingDirectory.
     if echo "$unit" | grep -q '/tmp'; then
         record "$test_name" PASS
@@ -208,7 +208,7 @@ test_unit_security_context() {
 
     local unit
     unit=$(read_unit "testapp")
-    if echo "$unit" | grep -q '\.sdme-isolate 65534 65534'; then
+    if echo "$unit" | grep -q 'sdme-isolate 65534 65534'; then
         record "$test_name" PASS
     else
         record "$test_name" FAIL "isolate 65534 65534 not found"

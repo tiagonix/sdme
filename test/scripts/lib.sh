@@ -305,7 +305,7 @@ fix_redis_oci() {
 [Service]
 Environment=LANG=C.UTF-8
 ExecStart=
-ExecStart=/.sdme-isolate 0 0 /data /usr/local/bin/docker-entrypoint.sh redis-server${extra_args}
+ExecStart=/usr/sbin/sdme-isolate 0 0 /data /usr/local/bin/docker-entrypoint.sh redis-server${extra_args}
 DROPIN
 }
 

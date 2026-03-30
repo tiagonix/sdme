@@ -532,7 +532,7 @@ nspawn container
 ```
 
 The `isolate` binary is a static ELF (under 2 KiB, no libc, raw
-syscalls) written to `/.sdme-isolate` inside the OCI root at import
+syscalls) written to `/usr/sbin/sdme-isolate` inside the OCI root at import
 time. It is used for ALL OCI apps, both root and non-root:
 
 - **All apps**: PID namespace, IPC namespace, /proc remount,
@@ -761,6 +761,6 @@ Pod networking        Per-container    --pod / --oci-pod
 - No network policies
 - No service accounts or RBAC
 - Probe checks (exec, httpGet, tcpSocket, grpc) run inside the
-  container's mount namespace via `/oci/.sdme-kube-probe`; exec
+  container's mount namespace via `/usr/bin/sdme-kube-probe`; exec
   probes chroot into the app rootfs before executing
 - Secrets not encrypted at rest

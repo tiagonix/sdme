@@ -239,7 +239,7 @@ test_unit_hardened_user_override() {
     local unit
     unit=$(read_unit "hardened")
     # Container-level runAsUser=1000:1000 should override pod-level 65534:65534.
-    if echo "$unit" | grep -q '\.sdme-isolate 1000 1000'; then
+    if echo "$unit" | grep -q 'sdme-isolate 1000 1000'; then
         record "$test_name" PASS
     else
         record "$test_name" FAIL "isolate 1000 1000 not found (container user override)"
@@ -358,7 +358,7 @@ test_unit_relaxed_user_inherits_pod() {
     local unit
     unit=$(read_unit "relaxed")
     # No container-level user override, so should inherit pod-level 65534:65534.
-    if echo "$unit" | grep -q '\.sdme-isolate 65534 65534'; then
+    if echo "$unit" | grep -q 'sdme-isolate 65534 65534'; then
         record "$test_name" PASS
     else
         record "$test_name" FAIL "isolate 65534 65534 not found (should inherit pod user)"

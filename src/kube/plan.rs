@@ -2244,10 +2244,10 @@ spec:
         let plan = make_test_plan();
         let unit = setup_test_container("app", &kc, &plan, false, &[]);
 
-        // In isolate mode, working dir is passed as an argument to .sdme-isolate,
+        // In isolate mode, working dir is passed as an argument to sdme-isolate,
         // not as a systemd WorkingDirectory= directive.
         assert!(
-            unit.contains("/.sdme-isolate 0 0 /app"),
+            unit.contains("/usr/sbin/sdme-isolate 0 0 /app"),
             "should have /app as working dir in isolate exec, got: {unit}"
         );
     }
@@ -2323,7 +2323,7 @@ spec:
         assert!(svc_path.exists(), "startup service unit should exist");
         let svc = fs::read_to_string(&svc_path).unwrap();
         assert!(
-            svc.contains("/oci/.sdme-kube-probe"),
+            svc.contains("/usr/bin/sdme-kube-probe"),
             "startup service should reference probe binary"
         );
         assert!(
@@ -2403,7 +2403,7 @@ spec:
         assert!(svc_path.exists(), "liveness service unit should exist");
         let svc = fs::read_to_string(&svc_path).unwrap();
         assert!(
-            svc.contains("/oci/.sdme-kube-probe"),
+            svc.contains("/usr/bin/sdme-kube-probe"),
             "service should reference probe binary"
         );
         assert!(
@@ -2472,7 +2472,7 @@ spec:
         assert!(svc_path.exists(), "readiness service unit should exist");
         let svc = fs::read_to_string(&svc_path).unwrap();
         assert!(
-            svc.contains("/oci/.sdme-kube-probe") && svc.contains("--type readiness"),
+            svc.contains("/usr/bin/sdme-kube-probe") && svc.contains("--type readiness"),
             "readiness service should reference probe binary with --type readiness"
         );
     }
@@ -2533,7 +2533,7 @@ spec:
 
         // setup_kube_container passes "1000:1000" as user, which
         // resolve_oci_user() resolves as numeric UID:GID. Kube uses
-        // isolate mode so .sdme-isolate is deployed. Numeric UIDs
+        // isolate mode so sdme-isolate is deployed. Numeric UIDs
         // work without etc/passwd.
         let tmp = TempDataDir::new("kube-unit-sec");
         let staging = tmp.path().join("staging");
@@ -2562,13 +2562,13 @@ spec:
         let unit_path = staging.join("etc/systemd/system/sdme-oci-app.service");
         let unit = fs::read_to_string(&unit_path).unwrap();
 
-        // Kube uses isolate mode: should use .sdme-isolate with uid/gid.
+        // Kube uses isolate mode: should use sdme-isolate with uid/gid.
         assert!(
-            unit.contains("/.sdme-isolate 1000 1000"),
+            unit.contains("/usr/sbin/sdme-isolate 1000 1000"),
             "should use isolate with uid=1000 gid=1000, got: {unit}"
         );
         // isolate binary should be deployed.
-        assert!(app_root.join(".sdme-isolate").is_file());
+        assert!(app_root.join("usr/sbin/sdme-isolate").is_file());
     }
 
     // --- Secret volumes ---

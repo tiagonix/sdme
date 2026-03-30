@@ -1435,11 +1435,11 @@ under 2 KiB) that creates PID/IPC namespaces, remounts /proc, drops
 `CAP_SYS_ADMIN`, optionally drops privileges (`setgroups`/`setgid`/
 `setuid`), changes the working directory, and exec's the target, all
 via raw syscalls with no libc or NSS dependency. The binary is written
-to `/.sdme-isolate` inside the OCI root at import time (mode `0o111`,
+to `/usr/sbin/sdme-isolate` inside the OCI root at import time (mode `0o111`,
 owned by root). The generated unit becomes:
 
 ```ini
-ExecStart=/.sdme-isolate <uid> <gid> <workdir> <entrypoint> [args...]
+ExecStart=/usr/sbin/sdme-isolate <uid> <gid> <workdir> <entrypoint> [args...]
 ```
 
 No `User=` or `WorkingDirectory=` directives are needed; the binary
@@ -1478,7 +1478,7 @@ privileges, and execs the target, all via raw syscalls with no libc
 dependency and no NSS. The binary is invoked as:
 
 ```
-/.sdme-isolate <uid> <gid> <workdir> <command> [args...]
+/usr/sbin/sdme-isolate <uid> <gid> <workdir> <command> [args...]
 ```
 
 The syscall sequence:
@@ -1634,7 +1634,7 @@ image (one imported with `--base-fs`):
 1. The OCI image config's `User` field is parsed.
 2. The `devfd_shim` shared library is written to `/usr/lib/sdme-devfd-shim.so`
    inside the OCI root (mode `0o555`).
-3. The `isolate` binary is written to `/.sdme-isolate` (mode `0o111`,
+3. The `isolate` binary is written to `/usr/sbin/sdme-isolate` (mode `0o111`,
    execute-only). If the user is non-root, the name is resolved against
    `etc/passwd` and `etc/group` inside the OCI rootfs.
 4. A systemd service unit (`sdme-oci-{name}.service`) is generated with
@@ -1649,7 +1649,7 @@ RootDirectory=/oci/apps/nginx/root
 MountAPIVFS=yes
 Environment=LD_PRELOAD=/usr/lib/sdme-devfd-shim.so
 EnvironmentFile=-/oci/apps/nginx/env
-ExecStart=/.sdme-isolate 101 101 / /docker-entrypoint.sh nginx -g 'daemon off;'
+ExecStart=/usr/sbin/sdme-isolate 101 101 / /docker-entrypoint.sh nginx -g 'daemon off;'
 ```
 
 `LD_PRELOAD` loads the devfd shim into the application's address space.
@@ -1665,7 +1665,7 @@ RootDirectory=/oci/apps/nginx/root
 MountAPIVFS=yes
 Environment=LD_PRELOAD=/usr/lib/sdme-devfd-shim.so
 EnvironmentFile=-/oci/apps/nginx/env
-ExecStart=/.sdme-isolate 0 0 / /docker-entrypoint.sh nginx -g 'daemon off;'
+ExecStart=/usr/sbin/sdme-isolate 0 0 / /docker-entrypoint.sh nginx -g 'daemon off;'
 ```
 
 For root users, the isolate binary still runs to provide namespace
@@ -1907,8 +1907,8 @@ paths and `defaultMode` for file permissions.
 +-- volumes/
     +-- cache-vol/          # emptyDir shared volume
 
-/oci/
-+-- .sdme-kube-probe               # probe binary (when probes defined)
+/usr/bin/
++-- sdme-kube-probe                 # probe binary (when probes defined)
 
 /etc/systemd/system/
 |-- sdme-oci-nginx.service
@@ -1940,7 +1940,7 @@ RootDirectory=/oci/apps/nginx/root
 MountAPIVFS=yes
 Environment=LD_PRELOAD=/usr/lib/sdme-devfd-shim.so
 EnvironmentFile=-/oci/apps/nginx/env
-ExecStart=/.sdme-isolate 0 0 / /docker-entrypoint.sh nginx -g 'daemon off;'
+ExecStart=/usr/sbin/sdme-isolate 0 0 / /docker-entrypoint.sh nginx -g 'daemon off;'
 Restart=always
 CapabilityBoundingSet=CAP_AUDIT_WRITE CAP_CHOWN CAP_DAC_OVERRIDE ...
 NoNewPrivileges=yes
@@ -1986,7 +1986,7 @@ Read-only mounts get an additional `remount,ro,bind` line.
 ### Probes
 
 Startup, liveness, and readiness probes are implemented via an embedded
-`sdme-kube-probe` binary deployed at `/oci/.sdme-kube-probe` inside the
+`sdme-kube-probe` binary deployed at `/usr/bin/sdme-kube-probe` inside the
 container rootfs. The binary is automatically built by `build.rs` and
 embedded into sdme via `include_bytes!()` at compile time.
 
@@ -2028,7 +2028,7 @@ via counter files in `/run/`.
 
 ```
 sdme-probe-liveness-nginx.timer     # fires periodically
-sdme-probe-liveness-nginx.service   # runs /oci/.sdme-kube-probe
+sdme-probe-liveness-nginx.service   # runs /usr/bin/sdme-kube-probe
 ```
 
 The timer binds to the main service (`BindsTo=sdme-oci-nginx.service`)

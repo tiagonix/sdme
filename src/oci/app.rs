@@ -385,9 +385,9 @@ pub(crate) struct OciAppSetup<'a> {
 /// | Env file | `/oci/apps/{name}/env` |
 /// | Ports file | `/oci/apps/{name}/ports` |
 /// | Volumes file | `/oci/apps/{name}/volumes` |
-/// | Isolate binary | `/oci/apps/{name}/isolate` (static ELF for PID/IPC ns) |
+/// | Isolate binary | `/oci/apps/{name}/root/usr/sbin/sdme-isolate` (PID/IPC ns) |
 /// | devfd shim | `/oci/apps/{name}/root/usr/lib/sdme-devfd-shim.so` (LD_PRELOAD) |
-/// | Probe binary | `/oci/.sdme-kube-probe` (kube pods only) |
+/// | Probe binary | `/usr/bin/sdme-kube-probe` (kube pods only) |
 /// | Probe units | `/etc/systemd/system/sdme-probe-*-{name}.*` (kube pods) |
 /// | Volume mount svc | `/etc/systemd/system/sdme-kube-volumes.service` (kube) |
 ///
@@ -441,14 +441,17 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
         eprintln!("wrote devfd shim: {}", shim_path.display());
     }
 
-    // 3. Resolve user, deploy .sdme-isolate binary.
+    // 3. Resolve user, deploy isolate binary.
     // Always use isolate for all OCI apps (root and non-root). The isolate
     // binary creates PID/IPC namespaces, remounts /proc, drops CAP_SYS_ADMIN,
     // and optionally drops privileges; strictly more correct and secure than
     // running without namespace isolation.
     let resolved_user = resolve_oci_user(opts.app_root, opts.user)?;
     let elf_bytes = crate::isolate::generate(arch);
-    let isolate_path = opts.app_root.join(".sdme-isolate");
+    let isolate_dir = opts.app_root.join("usr/sbin");
+    fs::create_dir_all(&isolate_dir)
+        .with_context(|| format!("failed to create {}", isolate_dir.display()))?;
+    let isolate_path = isolate_dir.join("sdme-isolate");
     fs::write(&isolate_path, &elf_bytes)
         .with_context(|| format!("failed to write {}", isolate_path.display()))?;
     fs::set_permissions(&isolate_path, fs::Permissions::from_mode(0o111))
@@ -515,7 +518,7 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
         .map(|sig| format!("KillSignal={sig}\n"))
         .unwrap_or_default();
 
-    // Always use .sdme-isolate for all users (root and non-root).
+    // Always use isolate for all users (root and non-root).
     // The isolate binary handles PID/IPC namespace creation, /proc remount,
     // CAP_SYS_ADMIN drop, and optional privilege dropping.
     let (uid, gid) = if let Some(ref ru) = resolved_user {
@@ -544,7 +547,7 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
     };
 
     let isolate_exec = format!(
-        "/.sdme-isolate {} {} {} {}",
+        "/usr/sbin/sdme-isolate {} {} {} {}",
         uid, gid, opts.working_dir, exec_start
     );
     let service_section = format!(
@@ -687,7 +690,7 @@ WantedBy=multi-user.target
 
 /// Generate systemd timer + service unit pairs for probes.
 ///
-/// All probes use timer + service pairs that invoke `/oci/.sdme-kube-probe`.
+/// All probes use timer + service pairs that invoke `/usr/bin/sdme-kube-probe`.
 /// No shell scripts are generated. Returns `(path_relative_to_staging, content)`.
 /// `unit_rel` is the relative path to the systemd unit directory (e.g.
 /// `etc/systemd/system` or `etc/systemd/system.control` on NixOS).
@@ -782,7 +785,7 @@ Description=Startup probe for {name}
 
 [Service]
 Type=oneshot
-ExecStart=/oci/.sdme-kube-probe run --type startup --name {name} \
+ExecStart=/usr/bin/sdme-kube-probe run --type startup --name {name} \
   --threshold {threshold} --success-threshold {success_threshold} --service {service_name} \
   {check_args}
 ",
@@ -840,7 +843,7 @@ Description=Liveness probe for {name}
 {condition}
 [Service]
 Type=oneshot
-ExecStart=/oci/.sdme-kube-probe run --type liveness --name {name} \
+ExecStart=/usr/bin/sdme-kube-probe run --type liveness --name {name} \
   --threshold {threshold} --success-threshold {success_threshold} --service {service_name} \
   {check_args}
 ",
@@ -896,7 +899,7 @@ Description=Readiness probe for {name}
 {condition}
 [Service]
 Type=oneshot
-ExecStart=/oci/.sdme-kube-probe run --type readiness --name {name} \
+ExecStart=/usr/bin/sdme-kube-probe run --type readiness --name {name} \
   --threshold {threshold} --success-threshold {success_threshold} --service {service_name} \
   {check_args}
 ",
