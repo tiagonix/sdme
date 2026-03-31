@@ -77,6 +77,10 @@ Once the container is created and you land on a shell, pull a model:
 ollama pull glm-4.7-flash
 ```
 
+Exit the shell to return to the host. The Ollama container keeps
+running in the background. Next, we'll build an AI agent that
+connects to it.
+
 ## Example: multi-stage build with COPY fs
 
 Build configs support copying files from one rootfs into another
