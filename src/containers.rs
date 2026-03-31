@@ -1093,8 +1093,17 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             problems.push("missing fs");
         }
 
+        // Query systemd ActiveState before health and status.
+        let active_state = if container_dir.exists() {
+            systemd::unit_active_state(name)
+        } else {
+            None
+        };
+
         let health = if !problems.is_empty() {
             problems.join(", ")
+        } else if active_state.as_deref() == Some("failed") {
+            "failed".to_string()
         } else if let Ok(ref s) = state {
             // For kube containers with readiness probes, check the probe-ready
             // file in the container's overlayfs to report ready/not-ready.
@@ -1132,14 +1141,11 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             }
         };
 
-        // Status (running/stopped).
-        let status = if container_dir.exists() {
-            match systemd::is_active(name) {
-                Ok(true) => "running",
-                _ => "stopped",
-            }
-        } else {
-            "stopped"
+        let status = match active_state.as_deref() {
+            Some("active") => "running",
+            Some("activating") => "starting",
+            Some("deactivating") => "stopping",
+            _ => "stopped",
         };
 
         // IP addresses (only for running containers with a network interface).

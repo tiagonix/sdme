@@ -770,7 +770,10 @@ and `sdme new`.
 default; append `:ro` for read-only. Both paths must be absolute with
 no `..` components, and the host path must exist at creation time. At
 start time, each bind becomes a `--bind=` or `--bind-ro=` argument to
-systemd-nspawn.
+systemd-nspawn. When `--userns` is active, directory bind mounts get
+the `:idmap` suffix for transparent UID/GID mapping. Device node bind
+mounts are excluded from idmapping because the kernel does not support
+idmapped mounts on device files.
 
 **Environment variables** use the format `KEY=VALUE`. Keys must be
 alphanumeric or underscore (no leading digit). At start time, each

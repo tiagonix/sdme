@@ -44,9 +44,10 @@ impl BindConfig {
     /// systemd unit file's `ExecStart` line. Each element is one nspawn flag.
     /// When `userns` is true, appends `:idmap` so that UID/GID mappings are
     /// applied to the bind mount (requires systemd >= 255 and kernel >= 5.12).
+    /// Device nodes are excluded from idmapping because the kernel does not
+    /// support idmapped mounts on device files.
     pub fn to_nspawn_args(&self, userns: bool) -> Vec<String> {
         let mut args = Vec::new();
-        let opts = if userns { ":idmap" } else { "" };
 
         for bind in &self.binds {
             // Parse "host:container:mode".
@@ -59,6 +60,15 @@ impl BindConfig {
             let host = parts[0];
             let container = parts[1];
             let mode = parts[2];
+
+            // Append :idmap for user namespace UID/GID mapping, but not for
+            // device nodes — the kernel does not support idmapped mounts on
+            // device files and systemd-nspawn will fail with EINVAL.
+            let opts = if userns && !is_device_node(host) {
+                ":idmap"
+            } else {
+                ""
+            };
 
             if mode == "ro" {
                 args.push(format!("--bind-ro={host}:{container}{opts}"));
@@ -122,6 +132,18 @@ fn parse_bind_arg(arg: &str) -> Result<String> {
     }
 
     Ok(format!("{host}:{container}:{mode}"))
+}
+
+/// Check whether a path refers to a device node (block or character device).
+fn is_device_node(path: &str) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    match std::fs::metadata(path) {
+        Ok(m) => {
+            let ft = m.file_type();
+            ft.is_block_device() || ft.is_char_device()
+        }
+        Err(_) => false,
+    }
 }
 
 /// Validate a single bind mount specification (internal format).

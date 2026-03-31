@@ -1500,24 +1500,45 @@ fn for_each_container(
 /// Start a container and wait for it to boot.
 ///
 /// On boot failure (or Ctrl+C), resets the interrupt flag and stops the
-/// container so it doesn't linger in a half-booted state. Used by `start`
-/// and `join --start`.
+/// container so it doesn't linger in a half-booted state. If the container
+/// is still running at timeout (e.g. slow first-boot userns chown), it is
+/// left running and the user is told how to check or increase the timeout.
 fn start_and_await_boot(
     datadir: &std::path::Path,
     name: &str,
     tasks_max: u32,
     boot_timeout: std::time::Duration,
-    config_boot_timeout: u64,
+    stop_timeout: u64,
     verbose: bool,
 ) -> Result<()> {
     // Hold shared lock to prevent `sdme rm` during start+boot window.
     let _lock = lock::lock_shared(datadir, "containers", name)
         .with_context(|| format!("cannot lock container '{name}' for starting"))?;
-    systemd::start(datadir, name, tasks_max, config_boot_timeout, verbose)?;
+    systemd::start(datadir, name, tasks_max, boot_timeout.as_secs(), verbose)?;
     if let Err(e) = systemd::await_boot(name, boot_timeout, verbose) {
+        // Check whether the container is still alive (active or still
+        // activating). If it is, the boot didn't fail — sdme just timed
+        // out waiting for the readiness signal (e.g. slow first-boot
+        // userns chown). Don't kill it.
+        let still_alive = matches!(
+            systemd::unit_active_state(name).as_deref(),
+            Some("active" | "activating")
+        );
+        if still_alive {
+            eprintln!(
+                "container '{name}' is still starting but sdme timed out \
+                 waiting for boot readiness ({}s)",
+                boot_timeout.as_secs()
+            );
+            eprintln!(
+                "hint: check logs with 'sdme logs {name}', or try \
+                 'sdme stop {name}' then 'sdme start -t <seconds> {name}'"
+            );
+            return Err(e);
+        }
         let _guard = sdme::InterruptGuard::save_and_reset();
         eprintln!("boot failed, stopping '{name}'");
-        let _ = containers::stop(name, containers::StopMode::Terminate, 30, verbose);
+        let _ = containers::stop(name, containers::StopMode::Terminate, stop_timeout, verbose);
         return Err(e);
     }
     Ok(())
@@ -2537,7 +2558,6 @@ fn run() -> Result<()> {
             let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
             let datadir = &cfg.datadir;
             let verbose = cli.verbose;
-            let config_boot_timeout = cfg.boot_timeout;
             for_each_container(datadir, &targets, "starting", "started", |name| {
                 containers::ensure_exists(datadir, name)?;
                 start_and_await_boot(
@@ -2545,7 +2565,7 @@ fn run() -> Result<()> {
                     name,
                     cfg.tasks_max,
                     boot_timeout,
-                    config_boot_timeout,
+                    cfg.stop_timeout_terminate,
                     verbose,
                 )
             })?;
@@ -2599,7 +2619,7 @@ fn run() -> Result<()> {
                     &name,
                     cfg.tasks_max,
                     boot_timeout,
-                    cfg.boot_timeout,
+                    cfg.stop_timeout_terminate,
                     cli.verbose,
                 )?;
             }
@@ -2773,31 +2793,15 @@ fn run() -> Result<()> {
             }
 
             eprintln!("starting '{name}'");
-            let boot_result = (|| -> Result<()> {
-                systemd::start(
-                    &cfg.datadir,
-                    &name,
-                    cfg.tasks_max,
-                    cfg.boot_timeout,
-                    cli.verbose,
-                )?;
-                let boot_timeout =
-                    std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-                systemd::await_boot(&name, boot_timeout, cli.verbose)?;
-                Ok(())
-            })();
-
-            if let Err(e) = boot_result {
-                let _guard = sdme::InterruptGuard::save_and_reset();
-                eprintln!("boot failed, stopping '{name}'");
-                let _ = containers::stop(
-                    &name,
-                    containers::StopMode::Terminate,
-                    cfg.stop_timeout_terminate,
-                    cli.verbose,
-                );
-                return Err(e);
-            }
+            let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
+            start_and_await_boot(
+                &cfg.datadir,
+                &name,
+                cfg.tasks_max,
+                boot_timeout,
+                cfg.stop_timeout_terminate,
+                cli.verbose,
+            )?;
 
             eprintln!("joining '{name}'");
             let status = containers::join(
@@ -2978,7 +2982,7 @@ fn run() -> Result<()> {
             let targets: Vec<String> = if all {
                 containers::list(&cfg.datadir)?
                     .into_iter()
-                    .filter(|e| e.status == "running")
+                    .filter(|e| e.status != "stopped")
                     .map(|e| e.name)
                     .collect()
             } else {
@@ -3093,30 +3097,16 @@ fn run() -> Result<()> {
                     },
                 )?;
                 eprintln!("starting '{name}'");
-                let boot_result = (|| -> Result<()> {
-                    systemd::start(
-                        &cfg.datadir,
-                        &name,
-                        cfg.tasks_max,
-                        cfg.boot_timeout,
-                        cli.verbose,
-                    )?;
-                    let boot_timeout =
-                        std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-                    systemd::await_boot(&name, boot_timeout, cli.verbose)?;
-                    Ok(())
-                })();
-                if let Err(e) = boot_result {
-                    let _guard = sdme::InterruptGuard::save_and_reset();
-                    eprintln!("boot failed, stopping '{name}'");
-                    let _ = containers::stop(
-                        &name,
-                        containers::StopMode::Terminate,
-                        cfg.stop_timeout_terminate,
-                        cli.verbose,
-                    );
-                    return Err(e);
-                }
+                let boot_timeout =
+                    std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
+                start_and_await_boot(
+                    &cfg.datadir,
+                    &name,
+                    cfg.tasks_max,
+                    boot_timeout,
+                    cfg.stop_timeout_terminate,
+                    cli.verbose,
+                )?;
                 eprintln!("joining '{name}'");
                 let status =
                     containers::join(&cfg.datadir, &name, &[], cfg.join_as_sudo_user, cli.verbose)?;

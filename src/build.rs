@@ -593,7 +593,7 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
     let final_dir = fs_dir.join(name);
     if final_dir.exists() {
         if !opts.force {
-            bail!("fs already exists: {name}");
+            bail!("fs already exists: {name}\nhint: use 'sdme fs build -f' to overwrite or 'sdme fs rm {name}' to remove it first");
         }
         eprintln!("removing existing fs '{name}'");
         rootfs::remove(datadir, name, opts.auto_gc, verbose)?;

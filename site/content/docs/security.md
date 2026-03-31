@@ -362,9 +362,12 @@ container root maps to a high UID, so files are owned by that UID on the
 host (or stay UID 0 on disk with idmapped mounts on kernel 6.6+).
 
 Custom bind mounts (`-b`/`--bind`) expose host directories directly into
-the container. A read-write bind mount gives container root full access to
-those host files. Use `:ro` for read-only mounts when the container does
-not need write access.
+the container. With `--userns`, directory bind mounts use idmapped mounts
+so UID/GID mappings are applied transparently. Device node bind mounts
+(e.g. `/dev/nvidia0`) are excluded from idmapping because the kernel does
+not support idmapped mounts on device files. A read-write bind mount gives
+container root full access to those host files. Use `:ro` for read-only
+mounts when the container does not need write access.
 
 ### Network surface
 

@@ -110,6 +110,15 @@ mod dbus {
         Ok(state == "active")
     }
 
+    /// Return the ActiveState string for a systemd unit via a new connection.
+    ///
+    /// Public wrapper around the private `get_unit_active_state` used
+    /// internally by `wait_for_shutdown`.
+    pub fn pub_get_unit_active_state(unit: &str) -> Option<String> {
+        let conn = connect().ok()?;
+        get_unit_active_state(&conn, unit)
+    }
+
     pub fn get_systemd_version() -> Result<String> {
         let conn = connect()?;
         let proxy = systemd_manager(&conn)?;
@@ -783,6 +792,14 @@ pub fn is_active(name: &str) -> Result<bool> {
     }
 }
 
+/// Return the ActiveState of a container's systemd unit.
+///
+/// Returns `None` if the unit does not exist. Possible values include
+/// `"active"`, `"activating"`, `"deactivating"`, `"inactive"`, `"failed"`.
+pub fn unit_active_state(name: &str) -> Option<String> {
+    dbus::pub_get_unit_active_state(&service_name(name))
+}
+
 /// Enable a container to auto-start on boot.
 pub fn enable(
     datadir: &Path,
@@ -1116,8 +1133,16 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     }
 
     // Security: userns, capabilities, seccomp, no-new-privileges, read-only.
+    // Pass systemd version so userns can pick map (>= 256) vs auto.
+    let sd_version = crate::system_check::parse_systemd_version(&systemd_version()?).unwrap_or(0);
     let security = SecurityConfig::from_state(&state);
-    nspawn_args.extend(security.to_nspawn_args());
+    nspawn_args.extend(security.to_nspawn_args(sd_version));
+    if security.userns && sd_version < 256 && verbose {
+        eprintln!(
+            "note: systemd >= 256 supports --private-users-ownership=map \
+             (no first-boot chown); current version is {sd_version}"
+        );
+    }
 
     // Pod: entire container runs in the pod's network namespace.
     let pod = state.get("POD").filter(|s| !s.is_empty()).map(String::from);

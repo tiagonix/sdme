@@ -10,7 +10,10 @@ use anyhow::{bail, Result};
 
 use crate::systemd;
 
-fn parse_systemd_version(version: &str) -> Result<u32> {
+/// Parse the major version number from a systemd version string.
+///
+/// Extracts leading digits: `"255-1ubuntu1"` returns `255`.
+pub fn parse_systemd_version(version: &str) -> Result<u32> {
     let digits: String = version.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
         bail!("cannot parse systemd version: {version:?}");

@@ -148,14 +148,23 @@ impl SecurityConfig {
 
     /// Generate systemd-nspawn arguments for security options.
     ///
+    /// `systemd_version` controls which `--private-users-ownership` mode
+    /// is used: systemd >= 256 supports `map` (idmapped rootfs mount,
+    /// zero-overhead), older versions fall back to `auto` (recursive
+    /// chown on first boot).
+    ///
     /// Does NOT include AppArmor: that goes into the systemd unit drop-in
     /// as `AppArmorProfile=`, not as an nspawn flag.
-    pub fn to_nspawn_args(&self) -> Vec<String> {
+    pub fn to_nspawn_args(&self, systemd_version: u32) -> Vec<String> {
         let mut args = Vec::new();
 
         if self.userns {
             args.push("--private-users=pick".to_string());
-            args.push("--private-users-ownership=auto".to_string());
+            if systemd_version >= 256 {
+                args.push("--private-users-ownership=map".to_string());
+            } else {
+                args.push("--private-users-ownership=auto".to_string());
+            }
         }
 
         for cap in &self.drop_caps {
@@ -514,7 +523,7 @@ mod tests {
     fn test_default_is_empty() {
         let sec = SecurityConfig::default();
         assert!(sec.is_empty());
-        assert!(sec.to_nspawn_args().is_empty());
+        assert!(sec.to_nspawn_args(255).is_empty());
     }
 
     #[test]
@@ -593,7 +602,8 @@ mod tests {
             system_call_filter: vec!["@system-service".to_string(), "~@mount".to_string()],
             apparmor_profile: Some("sdme-container".to_string()),
         };
-        let args = sec.to_nspawn_args();
+        // systemd < 256: uses --private-users-ownership=auto
+        let args = sec.to_nspawn_args(255);
         assert_eq!(
             args,
             vec![
@@ -608,6 +618,10 @@ mod tests {
                 "--system-call-filter=~@mount",
             ]
         );
+        // systemd >= 256: uses --private-users-ownership=map
+        let args = sec.to_nspawn_args(256);
+        assert!(args.contains(&"--private-users-ownership=map".to_string()));
+        assert!(!args.contains(&"--private-users-ownership=auto".to_string()));
         // AppArmor should NOT be in nspawn args.
         assert!(!args.iter().any(|a| a.contains("apparmor")));
     }
