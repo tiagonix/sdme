@@ -74,7 +74,7 @@ mounts instead of chown, eliminating the first-boot delay entirely.
 Once the container is created and you land on a shell, pull a model:
 
 ```sh
-ollama pull qwen3.5:27b-q4_K_M
+ollama pull glm-4.7-flash
 ```
 
 ## Example: multi-stage build with COPY fs
