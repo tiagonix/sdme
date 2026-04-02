@@ -238,8 +238,9 @@ List all containers with status, health, and configuration summary.
 
 The text table shows fixed columns: NAME, STATUS, HEALTH, USERNS,
 ENABLED, MOUNTS, ADDRESSES, and OS. For full details (bind mount specs,
-OCI volumes, submounts, kube container names, pod membership, rootfs),
-use --json or --json-pretty.
+OCI apps with env/ports/volumes, network config, resource limits,
+submounts, kube metadata, pod membership, rootfs), use --json or
+--json-pretty.
 
 The default output format can be set with:
     sdme config set default_output_format json
@@ -2856,8 +2857,9 @@ fn run() -> Result<()> {
                 );
                 // Rows.
                 for (i, e) in entries.iter().enumerate() {
-                    let has_mounts =
-                        !e.binds.is_empty() || !e.oci_volumes.is_empty() || !e.submounts.is_empty();
+                    let has_mounts = !e.binds.is_empty()
+                        || e.oci_apps.iter().any(|app| !app.volumes.is_empty())
+                        || !e.submounts.is_empty();
                     println!(
                         "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {:<addr_w$}  {}",
                         e.name,

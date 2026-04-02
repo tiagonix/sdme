@@ -435,7 +435,7 @@ impl State {
 ///
 /// Each field is `None` when the limit is not set. Values are stored in the
 /// container's state file and converted to a systemd drop-in at start time.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
 pub struct ResourceLimits {
     /// `MemoryMax=`, e.g. "512M", "2G"
     pub memory: Option<String>,

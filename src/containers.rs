@@ -978,6 +978,15 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+/// Kube-specific metadata for a container created via `sdme kube create`.
+#[derive(serde::Serialize)]
+pub struct KubeInfo {
+    /// SHA-256 hash of the YAML used to create the pod.
+    pub yaml_hash: String,
+    /// Whether any container has liveness/readiness/startup probes.
+    pub has_probes: bool,
+}
+
 /// Status information for a single container, as shown by `sdme ps`.
 #[derive(serde::Serialize)]
 pub struct ContainerInfo {
@@ -1001,14 +1010,18 @@ pub struct ContainerInfo {
     pub enabled: bool,
     /// Bind mount specs from the state file.
     pub binds: Vec<String>,
-    /// OCI image volume paths (container-side).
-    pub oci_volumes: Vec<String>,
+    /// OCI apps detected from `/oci/apps/` in the container's rootfs.
+    pub oci_apps: Vec<crate::oci::rootfs::OciAppInfo>,
     /// Per-submount overlayfs paths (relative, e.g. "home", "opt").
     ///
     /// Detected from the container's submounts directory on disk.
     pub submounts: Vec<String>,
-    /// Kube container names, if this is a kube container.
-    pub kube: Vec<String>,
+    /// Network configuration from the state file.
+    pub network: NetworkConfig,
+    /// Resource limits (CPU, memory) from the state file.
+    pub limits: ResourceLimits,
+    /// Kube metadata, or null for non-kube containers.
+    pub kube: Option<KubeInfo>,
     /// IP addresses assigned to the container's network interface.
     ///
     /// Empty when the container is stopped, uses host networking, or
@@ -1101,38 +1114,44 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         let state = State::read_from(&state_path);
 
         // Extract all state-dependent fields at once.
-        let (rootfs_name, pod, oci_pod, userns, enabled, binds, oci_volumes, kube) = match &state {
-            Ok(s) => {
-                let kube = if s.is_yes("KUBE") {
-                    s.get_list("KUBE_CONTAINERS", ',')
-                } else {
-                    Vec::new()
-                };
-                (
-                    s.rootfs().to_string(),
-                    s.get("POD").unwrap_or("").to_string(),
-                    s.get("OCI_POD").unwrap_or("").to_string(),
-                    s.is_yes("USERNS"),
-                    s.is_yes("ENABLED"),
-                    s.get_list("BINDS", '|'),
-                    s.get_list("OCI_VOLUMES", ','),
-                    kube,
-                )
-            }
-            Err(_) => {
-                problems.push("unreadable state file");
-                (
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    false,
-                    false,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )
-            }
-        };
+        let (rootfs_name, pod, oci_pod, userns, enabled, binds, network, limits, kube) =
+            match &state {
+                Ok(s) => {
+                    let kube = if s.is_yes("KUBE") {
+                        Some(KubeInfo {
+                            yaml_hash: s.get("KUBE_YAML_HASH").unwrap_or("").to_string(),
+                            has_probes: s.is_yes("HAS_PROBES"),
+                        })
+                    } else {
+                        None
+                    };
+                    (
+                        s.rootfs().to_string(),
+                        s.get("POD").unwrap_or("").to_string(),
+                        s.get("OCI_POD").unwrap_or("").to_string(),
+                        s.is_yes("USERNS"),
+                        s.is_yes("ENABLED"),
+                        s.get_list("BINDS", '|'),
+                        NetworkConfig::from_state(s),
+                        ResourceLimits::from_state(s),
+                        kube,
+                    )
+                }
+                Err(_) => {
+                    problems.push("unreadable state file");
+                    (
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        false,
+                        false,
+                        Vec::new(),
+                        NetworkConfig::default(),
+                        ResourceLimits::default(),
+                        None,
+                    )
+                }
+            };
 
         if !rootfs_name.is_empty() && !datadir.join("fs").join(&rootfs_name).exists() {
             problems.push("missing fs");
@@ -1209,6 +1228,23 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             Vec::new()
         };
 
+        // Detect OCI apps from the container's rootfs overlay.
+        // Try merged (running), then upper (stopped, modified), then base rootfs.
+        let oci_apps = {
+            let merged = container_dir.join("merged");
+            let upper = container_dir.join("upper");
+            let candidates: Vec<std::path::PathBuf> = if !rootfs_name.is_empty() {
+                vec![merged, upper, datadir.join("fs").join(&rootfs_name)]
+            } else {
+                vec![merged, upper]
+            };
+            candidates
+                .iter()
+                .map(|p| crate::oci::rootfs::read_all_oci_apps(p))
+                .find(|apps| !apps.is_empty())
+                .unwrap_or_default()
+        };
+
         // Detect per-submount overlays from the container directory.
         let submounts = {
             let sub_dir = container_dir.join("submounts");
@@ -1244,8 +1280,10 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             userns,
             enabled,
             binds,
-            oci_volumes,
+            oci_apps,
             submounts,
+            network,
+            limits,
             kube,
             addresses,
         });

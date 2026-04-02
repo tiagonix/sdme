@@ -13,7 +13,7 @@ use crate::State;
 /// Controls network namespace isolation and connectivity options.
 /// Stored in the container's state file and converted to systemd-nspawn
 /// flags at start time.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
 pub struct NetworkConfig {
     /// Use private network namespace (--private-network)
     pub private_network: bool,
