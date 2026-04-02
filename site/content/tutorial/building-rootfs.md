@@ -72,8 +72,9 @@ The `-t 180` increases the boot timeout to 180 seconds. This is
 needed because `--hardened` enables user namespace isolation, which
 causes systemd-nspawn to recursively chown the entire rootfs on
 first boot to remap UIDs. Subsequent boots are fast since the
-ownership is already set. On systemd 256+, sdme uses idmapped rootfs
-mounts instead of chown, eliminating the first-boot delay entirely.
+ownership is already set. When the kernel and filesystem support
+idmapped mounts, nspawn uses those instead of chown, eliminating
+the first-boot delay entirely.
 
 Once the container is created and you land on a shell, pull a model:
 
