@@ -11,12 +11,13 @@ Each item is a self-contained session: split one file, run tests, commit.
   - `validate.rs` — validation and plan building (736 lines)
   - `tests.rs` — all tests (2,958 lines)
 
-- [ ] **P2: `export.rs` (3,224 lines) → `export/`**
-  - `mod.rs` — format detection, export dispatcher, shared helpers
-  - `dir.rs` — directory export
-  - `tar.rs` — tarball export
-  - `raw.rs` — raw-bare and raw-gpt disk image export
-  - `vm.rs` — VM rootfs preparation (cloud-init, hostname, SSH, resize)
+- [x] **P2: `export.rs` (3,224 lines) → `export/`**
+  - `mod.rs` — types, dispatch, shared helpers (467 lines)
+  - `dir.rs` — directory export (25 lines)
+  - `tar.rs` — tarball export (207 lines)
+  - `raw.rs` — raw disk image export (461 lines)
+  - `vm.rs` — VM rootfs preparation (808 lines)
+  - `tests.rs` — all tests (1,310 lines)
 
 - [ ] **P3: `containers.rs` (2,402 lines) → `containers/`**
   - `mod.rs` — re-exports, CreateOptions, create flow
