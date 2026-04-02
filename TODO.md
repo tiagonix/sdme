@@ -27,10 +27,9 @@ Each item is a self-contained session: split one file, run tests, commit.
   - `manage.rs` — stop, remove, set_limits (170 lines)
   - `tests.rs` — all tests (788 lines)
 
-- [ ] **P4: `main.rs` (3,710 lines) — extract `src/cli.rs`**
-  - Move helper functions out: parse_network, parse_security, parse_mounts,
-    auto_wire_oci_ports, validate_oci_pod, resolve_oci_app_name,
-    for_each_container, start_and_await_boot
+- [x] **P4: `main.rs` (3,710 lines) — extract `src/cli.rs`**
+  - `cli.rs` — 3 Args structs + 21 helper functions (753 lines)
+  - `main.rs` reduced to 2,981 lines (clap defs, help text, dispatch)
 
 - [ ] **P5: `systemd.rs` (1,669 lines) → `systemd/`**
   - `mod.rs` — re-exports, unit state queries
