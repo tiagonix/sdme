@@ -5,8 +5,7 @@
 /// is used to avoid lock contention with the outer cargo process.
 ///
 /// Override the probe binary path with the `SDME_KUBE_PROBE_PATH` env var
-/// (e.g. for cross-compiled CI builds). Set `SDME_SKIP_PROBE_BUILD=1` to
-/// skip the automatic build and fall back to discovery or an empty placeholder.
+/// (e.g. for cross-compiled CI builds).
 ///
 /// During `cargo test`, the probe build is skipped by default since it is
 /// only needed at runtime. Set `SDME_BUILD_PROBE=1` to force building
@@ -48,10 +47,8 @@ fn main() {
         return;
     }
 
-    // Build the probe binary ourselves, unless explicitly skipped.
-    if std::env::var("SDME_SKIP_PROBE_BUILD").unwrap_or_default() != "1"
-        && try_build_probe(&probe_dst)
-    {
+    // Build the probe binary ourselves.
+    if try_build_probe(&probe_dst) {
         return;
     }
 

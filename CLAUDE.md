@@ -1,12 +1,10 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides contribution guidelines for Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What This Project Is
 
-sdme boots systemd-nspawn containers using overlayfs copy-on-write layers, with OCI registry integration and Kubernetes Pod YAML support for local development and testing. It produces a single binary `sdme` that manages containers from explicit root filesystems, keeping the base rootfs untouched.
-
-Runs on Linux with systemd. Requires root for all operations. Uses kernel overlayfs for copy-on-write storage. By default, containers are overlayfs clones of `/`. Also supports importing rootfs from other distros (Ubuntu, Debian, Fedora, NixOS). Imported rootfs needs systemd and dbus.
+sdme boots systemd-nspawn containers using overlayfs copy-on-write layers, with OCI registry integration and Kubernetes Pod YAML support. Single binary, runs on Linux with systemd, requires root. Default containers are overlayfs clones of `/`. Also supports importing rootfs from other distros that have systemd and dbus.
 
 ## Build & Test
 
@@ -21,128 +19,72 @@ make pkg                    # build .pkg.tar.zst package (Arch Linux)
 sudo make install           # install to /usr/local (does NOT rebuild)
 ```
 
-The probe binary (`sdme-kube-probe`) is automatically built and embedded into sdme
-by the `build.rs` script. A single `cargo build --release` handles everything.
-The inner probe build uses a separate target directory (`target/probe-build/`) to
-avoid cargo lock contention. Override with `SDME_KUBE_PROBE_PATH` env var or skip
-with `SDME_SKIP_PROBE_BUILD=1` (probe-less build). During `cargo test`, the probe
-build is skipped by default; set `SDME_BUILD_PROBE=1` to force it.
+The probe binary (`sdme-kube-probe`) is built and embedded by `build.rs`. Override with `SDME_KUBE_PROBE_PATH` for cross-compilation. During `cargo test`, the probe build is skipped by default; set `SDME_BUILD_PROBE=1` to force it.
+
+### E2E Tests
+
+Staged parallel test suite in `test/scripts/`. Run with `sudo ./test/scripts/run-parallel.sh`. Covers core operations, distro boot/OCI, networking, security, pods, and Kubernetes L1-L6. Tested distros: Debian, Ubuntu, Fedora, CentOS, AlmaLinux, Arch Linux, openSUSE, NixOS. E2E tests must pass before version bumps. When adding new functionality, add E2E tests and verify they pass across supported distros.
 
 ### Release
 
-Static musl binaries (x86_64 + aarch64) are built with `cargo-zigbuild`. Locally:
+Static musl binaries (x86_64 + aarch64) built with `cargo-zigbuild`: `./dist/build-release.sh`. Pushing a `v*` tag triggers `.github/workflows/release.yml`.
 
-```bash
-./dist/build-release.sh            # build all targets to target/dist/
-./dist/build-release.sh -v <target> # build one target, verbose
-```
+## Project Principles
 
-CI: pushing a `v*` tag triggers `.github/workflows/release.yml`, which runs tests, cross-compiles both targets, generates SHA256SUMS, and creates a GitHub release with all artifacts.
+### Security
 
-## Architecture
+- sdme runs as root and handles untrusted input. Validate all names (`validate_name` in `src/lib.rs`), paths (`sanitize_dest_path` in `src/copy.rs`), and OCI digests (`resolve_blob` in `src/oci/layout.rs`).
+- No path traversal: reject `..` components, enforce absolute paths within rootfs boundaries.
+- Cap download sizes (`max_download_size` in `src/config.rs`), enforced in `src/oci/registry.rs` and `src/import/mod.rs`.
+- Never validate rootfs data against host system state. The container rootfs is untrusted and foreign; do not assume it matches the host.
 
-The project is a single Rust binary (`src/main.rs`) backed by a shared library (`src/lib.rs`). CLI parsing uses clap with derive.
+### Reliability
 
-For core concepts and design decisions (overlayfs layering, systemd integration, DNS resolution, networking, pods, OCI, security hardening, reliability), see `site/content/docs/architecture.md`.
+- Cooperative locking with `flock(2)`. Shared locks for reads, exclusive for mutations. See `src/lock.rs`.
+- Lock ordering to prevent deadlocks: fs, containers, pods, secrets, configmaps.
+- Transactional file operations: stage in `.{name}.{kind}-txn-{pid}` directories, atomic rename on commit. See `src/txn.rs`.
+- Interrupt handling: `check_interrupted()` at loop top, `INTERRUPTED` check + break after each action, `check_interrupted()` before final error summary. Reference: `for_each_container` in `src/cli.rs`.
 
-### dist/ Directory
+### systemd Compatibility
 
-The `dist/` directory contains both checked-in packaging files and generated build outputs:
+- Use systemd APIs: D-Bus for lifecycle (`src/systemd/dbus.rs`), nspawn for container execution, machinectl/nsenter for join/exec.
+- Follow systemd conventions: `Type=notify` services, template units, drop-in files, journalctl for logs.
+- Do not fight the init system. Containers run full systemd init with journald, D-Bus, and systemctl.
 
-- `dist/deb/postinst`: Debian post-install script (checked in)
-- `dist/out/completions/`: shell completions (generated by `make dist/out/completions`, gitignored)
-- `dist/out/apparmor/`: AppArmor profile (generated in CI, gitignored)
+### OCI Compatibility
 
-### Key Modules
+- Follow the OCI Distribution Spec for registry pulling (`src/oci/registry.rs`).
+- Handle OCI whiteouts correctly: `.wh..wh..opq` and `.wh.<name>` markers during layer unpacking (`src/oci/layout.rs`).
+- Verify content digests on every blob fetch. Validate digest format before using in filesystem paths.
 
-| File | Purpose |
-|------|---------|
-| `src/main.rs` | CLI entry point (clap derive), command dispatch |
-| `src/lib.rs` | Shared types: `State` (KEY=VALUE), `validate_name`, `sudo_user`, global interrupt handler (`INTERRUPTED`, `check_interrupted`, `install_interrupt_handler` for SIGINT+SIGTERM) |
-| `src/containers.rs` | Container create/remove/join/exec/stop/list, overlayfs directory management, overlay mount/unmount helpers, DNS setup, volume directory management |
-| `src/cp.rs` | File copy between host, containers, and rootfs (`sdme cp`) |
-| `src/systemd.rs` | D-Bus helpers (start/status/stop), template unit generation (`Type=notify`), env files, boot/shutdown waiting |
-| `src/system_check.rs` | Version checks (systemd), dependency checks (`find_program`) |
-| `src/rootfs.rs` | Rootfs listing, removal, os-release parsing, distro detection |
-| `src/export.rs` | Rootfs export (dir copy, tarball creation, raw ext4/btrfs disk image) |
-| `src/import/mod.rs` | Rootfs import orchestration: source detection, URL download (with proxy support), systemd detection |
-| `src/import/dir.rs` | Directory-based rootfs import |
-| `src/import/tar.rs` | Tarball extraction with magic-byte compression detection |
-| `src/import/img.rs` | QCOW2 and raw disk image import via qemu-nbd |
-| `src/oci/mod.rs` | OCI module index, app name derivation from registry references, sorted-keys helper |
-| `src/oci/app.rs` | OCI app setup: user resolution, systemd service unit generation, isolate binary deployment |
-| `src/oci/cache.rs` | Content-addressable OCI blob cache with LRU eviction |
-| `src/oci/layout.rs` | OCI tarball detection, manifest resolution, layer unpacking with whiteout handling |
-| `src/oci/registry.rs` | OCI registry pulling via Distribution Spec (docker.io, quay.io, etc.) |
-| `src/oci/rootfs.rs` | OCI rootfs helpers: app name detection, port/volume reading from OCI metadata files |
-| `src/names.rs` | Container name generation from a Tupi-Guarani wordlist with collision avoidance |
-| `src/config.rs` | Config file loading/saving (`/etc/sdme.conf`) |
-| `src/build.rs` | Build config parsing and rootfs build execution |
-| `src/lock.rs` | Advisory file locking (`flock`) for resource protection across all mutating operations |
-| `src/txn.rs` | Enumerated transaction staging (`.{name}.{kind}-txn-{pid}`) and `sdme fs gc` helpers |
-| `src/copy.rs` | Filesystem tree copying with hard link preservation, xattr support, special file handling, path sanitization |
-| `src/mounts.rs` | Bind mount (`BindConfig`) and environment variable (`EnvConfig`) configuration |
-| `src/network.rs` | Network configuration validation and state serialization |
-| `src/security.rs` | Security hardening: `SecurityConfig` (capabilities, seccomp, no-new-privileges, read-only, AppArmor), state file roundtrip, nspawn arg generation, validation |
-| `src/kube/` | Kubernetes Pod YAML support: types, plan validation, container creation, kube delete, shared store abstraction for secrets and configmaps |
-| `src/kube/probe/` | Embedded `sdme-kube-probe` binary: CLI entry point, probe runner (failure counting/actions), exec/http/tcp/grpc check implementations |
-| `src/pod.rs` | Pod (shared network namespace) lifecycle: create, list, remove, runtime netns management |
-| `src/elf.rs` | Shared `Arch` enum and minimal ELF64 header builder for static binaries (used by isolate and devfd_shim) |
-| `src/isolate/` | Static ELF binary generation for PID/IPC namespace isolation in OCI app services |
-| `src/devfd_shim/` | LD_PRELOAD shim generation for `/dev/fd/` interception in containers |
+### Shell-out vs Code
 
-### Rust Dependencies
+- Prefer shelling out to system tools (systemd-nspawn, machinectl, nsenter, journalctl, mkfs.*) over reimplementing their functionality.
+- Write Rust code when you need programmability (overlayfs management), error handling (transaction staging), or performance (filesystem copy with hard link preservation).
+- External binaries are checked at runtime via `system_check::check_dependencies()` before use.
 
-- `clap`: CLI parsing (derive)
-- `zbus`: D-Bus communication with systemd (blocking API)
-- `libc`: syscalls for rootfs import (lchown, mknod, etc.), privilege dropping
-- `anyhow`: error handling
-- `serde`/`toml`: config file parsing
-- `tar`: archive extraction with xattr support
-- `flate2`: gzip decompression
-- `bzip2`: bzip2 decompression
-- `xz2`: xz/lzma decompression
-- `zstd`: zstd decompression
-- `serde_json`: JSON parsing (OCI image manifests)
-- `ureq`: HTTP client for URL downloads and OCI registry pulling (blocking, rustls TLS)
-- `sha2`: SHA-256 hashing (OCI digest verification)
-- `serde_yml`: YAML parsing (Kubernetes Pod manifests)
-- `tonic`: gRPC client for probe binary (optional, `probe` feature)
-- `prost`: protobuf serialization for gRPC health checks (optional, `probe` feature)
-- `tokio`: async runtime for gRPC probes (optional, `probe` feature)
-- `clap_complete`: shell completion generation (Bash, Fish, Zsh)
+## Writing Rules
 
-### External Dependencies
-
-| Program | Package | Required for |
-|---------|---------|--------------|
-| `systemd` (>= 255) | `systemd` | All commands (D-Bus communication, idmapped bind mounts) |
-| `systemd-nspawn` | `systemd-container` | Running containers |
-| `machinectl` | `systemd-container` | `sdme join`, `sdme exec`, `sdme new` |
-| `busctl` | `systemd` | Boot-wait D-Bus probe for `--userns` containers |
-| `journalctl` | `systemd` | `sdme logs` |
-| `nsenter` | `util-linux` | `sdme exec --oci`, `sdme join --oci` (namespace entry) |
-| `sfdisk` | `util-linux` | `sdme fs export --vm` (GPT partition table) |
-| `mkswap` | `util-linux` | `sdme fs export --vm --swap` (swap partition) |
-| `qemu-nbd` | `qemu-utils` | `sdme fs import` (QCOW2 images only) |
-| `mkfs.ext4` | `e2fsprogs` | `sdme fs export` (ext4 raw images, default) |
-| `mkfs.btrfs` | `btrfs-progs` | `sdme fs export` (btrfs raw images only) |
-
-Dependencies are checked at runtime before use via `system_check::check_dependencies()`, which resolves each binary in PATH and prints the resolved path with `-v`.
-
-## Documentation
-
-- **CLI reference**: `sdme --help` and each subcommand's `--help`. There is no manpage. Each command includes manpage-style reference sections (examples, environment, files, exit status, notes). The help text lives in `*_HELP` constants at the top of `src/main.rs` and is wired to clap via `after_long_help`.
-- **Architecture and design**: `site/content/docs/architecture.md`: comprehensive coverage of overlayfs, systemd integration, networking, pods, OCI, Kubernetes, security hardening, reliability, and all design decisions.
-- **Security model**: `site/content/docs/security.md`: nspawn isolation compared to Docker/Podman, OCI workload security, Kubernetes pod security.
-- **Tutorials**: `site/content/tutorial/`: getting started, networking, OCI apps, Kubernetes pods, etc.
+- **No em dashes** in comments or documentation. They hurt readability in terminals and often divert the reader's train of thought. Use commas, semicolons, parentheses, or separate sentences instead.
+- **Tables**: pure ASCII, space-aligned columns with dashed separators, target 80 columns. No pipes, no Unicode box-drawing. When a table would exceed 80 columns, keep a short summary table and expand details below with bullet points.
+- **Factual**: keep documentation strictly factual. When reporting test results or benchmarks, include analysis of what the numbers mean and whether they meet expectations.
+- **Comments**: explain "why", not "what". The code shows what; the comment explains the reasoning.
 
 ## Contributor Patterns
 
 These rules apply when adding or modifying code:
 
-- **CLI help**: when adding or changing features, update the relevant `*_HELP` constant in `src/main.rs` so `--help` stays in sync. This is the only CLI documentation.
-- **Interrupt handling in batch/loop operations**: (1) `check_interrupted()?` at loop top, (2) `INTERRUPTED` check + break after each action, (3) `check_interrupted()?` before the final error summary. See `for_each_container` in `src/main.rs` for the reference pattern.
-- **Resource locking**: shared `flock` for read/non-destructive access, exclusive for deletion/replacement. Lock ordering to prevent deadlocks: `fs -> containers -> pods -> secrets -> configmaps`. See `src/lock.rs`.
-- **Input sanitization**: sdme runs as root and handles untrusted input. Validate all paths (no `..`, absolute only), validate OCI digests for safe characters, cap download sizes. See `sanitize_dest_path()` in `src/copy.rs` and `validate_name()` in `src/lib.rs`.
-- **cp/build COPY sync**: `sdme cp` and `sdme fs build` COPY share the same copy engine and path validation (`sanitize_dest_path`, directory/file semantics). When modifying one, keep both in sync.
+- **CLI help**: update the relevant `*_HELP` constant in `src/main.rs` so `--help` stays in sync. This is the only CLI documentation.
+- **Interrupt handling**: follow the three-step pattern in `for_each_container` (`src/cli.rs`). See the Reliability principle above.
+- **Resource locking**: shared flock for reads, exclusive for mutations. Lock ordering: fs, containers, pods, secrets, configmaps. See `src/lock.rs`.
+- **Input sanitization**: validate paths (no `..`, absolute only), OCI digests for safe characters, cap download sizes. See `sanitize_dest_path()` in `src/copy.rs` and `validate_name()` in `src/lib.rs`.
+- **cp/build COPY sync**: `sdme cp` and `sdme fs build` COPY share the same copy engine and path validation. When modifying one, keep both in sync.
+- **Doc comments**: all public items need `///` doc comments. New modules need a `//!` header describing purpose and a row in the `src/lib.rs` module table.
+- **No host validation**: never validate rootfs data against host system state. The rootfs is a foreign filesystem; do not check if its users, groups, or paths exist on the host.
+
+## Documentation
+
+- **Architecture and design**: [`site/content/docs/architecture.md`](site/content/docs/architecture.md)
+- **Security model**: [`site/content/docs/security.md`](site/content/docs/security.md)
+- **CLI reference**: `sdme --help` and subcommand `--help` (`*_HELP` constants in `src/main.rs`)
+- **Tutorials**: [`site/content/tutorial/`](site/content/tutorial/) (kept in sync with E2E tests in `test/scripts/`)
