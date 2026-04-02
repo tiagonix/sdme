@@ -39,13 +39,13 @@ Each item is a self-contained session: split one file, run tests, commit.
 
 ## Function Signature Cleanups (7+ params)
 
-- [x] `oci/registry.rs` `download_layers` (8→4) → `PullContext` struct (also used by fetch_*/resolve_*)
-- [x] `import/mod.rs` `import_url` (7→5) → `ImportContext` struct (also used by download_file)
-- [x] `kube/probe/runner.rs` `handle_result` (7→2) → `ProbeContext` struct
-- [x] `build.rs` `do_copy` (7→3) → `CopyContext` struct (16 call sites simplified)
+- [x] `oci/registry.rs` `download_layers` (8 to 4) -> `PullContext` struct (also used by fetch_*/resolve_*)
+- [x] `import/mod.rs` `import_url` (7 to 5) -> `ImportContext` struct (also used by download_file)
+- [x] `kube/probe/runner.rs` `handle_result` (7 to 2) -> `ProbeContext` struct
+- [x] `build.rs` `do_copy` (7 to 3) -> `CopyContext` struct (16 call sites simplified)
 
 ## Function Signature Cleanups (5-6 params, batch by file)
 
-- [ ] `containers/exec.rs` join/exec/exec_oci/machinectl_shell → `ShellOptions` struct
-- [x] `systemd/mod.rs` enable/start (5→1) → `ServiceConfig` struct
-- [ ] `export/raw.rs` export_raw_bare/export_raw_gpt → `RawExportJob` struct
+- [x] `containers/exec.rs` join/exec/exec_oci/machinectl_shell -> `ShellOptions` struct
+- [x] `systemd/mod.rs` enable/start (5 to 1) -> `ServiceConfig` struct
+- [x] `export/raw.rs` export_raw_bare/export_raw_gpt -> `RawImageContext` struct

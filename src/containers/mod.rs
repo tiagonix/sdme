@@ -17,7 +17,7 @@ mod tests;
 
 // Re-export all public items for backwards compatibility.
 pub use create::{create, validate_opaque_dirs, CreateOptions};
-pub use exec::{exec, exec_oci, join};
+pub use exec::{exec, exec_oci, join, ShellOptions};
 pub use list::{list, ContainerInfo, KubeInfo};
 pub use manage::{remove, set_limits, stop, StopMode};
 

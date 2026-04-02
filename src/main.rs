@@ -1785,18 +1785,17 @@ fn run() -> Result<()> {
         }
         Command::Exec { name, oci, command } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
+            let shell_opts = containers::ShellOptions {
+                datadir: &cfg.datadir,
+                name: &name,
+                verbose: cli.verbose,
+            };
             let status = if let Some(ref oci_app) = oci {
                 let app_name =
                     resolve_oci_app_name(&cfg.datadir, &name, oci_app_explicit(oci_app))?;
-                containers::exec_oci(&cfg.datadir, &name, &app_name, &command, cli.verbose)?
+                containers::exec_oci(&shell_opts, &app_name, &command)?
             } else {
-                containers::exec(
-                    &cfg.datadir,
-                    &name,
-                    &command,
-                    cfg.join_as_sudo_user,
-                    cli.verbose,
-                )?
+                containers::exec(&shell_opts, &command, cfg.join_as_sudo_user)?
             };
             std::process::exit(status.code().unwrap_or(1));
         }
@@ -1913,19 +1912,22 @@ fn run() -> Result<()> {
                     command
                 };
                 eprintln!("joining '{name}' (oci app '{app_name}')");
-                let status =
-                    containers::exec_oci(&cfg.datadir, &name, &app_name, &command, cli.verbose)?;
+                let shell_opts = containers::ShellOptions {
+                    datadir: &cfg.datadir,
+                    name: &name,
+                    verbose: cli.verbose,
+                };
+                let status = containers::exec_oci(&shell_opts, &app_name, &command)?;
                 std::process::exit(status.code().unwrap_or(1));
             }
 
             eprintln!("joining '{name}'");
-            let status = containers::join(
-                &cfg.datadir,
-                &name,
-                &command,
-                cfg.join_as_sudo_user,
-                cli.verbose,
-            )?;
+            let shell_opts = containers::ShellOptions {
+                datadir: &cfg.datadir,
+                name: &name,
+                verbose: cli.verbose,
+            };
+            let status = containers::join(&shell_opts, &command, cfg.join_as_sudo_user)?;
             std::process::exit(status.code().unwrap_or(1));
         }
         Command::Logs { name, oci, args } => {
@@ -1939,13 +1941,12 @@ fn run() -> Result<()> {
                     format!("sdme-oci-{app_name}.service"),
                 ];
                 command.extend(args);
-                let status = containers::exec(
-                    &cfg.datadir,
-                    &name,
-                    &command,
-                    cfg.join_as_sudo_user,
-                    cli.verbose,
-                )?;
+                let shell_opts = containers::ShellOptions {
+                    datadir: &cfg.datadir,
+                    name: &name,
+                    verbose: cli.verbose,
+                };
+                let status = containers::exec(&shell_opts, &command, cfg.join_as_sudo_user)?;
                 std::process::exit(status.code().unwrap_or(1));
             } else {
                 system_check::check_dependencies(
@@ -2084,13 +2085,12 @@ fn run() -> Result<()> {
             )?;
 
             eprintln!("joining '{name}'");
-            let status = containers::join(
-                &cfg.datadir,
-                &name,
-                &command,
-                cfg.join_as_sudo_user,
-                cli.verbose,
-            )?;
+            let shell_opts = containers::ShellOptions {
+                datadir: &cfg.datadir,
+                name: &name,
+                verbose: cli.verbose,
+            };
+            let status = containers::join(&shell_opts, &command, cfg.join_as_sudo_user)?;
             if !status.success() {
                 let code = status.code().unwrap_or(1);
                 eprintln!("join failed (exit code {code}), removing '{name}'");
@@ -2327,8 +2327,12 @@ fn run() -> Result<()> {
                     cli.verbose,
                 )?;
                 eprintln!("joining '{name}'");
-                let status =
-                    containers::join(&cfg.datadir, &name, &[], cfg.join_as_sudo_user, cli.verbose)?;
+                let shell_opts = containers::ShellOptions {
+                    datadir: &cfg.datadir,
+                    name: &name,
+                    verbose: cli.verbose,
+                };
+                let status = containers::join(&shell_opts, &[], cfg.join_as_sudo_user)?;
                 if !status.success() {
                     let code = status.code().unwrap_or(1);
                     std::process::exit(code);

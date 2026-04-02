@@ -10,37 +10,43 @@ use crate::{systemd, State};
 
 use super::ensure_exists;
 
+/// Shared options for container shell operations (join, exec, exec_oci).
+pub struct ShellOptions<'a> {
+    /// Data directory containing container state.
+    pub datadir: &'a Path,
+    /// Container name.
+    pub name: &'a str,
+    /// Enable verbose output.
+    pub verbose: bool,
+}
+
 /// Verify that a container exists and is currently running.
-fn ensure_running(datadir: &Path, name: &str) -> Result<()> {
-    ensure_exists(datadir, name)?;
-    if !systemd::is_active(name)? {
-        bail!("container '{name}' is not running");
+fn ensure_running(opts: &ShellOptions) -> Result<()> {
+    ensure_exists(opts.datadir, opts.name)?;
+    if !systemd::is_active(opts.name)? {
+        bail!("container '{}' is not running", opts.name);
     }
     Ok(())
 }
 
 /// Enter a running container via `machinectl shell`.
 pub fn join(
-    datadir: &Path,
-    name: &str,
+    opts: &ShellOptions,
     command: &[String],
     join_as_sudo_user: bool,
-    verbose: bool,
 ) -> Result<ExitStatus> {
-    ensure_running(datadir, name)?;
-    machinectl_shell(datadir, name, command, join_as_sudo_user, verbose)
+    ensure_running(opts)?;
+    machinectl_shell(opts, command, join_as_sudo_user)
 }
 
 /// Run a one-off command in a running container via `machinectl shell`.
 pub fn exec(
-    datadir: &Path,
-    name: &str,
+    opts: &ShellOptions,
     command: &[String],
     join_as_sudo_user: bool,
-    verbose: bool,
 ) -> Result<ExitStatus> {
-    ensure_running(datadir, name)?;
-    machinectl_shell(datadir, name, command, join_as_sudo_user, verbose)
+    ensure_running(opts)?;
+    machinectl_shell(opts, command, join_as_sudo_user)
 }
 
 /// Candidate inner cgroup paths under a container's cgroup.
@@ -153,19 +159,13 @@ fn find_app_pid(service_cgroup: &Path, app_name: &str) -> Result<u32> {
 /// Discovers the app's host PID via its cgroup, then enters its PID, IPC,
 /// mount, and network namespaces so the command sees the app's filesystem,
 /// processes, and network.
-pub fn exec_oci(
-    datadir: &Path,
-    name: &str,
-    app_name: &str,
-    command: &[String],
-    verbose: bool,
-) -> Result<ExitStatus> {
-    ensure_running(datadir, name)?;
+pub fn exec_oci(opts: &ShellOptions, app_name: &str, command: &[String]) -> Result<ExitStatus> {
+    ensure_running(opts)?;
 
     crate::system_check::find_program("nsenter")
         .context("nsenter is required for exec --oci (install util-linux)")?;
 
-    let service_cgroup = find_oci_service_cgroup(name, app_name)?;
+    let service_cgroup = find_oci_service_cgroup(opts.name, app_name)?;
     let app_pid = find_app_pid(&service_cgroup, app_name)?;
 
     let pid_str = app_pid.to_string();
@@ -173,7 +173,7 @@ pub fn exec_oci(
     cmd.args(["-t", &pid_str, "--pid", "--ipc", "--mount", "--net", "--"]);
     cmd.args(command);
 
-    if verbose {
+    if opts.verbose {
         eprintln!(
             "exec: nsenter {}",
             cmd.get_args()
@@ -189,12 +189,15 @@ pub fn exec_oci(
 }
 
 fn machinectl_shell(
-    datadir: &Path,
-    name: &str,
+    opts: &ShellOptions,
     command: &[String],
     join_as_sudo_user: bool,
-    verbose: bool,
 ) -> Result<ExitStatus> {
+    let ShellOptions {
+        datadir,
+        name,
+        verbose,
+    } = *opts;
     let mut cmd = std::process::Command::new("machinectl");
     cmd.arg("shell");
 

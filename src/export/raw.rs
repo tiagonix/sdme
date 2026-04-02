@@ -9,6 +9,16 @@ use anyhow::{bail, Context, Result};
 use super::{set_timezone, ExportOptions, ExportResult, RawFs};
 use crate::{check_interrupted, copy, system_check};
 
+/// Shared context for raw image creation, computed once in `export_to_raw`.
+struct RawImageContext<'a> {
+    output: &'a Path,
+    mount_dir: &'a Path,
+    mkfs_bin: &'a str,
+    fs_type: RawFs,
+    src: &'a Path,
+    opts: &'a ExportOptions<'a>,
+}
+
 /// Export by creating a raw disk image with the specified filesystem.
 pub(super) fn export_to_raw(
     src: &Path,
@@ -92,10 +102,18 @@ pub(super) fn export_to_raw(
 
     // VM exports: GPT partition table via sfdisk, then losetup --partscan.
     // Non-VM exports: bare filesystem on the whole image file.
+    let ctx = RawImageContext {
+        output,
+        mount_dir: &mount_dir,
+        mkfs_bin,
+        fs_type,
+        src,
+        opts,
+    };
     let copy_result = if is_vm {
-        export_raw_gpt(output, &mount_dir, mkfs_bin, fs_type, src, opts)
+        export_raw_gpt(&ctx)
     } else {
-        export_raw_bare(output, &mount_dir, mkfs_bin, fs_type, src, opts)
+        export_raw_bare(&ctx)
     };
 
     if let Err(e) = copy_result {
@@ -164,14 +182,15 @@ impl Drop for LoopGuard {
 }
 
 /// Export a bare (unpartitioned) raw disk image. The entire image is one filesystem.
-fn export_raw_bare(
-    output: &Path,
-    mount_dir: &Path,
-    mkfs_bin: &str,
-    fs_type: RawFs,
-    src: &Path,
-    opts: &ExportOptions,
-) -> Result<()> {
+fn export_raw_bare(ctx: &RawImageContext) -> Result<()> {
+    let RawImageContext {
+        output,
+        mount_dir,
+        mkfs_bin,
+        fs_type,
+        src,
+        opts,
+    } = *ctx;
     let (mkfs_args, mkfs_err): (&[&str], &str) = match fs_type {
         RawFs::Ext4 => (&["-q", "-F"], "mkfs.ext4 failed"),
         RawFs::Btrfs => (&["-q", "-f"], "mkfs.btrfs failed"),
@@ -227,14 +246,15 @@ fn export_raw_bare(
 /// 1 MiB (standard alignment), and optionally a swap partition. The
 /// filesystem lives on the partition, not the whole device. This avoids
 /// sector 0 conflicts with hypervisors like cloud-hypervisor.
-fn export_raw_gpt(
-    output: &Path,
-    mount_dir: &Path,
-    mkfs_bin: &str,
-    fs_type: RawFs,
-    src: &Path,
-    opts: &ExportOptions,
-) -> Result<()> {
+fn export_raw_gpt(ctx: &RawImageContext) -> Result<()> {
+    let RawImageContext {
+        output,
+        mount_dir,
+        mkfs_bin,
+        fs_type,
+        src,
+        opts,
+    } = *ctx;
     let vm_opts = opts.vm_opts;
     let verbose = opts.verbose;
     let swap_size = vm_opts.map(|o| o.swap_size).unwrap_or(0);
