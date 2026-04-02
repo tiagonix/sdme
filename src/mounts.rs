@@ -62,7 +62,7 @@ impl BindConfig {
             let mode = parts[2];
 
             // Append :idmap for user namespace UID/GID mapping, but not for
-            // device nodes — the kernel does not support idmapped mounts on
+            // device nodes: the kernel does not support idmapped mounts on
             // device files and systemd-nspawn will fail with EINVAL.
             let opts = if userns && !is_device_node(host) {
                 ":idmap"

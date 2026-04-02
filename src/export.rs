@@ -1200,7 +1200,7 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 /// | What | Path(s) | Why |
 /// |------|---------|-----|
 /// | VM prehook | (via chroot) | Distro-specific VM prep (udev, etc.); runs if `--install-packages` allows |
-/// | init symlink | `/usr/sbin/init` → `../../lib/systemd/systemd` | Kernel needs `/sbin/init`; nspawn finds systemd directly |
+/// | init symlink | `/usr/sbin/init` -> `../../lib/systemd/systemd` | Kernel needs `/sbin/init`; nspawn finds systemd directly |
 /// | serial-getty template | `/etc/systemd/system/serial-getty@.service` | Copy of distro template with `BindsTo=dev-%i.device` removed (no udev) |
 /// | serial-getty enable | `/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service` | Explicit enable for ttyS0 |
 /// | multi-user drop-in | `/etc/systemd/system/multi-user.target.d/wants-getty.conf` | `Wants=serial-getty@ttyS0.service`; container images omit getty.target |
@@ -1388,7 +1388,7 @@ pub fn builtin_export_vm_prehook(family: &DistroFamily) -> Vec<String> {
     }
 }
 
-/// Resolve export prehook commands: config override → built-in default.
+/// Resolve export prehook commands: config override, then built-in default.
 ///
 /// Not wired yet (container/rootfs export hooks are empty today).
 #[allow(dead_code)]
@@ -1404,7 +1404,7 @@ fn resolve_export_prehook(
     builtin_export_prehook(family)
 }
 
-/// Resolve VM export prehook commands: config override → built-in default.
+/// Resolve VM export prehook commands: config override, then built-in default.
 fn resolve_export_vm_prehook(
     family: &DistroFamily,
     distros: &HashMap<String, DistroCommands>,

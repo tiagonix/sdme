@@ -722,6 +722,12 @@ pub(crate) fn mount_overlay(rootfs_dir: &Path, container_dir: &Path) -> Result<(
     if !status.success() {
         bail!("failed to mount overlayfs");
     }
+
+    // Per-submount overlayfs for host-rootfs containers.
+    if rootfs_dir == Path::new("/") {
+        mount_submount_overlays(&merged_dir, container_dir, false)?;
+    }
+
     Ok(())
 }
 
@@ -746,6 +752,53 @@ pub(crate) fn mount_overlay_ro(rootfs_dir: &Path, container_dir: &Path) -> Resul
     if !status.success() {
         bail!("failed to mount read-only overlayfs");
     }
+
+    // Per-submount read-only overlays for host-rootfs containers.
+    if rootfs_dir == Path::new("/") {
+        mount_submount_overlays(&merged_dir, container_dir, true)?;
+    }
+
+    Ok(())
+}
+
+/// Mount per-submount overlayfs layers for host-rootfs containers.
+///
+/// For each real-filesystem submount under `/` (e.g. `/home` on a separate
+/// btrfs subvolume), mounts a per-submount overlay on the corresponding
+/// path inside `merged/`.
+fn mount_submount_overlays(merged_dir: &Path, container_dir: &Path, read_only: bool) -> Result<()> {
+    let submounts = crate::submounts::host_submounts()?;
+    if submounts.is_empty() {
+        return Ok(());
+    }
+    crate::submounts::ensure_submount_dirs(container_dir, &submounts)?;
+    for rel in &submounts {
+        let sub_upper = container_dir.join("submounts").join(rel).join("upper");
+        let sub_merged = merged_dir.join(rel);
+        let sub_opts = if read_only {
+            format!("lowerdir={}:/{rel}", sub_upper.display())
+        } else {
+            let sub_work = container_dir.join("submounts").join(rel).join("work");
+            format!(
+                "lowerdir=/{rel},upperdir={},workdir={}",
+                sub_upper.display(),
+                sub_work.display()
+            )
+        };
+        let status = std::process::Command::new("mount")
+            .args(["-t", "overlay", "overlay", "-o", &sub_opts])
+            .arg(&sub_merged)
+            .status();
+        match status {
+            Ok(s) if !s.success() => {
+                eprintln!("warning: failed to mount submount overlay for /{rel}");
+            }
+            Err(e) => {
+                eprintln!("warning: failed to run mount for submount /{rel}: {e}");
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 
@@ -761,8 +814,19 @@ impl Drop for OverlayGuard {
 }
 
 /// Unmount overlayfs from a container's `merged/` directory.
+///
+/// Unmounts any nested submount overlays (deepest-first) before
+/// unmounting the root overlay.
 pub(crate) fn unmount_overlay(container_dir: &Path) {
     let merged_dir = container_dir.join("merged");
+    // Unmount any nested mounts (submount overlays) deepest-first.
+    if let Ok(nested) = crate::submounts::find_mounts_under(&merged_dir) {
+        for mount_point in &nested {
+            let _ = std::process::Command::new("umount")
+                .arg(mount_point)
+                .status();
+        }
+    }
     let _ = std::process::Command::new("umount")
         .arg(&merged_dir)
         .status();

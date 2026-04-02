@@ -132,6 +132,38 @@ left unmasked and sdme configures it for inter-container discovery:
 layer are actively overridden in the upper layer with a symlink to
 the real unit file.
 
+**Per-submount overlayfs.** Overlayfs does not cross mount boundaries.
+On systems where directories under `/` live on separate filesystems
+(btrfs subvolumes like `/@home` mounted at `/home`, separate partitions,
+ZFS datasets), a single `lowerdir=/` overlay would
+see those directories as empty. The files live on a different mount and
+overlayfs has no visibility into it.
+
+sdme solves this by detecting real-filesystem submounts under `/` at
+container creation time, then mounting a separate overlayfs layer for
+each one inside the container's `merged/` directory. Detection works by
+parsing `/proc/self/mountinfo`: each line is checked against an
+allowlist of real filesystem types (ext4, btrfs, xfs, zfs, f2fs,
+bcachefs, etc.), and virtual or nspawn-managed paths (`/proc`, `/sys`,
+`/dev`, `/run`, `/tmp`, `/var/log`, `/var/tmp`) are excluded. Paths
+containing `..` or commas are rejected for safety, since they could
+break mount option parsing or enable path traversal.
+
+For each detected submount (say `/home`), sdme creates a
+`submounts/home/{upper,work}` directory tree under the container
+directory and mounts an overlay with `lowerdir=/home` and the
+per-submount upper/work dirs. In read-only mode (e.g. `sdme cp --ro`),
+the submount overlay uses multi-lower `lowerdir=` with no `upperdir`.
+
+Mount failures are logged as warnings but do not block container boot;
+a single broken submount should not prevent the rest of the container
+from working. Unmounting happens deepest-first by querying
+`/proc/self/mountinfo` for nested mounts under `merged/`.
+
+This only applies to host-rootfs containers (`lowerdir=/`). Imported
+rootfs trees are single directory hierarchies with no submounts to
+worry about.
+
 ## 3. The Catalogue
 
 Everything sdme knows lives under `/var/lib/sdme` (the default
@@ -146,7 +178,11 @@ Everything sdme knows lives under `/var/lib/sdme` (the default
   |   |-- container-a/
   |   |   |-- upper/           # CoW writes
   |   |   |-- work/            # overlayfs workdir
-  |   |   +-- merged/          # mount point
+  |   |   |-- merged/          # mount point
+  |   |   +-- submounts/       # per-submount overlay layers (host-rootfs only)
+  |   |       +-- home/
+  |   |           |-- upper/
+  |   |           +-- work/
   |   +-- container-b/
   |       +-- ...
   |-- fs/
@@ -353,7 +389,7 @@ container runtimes (Docker, Podman) do as well. The overlayfs
 `SCHILY.xattr.*` PAX extended headers.
 
 **Hard links** are preserved by `copy_tree()` via a `HardLinkMap` that
-tracks `(st_dev, st_ino)` → destination path. When a file with
+tracks `(st_dev, st_ino)` to destination path. When a file with
 `st_nlink > 1` is encountered and its inode was already copied, a hard
 link is created instead of duplicating the data. This preserves link
 semantics and avoids doubling disk usage for packages that hard-link
@@ -1236,7 +1272,7 @@ Lock files live at `{datadir}/locks/{kind}/{name}.lock`. All locks are
 **non-blocking** (`LOCK_NB`): if a lock cannot be acquired immediately,
 the operation fails with an error identifying the holder PID (read from
 the lock file). Lock ordering to prevent deadlocks:
-`fs → containers → pods → secrets → configmaps`. Within the same kind,
+`fs -> containers -> pods -> secrets -> configmaps`. Within the same kind,
 acquire shared before exclusive on different names.
 
 Locks are released automatically when the `ResourceLock` value is

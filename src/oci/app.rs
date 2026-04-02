@@ -65,10 +65,10 @@ fn lookup_group(group_path: &Path, group: &str) -> Option<u32> {
 /// Resolve the OCI `User` field to numeric uid:gid.
 ///
 /// The User field can be:
-/// - `""` or `"root"` or `"0"` → root (uid=0, gid=0)
-/// - `"name"` → look up in etc/passwd
-/// - `"uid"` → use directly; look up primary GID from etc/passwd if found
-/// - `"name:group"` or `"uid:gid"` → resolve both parts
+/// - `""` or `"root"` or `"0"`: root (uid=0, gid=0)
+/// - `"name"`: look up in etc/passwd
+/// - `"uid"`: use directly; look up primary GID from etc/passwd if found
+/// - `"name:group"` or `"uid:gid"`: resolve both parts
 ///
 /// Returns `None` for root users (uid=0), since they don't need privilege dropping.
 pub(crate) fn resolve_oci_user(oci_root: &Path, user: &str) -> Result<Option<ResolvedUser>> {

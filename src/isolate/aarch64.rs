@@ -218,7 +218,7 @@ impl Asm {
 
     /// MOVK Xd, #imm16, LSL #16: move with keep, shift 16.
     fn movk_x_16(&mut self, rd: u8, imm: u16) {
-        // 1 11 100101 01 imm16 Rd  (hw=1 → LSL #16)
+        // 1 11 100101 01 imm16 Rd  (hw=1, LSL #16)
         let insn = 0xF2A00000 | ((imm as u32) << 5) | (rd as u32);
         self.emit32(insn);
     }

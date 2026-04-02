@@ -210,8 +210,8 @@ mod dbus {
     /// `org.freedesktop.machine1.Manager`, then checks the current state.
     /// If not yet running, processes signals on a background thread:
     ///
-    /// - `MachineNew` → re-check the `State` property (may still be "opening")
-    /// - `MachineRemoved` → container failed, bail immediately
+    /// - `MachineNew`: re-check the `State` property (may still be "opening")
+    /// - `MachineRemoved`: container failed, bail immediately
     ///
     /// After `MachineNew`, the state may be "opening" (boot in progress).
     /// Since `PropertiesChanged` on the machine object requires a second
@@ -306,7 +306,7 @@ mod dbus {
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // No signal received; poll the state via D-Bus.
-                    // This handles the "opening" → "running" transition
+                    // This handles the "opening" -> "running" transition
                     // that is signaled via PropertiesChanged (which we
                     // don't subscribe to separately).
                     if let Some(state) = get_machine_state(&conn, name)? {
@@ -986,26 +986,40 @@ fn escape_exec_arg(arg: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// Configuration for generating a per-container nspawn drop-in.
+pub struct DropinConfig<'a> {
+    /// Data directory path (e.g. `/var/lib/sdme`).
+    pub datadir: &'a str,
+    /// Container name.
+    pub name: &'a str,
+    /// Lower directory for the root overlayfs (e.g. `/` or a rootfs path).
+    pub lowerdir: &'a str,
+    /// Resolved paths to mount/umount/nspawn binaries.
+    pub paths: &'a UnitPaths,
+    /// Arguments passed to systemd-nspawn.
+    pub nspawn_args: &'a [String],
+    /// Service-level directives (e.g. `AppArmorProfile=...`).
+    pub service_directives: &'a [String],
+    /// Per-submount overlay relative paths (e.g. `["home", "data"]`).
+    pub submounts: &'a [String],
+}
+
 /// Generate the per-container nspawn drop-in content.
 ///
 /// Contains ExecStartPre (overlayfs mount), ExecStart (systemd-nspawn
 /// with all arguments baked in), and ExecStopPost (unmount). Every
 /// argument is explicit; no environment variable substitution needed.
-pub fn nspawn_dropin(
-    datadir: &str,
-    name: &str,
-    lowerdir: &str,
-    paths: &UnitPaths,
-    nspawn_args: &[String],
-    service_directives: &[String],
-) -> String {
-    let mount = paths.mount.display();
-    let umount = paths.umount.display();
-    let nspawn = paths.nspawn.display();
+pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
+    let mount = cfg.paths.mount.display();
+    let umount = cfg.paths.umount.display();
+    let nspawn = cfg.paths.nspawn.display();
+    let datadir = cfg.datadir;
+    let name = cfg.name;
+    let lowerdir = cfg.lowerdir;
 
     let mut out = String::new();
     writeln!(out, "[Service]").unwrap();
-    for directive in service_directives {
+    for directive in cfg.service_directives {
         writeln!(out, "{directive}").unwrap();
     }
     writeln!(out, "ExecStart=").unwrap();
@@ -1016,13 +1030,34 @@ pub fn nspawn_dropin(
     )
     .unwrap();
     writeln!(out, "    {datadir}/containers/{name}/merged").unwrap();
+
+    // Per-submount overlayfs layers (best-effort, =-).
+    for rel in cfg.submounts {
+        writeln!(out, "ExecStartPre=-{mount} -t overlay overlay \\").unwrap();
+        writeln!(
+            out,
+            "    -o lowerdir=/{rel},upperdir={datadir}/containers/{name}/submounts/{rel}/upper,workdir={datadir}/containers/{name}/submounts/{rel}/work \\"
+        )
+        .unwrap();
+        writeln!(out, "    {datadir}/containers/{name}/merged/{rel}").unwrap();
+    }
+
     writeln!(out, "ExecStart={nspawn} \\").unwrap();
     writeln!(out, "    --directory={datadir}/containers/{name}/merged \\").unwrap();
     writeln!(out, "    --machine={name} \\").unwrap();
-    for arg in nspawn_args {
+    for arg in cfg.nspawn_args {
         writeln!(out, "    {} \\", escape_exec_arg(arg)).unwrap();
     }
     writeln!(out, "    --boot").unwrap();
+
+    // Unmount submounts in reverse order (deepest first), then the root overlay.
+    for rel in cfg.submounts.iter().rev() {
+        writeln!(
+            out,
+            "ExecStopPost=-{umount} {datadir}/containers/{name}/merged/{rel}"
+        )
+        .unwrap();
+    }
     writeln!(
         out,
         "ExecStopPost=-{umount} {datadir}/containers/{name}/merged"
@@ -1171,14 +1206,32 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
         }
     }
 
-    let content = nspawn_dropin(
-        datadir_str,
+    // Detect per-submount overlayfs layers for host-rootfs containers.
+    let submounts = if lowerdir == "/" {
+        let subs = crate::submounts::host_submounts()?;
+        if !subs.is_empty() {
+            let container_dir = datadir.join("containers").join(name);
+            crate::submounts::ensure_submount_dirs(&container_dir, &subs)?;
+            if verbose {
+                for rel in &subs {
+                    eprintln!("submount: /{rel}");
+                }
+            }
+        }
+        subs
+    } else {
+        Vec::new()
+    };
+
+    let content = nspawn_dropin(&DropinConfig {
+        datadir: datadir_str,
         name,
-        &lowerdir,
-        &paths,
-        &nspawn_args,
-        &service_directives,
-    );
+        lowerdir: &lowerdir,
+        paths: &paths,
+        nspawn_args: &nspawn_args,
+        service_directives: &service_directives,
+        submounts: &submounts,
+    });
 
     let dir = dropin_dir(name);
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
@@ -1329,14 +1382,16 @@ mod tests {
     #[test]
     fn test_nspawn_dropin_host_rootfs() {
         let paths = test_paths();
-        let content = nspawn_dropin(
-            "/var/lib/sdme",
-            "mybox",
-            "/",
-            &paths,
-            &["--resolv-conf=auto".to_string()],
-            &[],
-        );
+        let args = vec!["--resolv-conf=auto".to_string()];
+        let content = nspawn_dropin(&DropinConfig {
+            datadir: "/var/lib/sdme",
+            name: "mybox",
+            lowerdir: "/",
+            paths: &paths,
+            nspawn_args: &args,
+            service_directives: &[],
+            submounts: &[],
+        });
         assert!(content.contains("[Service]"));
         assert!(content.contains("ExecStart=\n"));
         assert!(content.contains("lowerdir=/,upperdir=/var/lib/sdme/containers/mybox/upper"));
@@ -1353,18 +1408,20 @@ mod tests {
     #[test]
     fn test_nspawn_dropin_with_userns() {
         let paths = test_paths();
-        let content = nspawn_dropin(
-            "/var/lib/sdme",
-            "mybox",
-            "/",
-            &paths,
-            &[
-                "--resolv-conf=auto".to_string(),
-                "--private-users=pick".to_string(),
-                "--private-users-ownership=auto".to_string(),
-            ],
-            &[],
-        );
+        let args = vec![
+            "--resolv-conf=auto".to_string(),
+            "--private-users=pick".to_string(),
+            "--private-users-ownership=auto".to_string(),
+        ];
+        let content = nspawn_dropin(&DropinConfig {
+            datadir: "/var/lib/sdme",
+            name: "mybox",
+            lowerdir: "/",
+            paths: &paths,
+            nspawn_args: &args,
+            service_directives: &[],
+            submounts: &[],
+        });
         assert!(content.contains("--private-users=pick"));
         assert!(content.contains("--private-users-ownership=auto"));
         assert!(content.contains("--boot"));
@@ -1373,14 +1430,16 @@ mod tests {
     #[test]
     fn test_nspawn_dropin_explicit_rootfs() {
         let paths = test_paths();
-        let content = nspawn_dropin(
-            "/var/lib/sdme",
-            "ubox",
-            "/var/lib/sdme/fs/ubuntu",
-            &paths,
-            &["--resolv-conf=auto".to_string()],
-            &[],
-        );
+        let args = vec!["--resolv-conf=auto".to_string()];
+        let content = nspawn_dropin(&DropinConfig {
+            datadir: "/var/lib/sdme",
+            name: "ubox",
+            lowerdir: "/var/lib/sdme/fs/ubuntu",
+            paths: &paths,
+            nspawn_args: &args,
+            service_directives: &[],
+            submounts: &[],
+        });
         assert!(content.contains(
             "lowerdir=/var/lib/sdme/fs/ubuntu,upperdir=/var/lib/sdme/containers/ubox/upper"
         ));
@@ -1395,7 +1454,15 @@ mod tests {
             "--bind-ro=/logs:/logs".to_string(),
             "--setenv=FOO=bar".to_string(),
         ];
-        let content = nspawn_dropin("/var/lib/sdme", "mybox", "/", &paths, &args, &[]);
+        let content = nspawn_dropin(&DropinConfig {
+            datadir: "/var/lib/sdme",
+            name: "mybox",
+            lowerdir: "/",
+            paths: &paths,
+            nspawn_args: &args,
+            service_directives: &[],
+            submounts: &[],
+        });
         assert!(content.contains("    --bind=/data:/data \\\n"));
         assert!(content.contains("    --bind-ro=/logs:/logs \\\n"));
         assert!(content.contains("    --setenv=FOO=bar \\\n"));
@@ -1408,7 +1475,15 @@ mod tests {
             "--resolv-conf=auto".to_string(),
             "--setenv=MSG=hello world".to_string(),
         ];
-        let content = nspawn_dropin("/var/lib/sdme", "mybox", "/", &paths, &args, &[]);
+        let content = nspawn_dropin(&DropinConfig {
+            datadir: "/var/lib/sdme",
+            name: "mybox",
+            lowerdir: "/",
+            paths: &paths,
+            nspawn_args: &args,
+            service_directives: &[],
+            submounts: &[],
+        });
         assert!(content.contains("\"--setenv=MSG=hello world\""));
     }
 
@@ -1482,7 +1557,15 @@ mod tests {
             "--system-call-filter=@system-service".to_string(),
             "--system-call-filter=~@mount".to_string(),
         ];
-        let content = nspawn_dropin("/var/lib/sdme", "secbox", "/", &paths, &args, &[]);
+        let content = nspawn_dropin(&DropinConfig {
+            datadir: "/var/lib/sdme",
+            name: "secbox",
+            lowerdir: "/",
+            paths: &paths,
+            nspawn_args: &args,
+            service_directives: &[],
+            submounts: &[],
+        });
         assert!(content.contains("--drop-capability=CAP_SYS_PTRACE"));
         assert!(content.contains("--drop-capability=CAP_NET_RAW"));
         assert!(content.contains("--no-new-privileges=yes"));
@@ -1498,14 +1581,15 @@ mod tests {
         let paths = test_paths();
         let args = vec!["--resolv-conf=auto".to_string()];
         let service_directives = vec!["AppArmorProfile=sdme-default".to_string()];
-        let content = nspawn_dropin(
-            "/var/lib/sdme",
-            "aabox",
-            "/",
-            &paths,
-            &args,
-            &service_directives,
-        );
+        let content = nspawn_dropin(&DropinConfig {
+            datadir: "/var/lib/sdme",
+            name: "aabox",
+            lowerdir: "/",
+            paths: &paths,
+            nspawn_args: &args,
+            service_directives: &service_directives,
+            submounts: &[],
+        });
         // AppArmor directive should appear in the [Service] section.
         assert!(content.contains("AppArmorProfile=sdme-default"));
         // It should be before ExecStart=.
@@ -1515,6 +1599,47 @@ mod tests {
             aa_pos < exec_pos,
             "AppArmorProfile should appear before ExecStart="
         );
+    }
+
+    #[test]
+    fn test_nspawn_dropin_with_submounts() {
+        let paths = test_paths();
+        let args = vec!["--resolv-conf=auto".to_string()];
+        let submounts = vec![
+            "home".to_string(),
+            "data".to_string(),
+            "data/deep".to_string(),
+        ];
+        let content = nspawn_dropin(&DropinConfig {
+            datadir: "/var/lib/sdme",
+            name: "mybox",
+            lowerdir: "/",
+            paths: &paths,
+            nspawn_args: &args,
+            service_directives: &[],
+            submounts: &submounts,
+        });
+
+        // Root overlay is still present.
+        assert!(content.contains("lowerdir=/,upperdir=/var/lib/sdme/containers/mybox/upper"));
+
+        // Per-submount overlays appear after root mount.
+        assert!(content.contains("ExecStartPre=-/usr/bin/mount -t overlay overlay \\\n    -o lowerdir=/home,upperdir=/var/lib/sdme/containers/mybox/submounts/home/upper,workdir=/var/lib/sdme/containers/mybox/submounts/home/work \\\n    /var/lib/sdme/containers/mybox/merged/home\n"));
+        assert!(content.contains("ExecStartPre=-/usr/bin/mount -t overlay overlay \\\n    -o lowerdir=/data,upperdir=/var/lib/sdme/containers/mybox/submounts/data/upper,workdir=/var/lib/sdme/containers/mybox/submounts/data/work \\\n    /var/lib/sdme/containers/mybox/merged/data\n"));
+        assert!(content.contains(
+            "lowerdir=/data/deep,upperdir=/var/lib/sdme/containers/mybox/submounts/data/deep/upper"
+        ));
+
+        // Submount unmounts in reverse order (deepest first), before root unmount.
+        let stop_section: Vec<&str> = content
+            .lines()
+            .filter(|l| l.starts_with("ExecStopPost"))
+            .collect();
+        assert_eq!(stop_section.len(), 4); // 3 submounts + 1 root
+        assert!(stop_section[0].contains("merged/data/deep"));
+        assert!(stop_section[1].contains("merged/data"));
+        assert!(stop_section[2].contains("merged/home"));
+        assert!(stop_section[3].ends_with("merged"));
     }
 
     #[test]

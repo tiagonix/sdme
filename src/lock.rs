@@ -12,7 +12,7 @@
 //! deadlocks:
 //!
 //! ```text
-//! fs → containers → pods → secrets → configmaps
+//! fs -> containers -> pods -> secrets -> configmaps
 //! ```
 //!
 //! Within the same kind, acquire SHARED before EXCLUSIVE on different

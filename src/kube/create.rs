@@ -519,7 +519,7 @@ pub fn kube_delete(datadir: &Path, name: &str, force: bool, verbose: bool) -> Re
     let rootfs_name = state.rootfs().to_string();
 
     // Exclusive lock on kube rootfs prevents concurrent operations.
-    // Acquired before containers::remove() to follow fs → containers lock ordering.
+    // Acquired before containers::remove() to follow fs -> containers lock ordering.
     let _rootfs_lock = if !rootfs_name.is_empty() {
         Some(
             crate::lock::lock_exclusive(datadir, "fs", &rootfs_name)
@@ -829,7 +829,7 @@ pub(crate) fn setup_kube_container(
 /// Write key-value data into a volume directory, applying file permissions.
 ///
 /// Used by both secret and configMap volume population. When `items` is empty,
-/// all keys are written; otherwise only the projected key→path pairs.
+/// all keys are written; otherwise only the projected key-to-path pairs.
 fn populate_volume_data(
     volumes_dir: &Path,
     vol_name: &str,

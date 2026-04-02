@@ -1005,7 +1005,7 @@ pub fn builtin_import_prehook(family: &DistroFamily) -> Vec<String> {
     }
 }
 
-/// Resolve import prehook commands: config override → built-in default.
+/// Resolve import prehook commands: config override, then built-in default.
 fn resolve_import_prehook(
     family: &DistroFamily,
     distros: &HashMap<String, DistroCommands>,

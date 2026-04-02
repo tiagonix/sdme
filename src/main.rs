@@ -1517,7 +1517,7 @@ fn start_and_await_boot(
     systemd::start(datadir, name, tasks_max, boot_timeout.as_secs(), verbose)?;
     if let Err(e) = systemd::await_boot(name, boot_timeout, verbose) {
         // Check whether the container is still alive (active or still
-        // activating). If it is, the boot didn't fail — sdme just timed
+        // activating). If it is, the boot didn't fail: sdme just timed
         // out waiting for the readiness signal (e.g. slow first-boot
         // userns chown). Don't kill it.
         let still_alive = matches!(

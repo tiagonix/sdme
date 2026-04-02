@@ -312,7 +312,7 @@ impl Config {
                 "*".repeat(len)
             } else {
                 format!(
-                    "{}…{}",
+                    "{}...{}",
                     &self.docker_token[..4],
                     &self.docker_token[len - 4..]
                 )
@@ -838,7 +838,7 @@ import_prehook = ["echo hi"]
         let path = temp_config_path();
         let _ = fs::remove_file(&path);
 
-        // Missing file → false.
+        // Missing file returns false.
         assert!(!key_exists_in_file(Some(&path), "boot_timeout").unwrap());
 
         // Key present in file.

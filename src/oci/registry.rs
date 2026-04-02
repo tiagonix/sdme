@@ -44,7 +44,7 @@ impl ImageReference {
     /// - Doesn't start with `/` or `.` (filesystem paths)
     /// - First component (before `/`) contains a `.` (domain name)
     ///
-    /// Docker Hub special case: `docker.io` → `registry-1.docker.io`,
+    /// Docker Hub special case: `docker.io` becomes `registry-1.docker.io`,
     /// single-component repos get `library/` prefix.
     pub fn parse(source: &str) -> Option<Self> {
         // Reject filesystem paths.
@@ -195,10 +195,10 @@ fn is_trusted_docker_realm(realm: &str) -> bool {
 /// Obtain a bearer token for pulling from a registry.
 ///
 /// Probes `GET /v2/` with a single request:
-/// - 200 → no auth needed, returns `None`.
-/// - 401 → parses `WWW-Authenticate: Bearer realm="...",service="..."`,
+/// - 200: no auth needed, returns `None`.
+/// - 401: parses `WWW-Authenticate: Bearer realm="...",service="..."`,
 ///   requests a token from the realm, returns it.
-/// - Other → error.
+/// - Other: error.
 ///
 /// When `docker_credentials` is `Some((user, token))` and the registry is
 /// Docker Hub, the token request includes HTTP Basic authentication, which
@@ -454,7 +454,7 @@ impl OciContainerConfig {
         if has_ports {
             return false;
         }
-        // No entrypoint and cmd is a single shell binary → base OS.
+        // No entrypoint and cmd is a single shell binary: base OS.
         let entrypoint_empty = self.entrypoint.as_ref().is_none_or(|ep| ep.is_empty());
         let cmd_is_shell = self.cmd.as_ref().is_some_and(|cmd| {
             cmd.len() == 1 && {

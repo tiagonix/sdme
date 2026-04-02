@@ -49,6 +49,7 @@ pub mod oci;
 pub mod pod;
 pub mod rootfs;
 pub mod security;
+pub(crate) mod submounts;
 pub mod system_check;
 pub mod systemd;
 pub mod txn;
@@ -438,7 +439,7 @@ impl State {
 pub struct ResourceLimits {
     /// `MemoryMax=`, e.g. "512M", "2G"
     pub memory: Option<String>,
-    /// `CPUQuota=`, stored as a number of CPUs (e.g. "2" → 200%)
+    /// `CPUQuota=`, stored as a number of CPUs (e.g. "2" = 200%)
     pub cpus: Option<String>,
     /// `CPUWeight=`, integer 1-10000
     pub cpu_weight: Option<String>,
@@ -620,11 +621,11 @@ pub fn atomic_write_mode(path: &Path, data: &[u8], mode: u32) -> Result<()> {
 /// Parse a human-readable size string (e.g. "10G", "512M") into bytes.
 ///
 /// Accepts an integer followed by an optional suffix:
-/// - No suffix or `B` → bytes
-/// - `K` → kibibytes (1024)
-/// - `M` → mebibytes (1024²)
-/// - `G` → gibibytes (1024³)
-/// - `T` → tebibytes (1024⁴)
+/// - No suffix or `B`: bytes
+/// - `K`: kibibytes (1024)
+/// - `M`: mebibytes (1024^2)
+/// - `G`: gibibytes (1024^3)
+/// - `T`: tebibytes (1024^4)
 ///
 /// Returns 0 for the input `"0"`.
 ///

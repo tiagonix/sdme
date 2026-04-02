@@ -3,9 +3,9 @@
 //! On-disk layout:
 //! ```text
 //! {cache_dir}/
-//! ├── sha256/
-//! │   └── {hex_digest}       # compressed layer blob, as received
-//! └── index                  # KEY=VALUE metadata
+//! |-- sha256/
+//! |   +-- {hex_digest}       # compressed layer blob, as received
+//! +-- index                  # KEY=VALUE metadata
 //! ```
 //!
 //! Index format (one entry per line):
@@ -52,7 +52,7 @@ pub struct CacheEntry {
     pub last_access: u64,
 }
 
-/// Parsed index: digest → (size, atime).
+/// Parsed index: digest to (size, atime).
 type Index = Vec<(String, u64, u64)>;
 
 impl BlobCache {

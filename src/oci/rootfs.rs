@@ -114,7 +114,7 @@ pub fn read_oci_volumes(rootfs: &Path) -> Vec<String> {
 /// Convert an OCI volume path to a directory-safe name.
 ///
 /// Strips the leading `/` and replaces remaining `/` with `-`.
-/// E.g. `/var/lib/mysql` → `var-lib-mysql`.
+/// E.g. `/var/lib/mysql` becomes `var-lib-mysql`.
 pub(crate) fn sanitize_volume_name(path: &str) -> String {
     let stripped = path.strip_prefix('/').unwrap_or(path);
     stripped.replace('/', "-")
