@@ -999,10 +999,10 @@ pub struct ContainerInfo {
     pub userns: bool,
     /// Whether auto-start on boot is enabled.
     pub enabled: bool,
-    /// Raw bind mount specs from the state file.
-    pub binds: String,
+    /// Bind mount specs from the state file.
+    pub binds: Vec<String>,
     /// Kube container names, if this is a kube container.
-    pub kube: String,
+    pub kube: Vec<String>,
     /// IP addresses assigned to the container's network interface.
     ///
     /// Empty when the container is stopped, uses host networking, or
@@ -1020,7 +1020,7 @@ impl ContainerInfo {
             return String::new();
         }
         self.binds
-            .split('|')
+            .iter()
             .filter_map(|spec| {
                 let parts: Vec<&str> = spec.split(':').collect();
                 if parts.len() < 3 {
@@ -1036,6 +1036,18 @@ impl ContainerInfo {
             })
             .collect::<Vec<_>>()
             .join(",")
+    }
+
+    /// Format kube container names for display in `sdme ps`.
+    ///
+    /// Shows the `kube:` prefix followed by comma-separated app names.
+    /// Example: `kube:app1,app2,app3`
+    pub fn kube_display(&self) -> String {
+        if self.kube.is_empty() {
+            String::new()
+        } else {
+            format!("kube:{}", self.kube.join(","))
+        }
     }
 
     /// Format addresses for display in `sdme ps`.
@@ -1125,9 +1137,9 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         let (rootfs_name, pod, oci_pod, userns, enabled, binds, kube) = match &state {
             Ok(s) => {
                 let kube = if s.is_yes("KUBE") {
-                    format!("kube:{}", s.get("KUBE_CONTAINERS").unwrap_or(""))
+                    s.get_list("KUBE_CONTAINERS", ',')
                 } else {
-                    String::new()
+                    Vec::new()
                 };
                 (
                     s.rootfs().to_string(),
@@ -1135,7 +1147,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
                     s.get("OCI_POD").unwrap_or("").to_string(),
                     s.is_yes("USERNS"),
                     s.is_yes("ENABLED"),
-                    s.get("BINDS").unwrap_or("").to_string(),
+                    s.get_list("BINDS", '|'),
                     kube,
                 )
             }
@@ -1147,8 +1159,8 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
                     String::new(),
                     false,
                     false,
-                    String::new(),
-                    String::new(),
+                    Vec::new(),
+                    Vec::new(),
                 )
             }
         };

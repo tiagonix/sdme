@@ -2862,8 +2862,9 @@ fn run() -> Result<()> {
                 } else {
                     None
                 };
-                let kube_w = if entries.iter().any(|e| !e.kube.is_empty()) {
-                    Some(entries.iter().map(|e| e.kube.len()).max().unwrap().max(4))
+                let kube_display: Vec<String> = entries.iter().map(|e| e.kube_display()).collect();
+                let kube_w = if kube_display.iter().any(|k| !k.is_empty()) {
+                    Some(kube_display.iter().map(|k| k.len()).max().unwrap().max(4))
                 } else {
                     None
                 };
@@ -2923,7 +2924,7 @@ fn run() -> Result<()> {
                         print!("  {:<bw$}", binds_display[i]);
                     }
                     if let Some(kw) = kube_w {
-                        print!("  {:<kw$}", e.kube);
+                        print!("  {:<kw$}", kube_display[i]);
                     }
                     if let Some(aw) = addr_w {
                         print!("  {:<aw$}", addr_display[i]);
