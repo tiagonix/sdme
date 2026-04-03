@@ -52,6 +52,20 @@ count_prefix_rootfs() {
     echo "${n:-0}"
 }
 
+# Helper: wait until a file contains a pattern or the process exits.
+# Sends SIGINT once the pattern appears. This avoids sleep-based races
+# by synchronizing on actual sdme output.
+wait_and_interrupt() {
+    local pid="$1"
+    local file="$2"
+    local pattern="$3"
+    while ! grep -q "$pattern" "$file" 2>/dev/null; do
+        kill -0 "$pid" 2>/dev/null || return
+        sleep 0.01
+    done
+    kill -INT "$pid" 2>/dev/null || true
+}
+
 # =============================================================================
 # Test: rm -a with SIGINT
 # =============================================================================
@@ -73,12 +87,11 @@ test_rm_interrupt() {
         return
     fi
 
-    # Run rm -a -f in background, send SIGINT quickly.
+    # Run rm -a -f in background, send SIGINT after first item starts.
     local errfile="$TMPDIR/rm-stderr"
     $SDME rm -a -f >/dev/null 2>"$errfile" &
     local pid=$!
-    sleep 0.01
-    kill -INT "$pid" 2>/dev/null || true
+    wait_and_interrupt "$pid" "$errfile" "removing '"
     wait "$pid" 2>/dev/null
     local rc=$?
 
@@ -127,12 +140,11 @@ test_start_interrupt() {
     local before
     before=$(count_prefix_containers)
 
-    # Run start --all in background, send SIGINT after 1s (during boot).
+    # Run start --all in background, send SIGINT after first container starts booting.
     local errfile="$TMPDIR/start-stderr"
     $SDME start --all >/dev/null 2>"$errfile" &
     local pid=$!
-    sleep 1
-    kill -INT "$pid" 2>/dev/null || true
+    wait_and_interrupt "$pid" "$errfile" "starting '"
     wait "$pid" 2>/dev/null
     local rc=$?
 
@@ -189,15 +201,14 @@ test_fs_rm_interrupt() {
         return
     fi
 
-    # Run fs rm on all entries in one command, send SIGINT quickly.
+    # Run fs rm on all entries in one command, send SIGINT after first item starts.
     local targets
     targets=$($SDME fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep "^${PREFIX}" | tr '\n' ' ')
     local errfile="$TMPDIR/fsrm-stderr"
     # shellcheck disable=SC2086
     $SDME fs rm -f $targets >/dev/null 2>"$errfile" &
     local pid=$!
-    sleep 0.01
-    kill -INT "$pid" 2>/dev/null || true
+    wait_and_interrupt "$pid" "$errfile" "removing '"
     wait "$pid" 2>/dev/null
     local rc=$?
 

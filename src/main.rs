@@ -2565,16 +2565,16 @@ fn run() -> Result<()> {
                     println!("no root filesystems found");
                 } else {
                     let name_w = entries.iter().map(|e| e.name.len()).max().unwrap().max(4);
-                    let distro_w = entries.iter().map(|e| e.distro.len()).max().unwrap().max(6);
+                    let os_w = entries.iter().map(|e| e.os.len()).max().unwrap().max(2);
                     let show_containers = entries.iter().any(|e| !e.containers.is_empty());
-                    print!("{:<name_w$}  {:<distro_w$}", "NAME", "DISTRO");
+                    print!("{:<name_w$}  {:<os_w$}", "NAME", "OS");
                     if show_containers {
                         print!("  CONTAINERS");
                     }
                     println!("  PATH");
                     for entry in &entries {
                         let path = cfg.datadir.join("fs").join(&entry.name);
-                        print!("{:<name_w$}  {:<distro_w$}", entry.name, entry.distro);
+                        print!("{:<name_w$}  {:<os_w$}", entry.name, entry.os);
                         if show_containers {
                             print!("  {:<10}", entry.containers.len());
                         }
@@ -2613,6 +2613,7 @@ fn run() -> Result<()> {
                 let mut failed = false;
                 for name in &targets {
                     check_interrupted()?;
+                    eprintln!("removing '{name}'");
                     if let Err(e) = rootfs::remove(&cfg.datadir, name, cfg.auto_fs_gc, cli.verbose)
                     {
                         eprintln!("error: {name}: {e}");

@@ -20,8 +20,8 @@ use crate::{validate_name, State};
 pub struct RootfsEntry {
     /// Rootfs directory name.
     pub name: String,
-    /// Detected distribution (from os-release), or empty if unknown.
-    pub distro: String,
+    /// OS name from os-release, or empty if unknown.
+    pub os: String,
     /// Container names using this rootfs as their base.
     pub containers: Vec<String>,
 }
@@ -183,7 +183,7 @@ pub fn list(datadir: &Path) -> Result<Vec<RootfsEntry>> {
 
         // Try sidecar metadata first; fall back to live detection.
         let meta_path = rootfs_dir.join(format!(".{name}.meta"));
-        let distro = if meta_path.exists() {
+        let os = if meta_path.exists() {
             State::read_from(&meta_path)
                 .ok()
                 .and_then(|s| s.get("DISTRO").map(|v| v.to_string()))
@@ -194,7 +194,7 @@ pub fn list(datadir: &Path) -> Result<Vec<RootfsEntry>> {
 
         entries.push(RootfsEntry {
             name,
-            distro,
+            os,
             containers: Vec::new(),
         });
     }
@@ -467,9 +467,9 @@ mod tests {
         assert_eq!(entries.len(), 2);
         // Sorted by name.
         assert_eq!(entries[0].name, "debian");
-        assert_eq!(entries[0].distro, "Debian 12");
+        assert_eq!(entries[0].os, "Debian 12");
         assert_eq!(entries[1].name, "ubuntu");
-        assert_eq!(entries[1].distro, "Ubuntu 24.04 LTS");
+        assert_eq!(entries[1].os, "Ubuntu 24.04 LTS");
     }
 
     #[test]
