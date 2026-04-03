@@ -23,7 +23,6 @@ source "$(dirname "$0")/lib.sh"
 MAX_JOBS=8
 REPORT_DIR="./test-reports"
 BASE_FS="ubuntu"
-DO_SETUP=1
 STAGGER=1
 SKIP_SCRIPTS=()
 ONLY_SCRIPTS=()
@@ -49,7 +48,17 @@ KNOWN_PREFIXES=(
     vfy-bld-
     vfy-exp-
     vfy-nixos-
+    vfy-kube-
+    vfy-kp-
+    vfy-ks-
+    vfy-kf-
     kube-vfy-
+    kube-readonly-
+    secret-test-
+    configmap-test-
+    pvc-test-
+    envfrom-test-
+    readonly-vol-
     vfy-mx-
     vfy-cp-
 )
@@ -71,7 +80,6 @@ Options:
   --stagger N          Seconds between OCI-pulling test launches (default: $STAGGER)
   --skip SCRIPT        Skip a script (repeatable, basename without .sh)
   --only SCRIPT        Run only these scripts (repeatable)
-  --no-setup           Skip build + base rootfs import
   -v, --verbose        Show test output in real time
   --help               Show help
 
@@ -96,7 +104,6 @@ parse_runner_args() {
             --stagger)  shift; STAGGER="$1" ;;
             --skip)     shift; SKIP_SCRIPTS+=("$1") ;;
             --only)     shift; ONLY_SCRIPTS+=("$1") ;;
-            --no-setup) DO_SETUP=0 ;;
             -v|--verbose) VERBOSE=1; VFLAG="-v" ;;
             --help)     usage; exit 0 ;;
             *)          echo "error: unknown option: $1" >&2; usage >&2; exit 1 ;;
@@ -408,15 +415,10 @@ main() {
     # ========================================================================
     log "Stage 1: Setup + Smoke + Interrupt"
 
-    if [[ $DO_SETUP -eq 1 ]]; then
-        log "Building and installing sdme"
-        build_and_install
+    ensure_sdme
 
-        log "Importing $BASE_FS base rootfs"
-        ensure_base_fs "$BASE_FS" "${DISTRO_IMAGES[$BASE_FS]}"
-    else
-        ensure_sdme
-    fi
+    log "Importing $BASE_FS base rootfs"
+    ensure_base_fs "$BASE_FS" "${DISTRO_IMAGES[$BASE_FS]}"
 
     # Smoke test: validates core container lifecycle.
     log "Running smoke test"
@@ -578,8 +580,10 @@ main() {
     # ========================================================================
     # Its batch tests (sdme stop --all, sdme rm --all) affect ALL containers
     # system-wide, so it must run after everything else finishes.
+    # Clean up leftover artifacts from Stage 2 tests first.
     if should_run "verify-tutorial"; then
         echo ""
+        cleanup_stale
         log "Stage 3: Destructive tests"
         CHILD_PIDS=()
         run_test "$SCRIPT_DIR/verify-tutorial.sh"

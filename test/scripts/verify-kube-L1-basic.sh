@@ -337,11 +337,13 @@ YAML
     echo "--- $test_name: checking sdme ps --json output ---"
     local ps_json kube_names
     ps_json=$("$SDME" ps --json 2>/dev/null)
-    kube_names=$(echo "$ps_json" | jq -r '.[] | select(.name == "'"$pod_name"'") | .kube | sort | join(",")')
-    if [[ "$kube_names" == "sidecar,web" ]]; then
+    local has_kube oci_names
+    has_kube=$(echo "$ps_json" | jq -r '.[] | select(.name == "'"$pod_name"'") | .kube != null')
+    oci_names=$(echo "$ps_json" | jq -r '.[] | select(.name == "'"$pod_name"'") | [.oci_apps[].name] | sort | join(",")')
+    if [[ "$has_kube" == "true" && "$oci_names" == "sidecar,web" ]]; then
         record "$test_name" PASS
     else
-        echo "expected kube=['sidecar','web'], got: '$kube_names'"
+        echo "expected kube!=null and oci_apps=['sidecar','web'], got kube=$has_kube oci_apps='$oci_names'"
         echo "$ps_json" | jq '.[] | select(.name == "'"$pod_name"'")'
         record "$test_name" FAIL
     fi

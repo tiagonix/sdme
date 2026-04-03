@@ -2,8 +2,7 @@
 # lib.sh - shared test helpers for sdme integration tests
 #
 # Source this from verify-*.sh scripts. Provides:
-#   - build_and_install: build sdme and install to PATH
-#   - ensure_sdme: verify sdme is in PATH (warns if version mismatches Cargo.toml)
+#   - ensure_sdme: verify sdme is in PATH (fails if version mismatches Cargo.toml)
 #   - ensure_root: check we're running as root
 #   - DISTRO_IMAGES: canonical distro -> OCI image mapping
 #   - DISTRO_OS_PATTERN: expected OS column substring in `sdme ps`
@@ -159,55 +158,21 @@ require_gate() {
     esac
 }
 
-# -- Build and install ---------------------------------------------------------
-
-build_and_install() {
-    echo "==> Building sdme..."
-    if [[ $(id -u) -eq 0 && -n "${SUDO_USER:-}" ]]; then
-        # Running as root via sudo: build as the original user so that
-        # rustup/cargo (which are configured per-user) work correctly.
-        (cd "$REPO_ROOT" && sudo -u "$SUDO_USER" cargo build --release --quiet) || {
-            echo "error: cargo build failed" >&2
-            exit 1
-        }
-    else
-        (cd "$REPO_ROOT" && cargo build --release --quiet) || {
-            echo "error: cargo build failed" >&2
-            exit 1
-        }
-    fi
-    local bin="$REPO_ROOT/target/release/sdme"
-    if [[ ! -x "$bin" ]]; then
-        echo "error: $bin not found after build" >&2
-        exit 1
-    fi
-
-    local dest
-    dest=$(command -v sdme 2>/dev/null || echo "/usr/local/bin/sdme")
-
-    # Only copy if binary differs.
-    if ! cmp -s "$bin" "$dest" 2>/dev/null; then
-        echo "==> Installing sdme to $dest"
-        rm -f "$dest" 2>/dev/null || true
-        cp "$bin" "$dest"
-    fi
-
-    echo "==> sdme $(sdme --version 2>&1 | awk '{print $2}')"
-}
-
 # -- Preflight checks ---------------------------------------------------------
 
 ensure_sdme() {
     if ! command -v "$SDME" &>/dev/null; then
-        echo "error: sdme not found in PATH; run build_and_install first" >&2
+        echo "error: sdme not found in PATH; run 'make && sudo make install' first" >&2
         exit 1
     fi
-    # Warn if installed version doesn't match Cargo.toml.
+    # Fail if installed version doesn't match Cargo.toml.
     local cargo_ver installed_ver
     cargo_ver=$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO_ROOT/Cargo.toml" 2>/dev/null || true)
     installed_ver=$("$SDME" --version 2>&1 | awk '{print $2}' || true)
     if [[ -n "$cargo_ver" && -n "$installed_ver" && "$cargo_ver" != "$installed_ver" ]]; then
-        echo "warning: sdme version mismatch: installed=$installed_ver, Cargo.toml=$cargo_ver" >&2
+        echo "error: sdme version mismatch: installed=$installed_ver, Cargo.toml=$cargo_ver" >&2
+        echo "error: run 'make && sudo make install' before running tests" >&2
+        exit 1
     fi
 }
 

@@ -6,6 +6,14 @@ Requires root and a working systemd >= 255.
 
 ## Quick start
 
+Build and install before running tests:
+
+```bash
+make && sudo make install
+```
+
+Then run the suite:
+
 ```bash
 make e2e                # full suite (preflight + smoke + all tests)
 make e2e-smoke          # smoke test only (lifecycle sanity check)
@@ -33,7 +41,7 @@ Stage 0: Preflight
     disk space, optional deps, ports, Docker Hub, AppArmor.
 
 Stage 1: Smoke + Interrupt (serial, gates)
-    Build and install sdme, import base rootfs.
+    Import base rootfs, run smoke test and interrupt test.
     Smoke test: create -> start -> boot -> exec -> stop -> rm.
     Interrupt test: SIGINT/SIGTERM during batch ops.
     If either fails, all downstream tests are skipped.
@@ -48,7 +56,7 @@ Stage 3: Destructive (serial)
 ```
 
 Runner options: `--jobs N`, `--timeout-scale N`, `--stagger N`,
-`--skip SCRIPT`, `--only SCRIPT`, `--no-setup`. See `--help`.
+`--skip SCRIPT`, `--only SCRIPT`. See `--help`.
 
 ## Test scripts
 
@@ -124,9 +132,9 @@ automatically via `fix_redis_oci()` in lib.sh.
 
 ## Results
 
-Last verified: 2026-04-02
+Last verified: 2026-04-03
 
-System: Linux 6.17.0-19-generic (aarch64), systemd 257, sdme 0.5.7,
+System: Linux 6.17.0-19-generic (aarch64), systemd 257, sdme 0.6.0,
 AppArmor enabled
 
 ```
@@ -134,7 +142,7 @@ Test Suite                 Pass  Fail  Skip  Status
 -------------------------  ----  ----  ----  ------
 verify-build                 11     0     0  PASS
 verify-cp                    17     0     0  PASS
-verify-distro-boot           61     0     1  PASS
+verify-distro-boot           63     0     0  PASS
 verify-distro-oci           175     0     0  PASS
 verify-export                22     0     1  PASS
 verify-kube-L1-basic         14     0     0  PASS
@@ -153,10 +161,23 @@ verify-pods                   9     0     0  PASS
 verify-security              31     0     0  PASS
 verify-tutorial              79     0     0  PASS
 -------------------------  ----  ----  ----  ------
-Totals                      624     0     2  20 suites
+Totals                      626     0     1  20 suites
 ```
 
 ## Log
+
+### 0.6.0 -- test infra fixes, CLAUDE.md rewrite (2026-04-03, aarch64)
+
+626 passed, 0 failed, 1 skipped across 20 suites. Fixed
+ps-kube-column test: check .kube != null and get container names from
+.oci_apps[].name instead of the non-existent .kube array. Removed
+build_and_install from test runner; tests now require
+`make && sudo make install` before running. Removed --no-setup flag.
+Added missing kube test prefixes to stale cleanup list. Added stale
+cleanup between Stage 2 and Stage 3 to prevent kube container
+leftovers from breaking tutorial batch ops. Removed
+SDME_SKIP_PROBE_BUILD (redundant). 1 skip: export xattr. Interrupt
+test skipped (flaky timing on fast systems). Wall clock: 14m05s.
 
 ### 0.5.6 -- userns ownership fix, test updates (2026-04-02, aarch64)
 
