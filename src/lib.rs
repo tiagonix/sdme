@@ -698,12 +698,12 @@ pub fn validate_name(name: &str) -> Result<()> {
 /// Format a unix timestamp (seconds since epoch) as `YYYY-MM-DD HH:MM` in
 /// local time. Returns the raw number as a string if formatting fails.
 pub fn format_timestamp(secs_str: &str) -> String {
-    let secs: i64 = match secs_str.parse() {
+    let secs: libc::time_t = match secs_str.parse() {
         Ok(v) => v,
         Err(_) => return secs_str.to_string(),
     };
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::localtime_r(&secs as *const i64, &mut tm) };
+    let ret = unsafe { libc::localtime_r(&secs, &mut tm) };
     if ret.is_null() {
         return secs_str.to_string();
     }

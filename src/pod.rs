@@ -1,10 +1,17 @@
-//! Pod network namespace management.
+//! Pod network namespace management and external connectivity.
 //!
 //! A pod is a shared network namespace that multiple containers can join,
 //! so their processes see the same localhost. This enables patterns like
 //! "database :5432 + app :8080, reachable via 127.0.0.1".
 //!
+//! Pods start with loopback only. External connectivity can be added with
+//! [`net_attach`] (veth or zone mode), which creates a veth pair between
+//! the pod's netns and the host. The host's systemd-networkd handles DHCP
+//! and NAT; a host-managed dhcpcd service runs inside the pod's netns.
+//! [`net_detach`] removes the veth and stops the DHCP service.
+//!
 //! **State (persistent):** `{datadir}/pods/{name}/state` (KEY=VALUE file).
+//! Networking keys: `NET_MODE`, `NET_HOST_IFACE`, `NET_ZONE`.
 //! **Runtime (volatile):** `/run/sdme/pods/{name}/netns`: bind-mount of the
 //! network namespace fd. Disappears on reboot; lazily recreated by
 //! [`ensure_runtime`] when a container references the pod.
@@ -43,7 +50,7 @@ Type=forking
 const IFNAMSIZ: usize = 15;
 
 /// Network attach mode for a pod.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum NetMode {
     /// Point-to-point veth between pod and host.
     Veth,
@@ -52,8 +59,8 @@ pub enum NetMode {
 }
 
 impl NetMode {
-    /// Parse from the state file value.
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// Parse from a state file value ("veth" or "zone").
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "veth" => Some(Self::Veth),
             "zone" => Some(Self::Zone),
@@ -137,13 +144,16 @@ fn run_cmd(program: &str, args: &[&str], verbose: bool) -> Result<()> {
 
 /// Run a command, returning true if it succeeded and false if it failed.
 ///
-/// Does not return an error; failures are silent (used for EEXIST-style checks).
+/// Stderr is suppressed; used for probing (e.g. checking if an interface
+/// exists) where failure is expected and not an error.
 fn run_cmd_ok(program: &str, args: &[&str], verbose: bool) -> bool {
     if verbose {
         eprintln!("running: {program} {}", args.join(" "));
     }
     Command::new(program)
         .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -486,7 +496,7 @@ fn restore_networking_if_needed(datadir: &Path, name: &str, verbose: bool) -> Re
         Some(s) => s.to_string(),
         None => return Ok(()),
     };
-    let mode = match NetMode::from_str(&mode_str) {
+    let mode = match NetMode::parse(&mode_str) {
         Some(m) => m,
         None => return Ok(()),
     };
@@ -558,8 +568,14 @@ pub fn net_attach(
         );
     }
 
+    if mode == NetMode::Zone && zone.is_none() {
+        bail!("zone mode requires a zone name");
+    }
+
     // Check dependencies.
     crate::system_check::find_program("ip").context("ip not found; install iproute2")?;
+    crate::system_check::find_program("nsenter")
+        .context("nsenter not found; install util-linux")?;
     crate::system_check::find_program("dhcpcd").context("dhcpcd not found; install dhcpcd")?;
 
     let host_iface = host_iface_name(name, mode);
@@ -570,60 +586,43 @@ pub fn net_attach(
     let mut dhcp_started = false;
 
     let result = (|| -> Result<()> {
-        match mode {
-            NetMode::Zone => {
-                let zone_name = zone.expect("zone name required for zone mode");
-                let bridge = format!("vz-{zone_name}");
-
-                // Create bridge if it does not exist (ignore EEXIST).
-                if !run_cmd_ok("ip", &["link", "show", &bridge], false) {
-                    run_cmd("ip", &["link", "add", &bridge, "type", "bridge"], verbose)
-                        .with_context(|| format!("failed to create bridge {bridge}"))?;
-                    run_cmd("ip", &["link", "set", &bridge, "up"], verbose)?;
-                }
-
-                // Create veth pair.
-                run_cmd(
-                    "ip",
-                    &[
-                        "link",
-                        "add",
-                        &host_iface,
-                        "type",
-                        "veth",
-                        "peer",
-                        "name",
-                        "host0",
-                    ],
-                    verbose,
-                )?;
-                veth_created = true;
-
-                // Connect host end to bridge.
-                run_cmd(
-                    "ip",
-                    &["link", "set", &host_iface, "master", &bridge],
-                    verbose,
-                )?;
+        // Zone: create bridge if it does not exist.
+        if let NetMode::Zone = mode {
+            let zone_name = zone.unwrap();
+            let bridge = format!("vz-{zone_name}");
+            if !run_cmd_ok("ip", &["link", "show", &bridge], false) {
+                run_cmd("ip", &["link", "add", &bridge, "type", "bridge"], verbose)
+                    .with_context(|| format!("failed to create bridge {bridge}"))?;
+                run_cmd("ip", &["link", "set", &bridge, "up"], verbose)?;
             }
-            NetMode::Veth => {
-                // Create veth pair.
-                run_cmd(
-                    "ip",
-                    &[
-                        "link",
-                        "add",
-                        &host_iface,
-                        "type",
-                        "veth",
-                        "peer",
-                        "name",
-                        "host0",
-                    ],
-                    verbose,
-                )?;
-                veth_created = true;
-            }
+        }
+
+        // Create veth pair (both modes).
+        run_cmd(
+            "ip",
+            &[
+                "link",
+                "add",
+                &host_iface,
+                "type",
+                "veth",
+                "peer",
+                "name",
+                "host0",
+            ],
+            verbose,
+        )?;
+        veth_created = true;
+
+        // Zone: connect host end to bridge.
+        if let NetMode::Zone = mode {
+            let zone_name = zone.unwrap();
+            let bridge = format!("vz-{zone_name}");
+            run_cmd(
+                "ip",
+                &["link", "set", &host_iface, "master", &bridge],
+                verbose,
+            )?;
         }
 
         // Move pod end into the pod's netns.
@@ -669,7 +668,7 @@ pub fn net_attach(
     }
 
     // Update persistent state.
-    state.set("NET_MODE", &mode.to_string());
+    state.set("NET_MODE", mode.to_string());
     state.set("NET_HOST_IFACE", &host_iface);
     if let Some(zone_name) = zone {
         state.set("NET_ZONE", zone_name);
@@ -937,6 +936,8 @@ mod tests {
         assert_eq!(pods.len(), 2);
         assert_eq!(pods[0].name, "alpha");
         assert_eq!(pods[0].created, "1000");
+        assert!(pods[0].net_mode.is_empty());
+        assert!(pods[0].containers.is_empty());
         assert_eq!(pods[1].name, "beta");
         assert_eq!(pods[1].created, "2000");
         // Runtime files don't exist in tests.
@@ -1051,10 +1052,10 @@ mod tests {
 
     #[test]
     fn test_net_mode_from_str() {
-        assert_eq!(NetMode::from_str("veth"), Some(NetMode::Veth));
-        assert_eq!(NetMode::from_str("zone"), Some(NetMode::Zone));
-        assert_eq!(NetMode::from_str("bridge"), None);
-        assert_eq!(NetMode::from_str(""), None);
+        assert_eq!(NetMode::parse("veth"), Some(NetMode::Veth));
+        assert_eq!(NetMode::parse("zone"), Some(NetMode::Zone));
+        assert_eq!(NetMode::parse("bridge"), None);
+        assert_eq!(NetMode::parse(""), None);
     }
 
     #[test]

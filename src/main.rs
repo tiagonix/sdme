@@ -1246,7 +1246,7 @@ enum PodCommand {
         name: String,
         /// Attach external networking immediately after creation
         #[arg(long, value_enum)]
-        attach: Option<PodNetMode>,
+        attach: Option<pod::NetMode>,
         /// Zone name (required when --attach zone)
         #[arg(long)]
         zone: Option<String>,
@@ -1274,15 +1274,6 @@ enum PodCommand {
     Net(PodNetCommand),
 }
 
-/// Network attach mode for the CLI.
-#[derive(Clone, clap::ValueEnum)]
-enum PodNetMode {
-    /// Point-to-point veth between pod and host
-    Veth,
-    /// Connect to a named zone bridge
-    Zone,
-}
-
 #[derive(Subcommand)]
 enum PodNetCommand {
     /// Attach external networking to a pod
@@ -1291,7 +1282,7 @@ enum PodNetCommand {
         name: String,
         /// Network mode: veth or zone
         #[arg(value_enum)]
-        mode: PodNetMode,
+        mode: pod::NetMode,
         /// Zone name (required for zone mode)
         zone: Option<String>,
     },
@@ -2291,23 +2282,9 @@ fn run() -> Result<()> {
             PodCommand::New { name, attach, zone } => {
                 pod::create(&cfg.datadir, &name, cli.verbose)?;
                 eprintln!("created pod '{name}'");
-                if let Some(mode) = attach {
-                    let net_mode = match mode {
-                        PodNetMode::Veth => pod::NetMode::Veth,
-                        PodNetMode::Zone => pod::NetMode::Zone,
-                    };
-                    if net_mode == pod::NetMode::Zone && zone.is_none() {
-                        bail!(
-                            "--attach zone requires --zone <name>: \
-                             sdme pod new <pod> --attach zone --zone <name>"
-                        );
-                    }
+                if let Some(net_mode) = attach {
                     pod::net_attach(&cfg.datadir, &name, net_mode, zone.as_deref(), cli.verbose)?;
-                    let mode_str = match net_mode {
-                        pod::NetMode::Veth => "veth".to_string(),
-                        pod::NetMode::Zone => format!("zone {}", zone.as_deref().unwrap_or("")),
-                    };
-                    eprintln!("attached {mode_str} networking");
+                    eprintln!("attached {net_mode} networking");
                 }
                 println!("{name}");
             }
@@ -2385,21 +2362,8 @@ fn run() -> Result<()> {
             }
             PodCommand::Net(cmd) => match cmd {
                 PodNetCommand::Attach { name, mode, zone } => {
-                    let net_mode = match mode {
-                        PodNetMode::Veth => pod::NetMode::Veth,
-                        PodNetMode::Zone => pod::NetMode::Zone,
-                    };
-                    if net_mode == pod::NetMode::Zone && zone.is_none() {
-                        bail!(
-                            "zone mode requires a zone name: sdme pod net attach <pod> zone <name>"
-                        );
-                    }
-                    pod::net_attach(&cfg.datadir, &name, net_mode, zone.as_deref(), cli.verbose)?;
-                    let mode_str = match net_mode {
-                        pod::NetMode::Veth => "veth".to_string(),
-                        pod::NetMode::Zone => format!("zone {}", zone.as_deref().unwrap_or("")),
-                    };
-                    eprintln!("attached {mode_str} networking to pod '{name}'");
+                    pod::net_attach(&cfg.datadir, &name, mode, zone.as_deref(), cli.verbose)?;
+                    eprintln!("attached {mode} networking to pod '{name}'");
                     println!("{name}");
                 }
                 PodNetCommand::Detach { name } => {

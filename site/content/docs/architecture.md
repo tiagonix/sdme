@@ -327,8 +327,8 @@ stopped but preserved on disk for debugging. See
 ## 5. Container Names
 
 When you don't specify a name, sdme generates one from a wordlist of
-200 Tupi-Guarani words and variations. The wordlist draws from Tupi-Guarani, an indigenous language family of
-Brazil.
+200 Tupi-Guarani words and variations. The wordlist draws from Tupi-Guarani,
+an indigenous language family of Brazil.
 
 Name generation shuffles the wordlist (Fisher-Yates, seeded from
 `/dev/urandom`), checks each candidate against the three-way conflict
@@ -819,12 +819,12 @@ Two modes are available:
 ```
   veth mode:                         zone mode:
 
-  +-- host --------------------+     +-- host ----------------+
-  | ve-pod-{pod}               |     | vz-{zone} (bridge)     |
-  |   IPMasquerade (networkd)  |     |   IPMasquerade (networkd)
-  +----+-----------------------+     |   +-- vb-pod-pod1      |
-       | (veth pair)                 |   +-- vb-pod-pod2      |
-  +----+-----------------------+     +---+--+--+--------------+
+  +-- host --------------------+     +-- host -------------------+
+  | ve-pod-{pod}               |     | vz-{zone} (bridge)        |
+  |   IPMasquerade (networkd)  |     |   IPMasquerade (networkd) |
+  +----+-----------------------+     |   +-- vb-pod-pod1         |
+       | (veth pair)                 |   +-- vb-pod-pod2         |
+  +----+-----------------------+     +---+--+--+-----------------+
   | host0                      |         |     |
   | pod netns (lo + host0)     |     +---+--+  +---+--+
   +----------------------------+     | pod1 |  | pod2 |
@@ -1976,9 +1976,9 @@ nspawn container with one systemd service per OCI image. All services in
 the pod share localhost, just like in Kubernetes.
 
 The base OS is any imported rootfs; the same Pod YAML runs on Ubuntu,
-Fedora, Arch Linux, or any other supported distribution. Each OCI container becomes a separate systemd service isolated in its own
-PID/IPC namespaces and chrooted into its own rootfs under
-`/oci/apps/{name}/root`.
+Fedora, Arch Linux, or any other supported distribution. Each OCI container
+becomes a separate systemd service isolated in its own PID/IPC namespaces
+and chrooted into its own rootfs under `/oci/apps/{name}/root`.
 
 For usage examples and CLI reference, see `sdme kube --help`.
 
