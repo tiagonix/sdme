@@ -15,12 +15,13 @@ distribution.
 No daemon, no runtime dependency beyond systemd itself. A single static
 binary that manages overlayfs layering and drives systemd over D-Bus.
 
-The project started as an experiment inspired by [virtme-ng](https://github.com/arighi/virtme-ng): what if you
-could clone your running host system into an isolated container with a
-single command? Overlayfs makes this nearly free: mount the host rootfs
-as a read-only lower layer, give the container its own upper layer for
-writes, and you have a full-featured Linux environment that shares the
-host's binaries but can't damage the host's files. That was the seed.
+The project started as an experiment inspired by
+[virtme-ng](https://github.com/arighi/virtme-ng): what if you could
+clone your running host system into an isolated container with a single
+command? Overlayfs makes this nearly free: mount the host rootfs as a
+read-only lower layer, give the container its own upper layer for writes,
+and you have a full-featured Linux environment that shares the host's
+binaries but can't damage the host's files. That was the seed.
 
 From there it grew: importing rootfs from other distros, pulling OCI
 images from registries, building custom root filesystems, and managing
@@ -55,7 +56,8 @@ with its own writable layer so changes stay isolated.
   |  |  |  systemd       |  |  |  |  systemd       |  |  |
   |  |  |  D-Bus         |  |  |  |  D-Bus         |  |  |
   |  |  +----------------+  |  |  +----------------+  |  |
-  |  |  upper/ work/        |  |  upper/ work/        |  |
+  |  |  upper/              |  |  upper/              |  |
+  |  |  work/               |  |  work/               |  |
   |  |  merged/             |  |  merged/             |  |
   |  +----------------------+  +----------------------+  |
   +------------------------------------------------------+
@@ -703,17 +705,17 @@ Both flags can be combined on the same container (e.g.
   |                     HOST SYSTEM                      |
   |         kernel . systemd . D-Bus . machined          |
   |                                                      |
-  |   /run/sdme/pods/my-pod/netns  (netns bind-mount)    |
-  |          |                                           |
-  |          |  +-- loopback only (127.0.0.1) --+        |
-  |          |  |                               |        |
-  |    +-----+----------+   +------------------+--+      |
-  |    | container A     |   | container B        |      |
-  |    | (db :5432)      |   | (app :8080)        |      |
-  |    | nspawn --network|   | nspawn --network   |      |
-  |    |  -namespace-    |   |  -namespace-       |      |
-  |    |  path=pod-netns |   |  path=pod-netns    |      |
-  |    +-----------------+   +--------------------+      |
+  |    /run/sdme/pods/my-pod/netns  (netns bind-mount)   |
+  |                                                      |
+  |           +-- loopback only (127.0.0.1) --+          |
+  |           |                               |          |
+  |    +------+-------------+   +-------------+------+   |
+  |    | container A        |   | container B        |   |
+  |    | (db :5432)         |   | (app :8080)        |   |
+  |    | nsenter \          |   | nsenter \          |   |
+  |    |  --net=pod-netns \ |   |  --net=pod-netns \ |   |
+  |    |  -- nspawn         |   |  -- nspawn         |   |
+  |    +--------------------+   +--------------------+   |
   +------------------------------------------------------+
 
   Both containers see 127.0.0.1:5432 (db) and
@@ -750,18 +752,21 @@ container still references the pod via `POD` or `OCI_POD` keys
 **`--pod=<name>`** on `sdme create` or `sdme new`:
 
 - Works with any container type (host-rootfs or imported rootfs).
-- Incompatible with `--userns` and `--hardened`: the kernel blocks
-  `setns(CLONE_NEWNET)` from a child user namespace into the pod's
-  netns (owned by the init userns). Use `--oci-pod` for hardened pods.
-- Compatible with `--private-network` (without userns): the pod's
-  netns already provides equivalent isolation (loopback only), so
-  `--private-network` is automatically omitted from the nspawn
-  invocation when a pod is used.
+- Compatible with `--userns` and `--hardened`. The container is launched
+  via `nsenter --net=<netns> -- systemd-nspawn ...`, entering the pod's
+  network namespace before nspawn creates the user namespace. This
+  avoids the kernel's restriction on `setns(CLONE_NEWNET)` across user
+  namespace boundaries (see [systemd/systemd#36363]).
+- Compatible with `--private-network`: the pod's netns already provides
+  equivalent isolation (loopback only), so `--private-network` is
+  automatically omitted from the nspawn invocation when a pod is used.
 - Stores `POD=<name>` in the container's state file.
-- At start time, the nspawn drop-in includes
-  `--network-namespace-path=/run/sdme/pods/<name>/netns`, which makes
-  the entire container (including init and all services) run inside
-  the pod's network namespace.
+- At start time, the nspawn drop-in launches the container via nsenter
+  to enter the pod's netns at `/run/sdme/pods/<name>/netns`. The entire
+  container (including init and all services) runs inside the pod's
+  network namespace.
+
+[systemd/systemd#36363]: https://github.com/systemd/systemd/issues/36363
 
 **`--oci-pod=<name>`** on `sdme create` or `sdme new`:
 
@@ -856,15 +861,23 @@ sysctl settings.
 lifecycle (start, stop, lease renewal). The template unit lives under
 `/run/systemd/system/` (volatile, recreated after reboot).
 
-**DNS.** Each container gets its own `/etc/resolv.conf` via nspawn's
-`--resolv-conf=auto`, independently of pod networking. Once the pod
-has a default route through the veth, DNS queries may work because of
-the netns network config with default route and nspawn's masquerade.
+**DNS.** When `pod net attach` runs dhcpcd, sdme extracts DNS servers
+from the DHCP lease (`dhcpcd --dumplease`) and stores them in the pod
+state as `NET_DNS` and `NET_SEARCH`. All running containers in the pod
+get `/etc/resolv.conf` updated immediately (atomic write to the
+overlayfs merged directory). New containers joining the pod get DNS at
+start time (written to the upper layer before nspawn launches, with
+`--resolv-conf=off` so nspawn leaves it alone). On `pod net detach`,
+the generated resolv.conf is removed from running containers and the
+DNS keys are cleared from pod state. This gives pod containers the
+same DNS servers that veth/zone containers receive from their own DHCP.
 
 **State.** The pod state file tracks the network configuration:
 `NET_MODE` (veth or zone), `NET_HOST_IFACE` (host-side interface
-name), and `NET_ZONE` (zone name, for zone mode). These keys persist
-across reboots so `ensure_runtime` can restore the networking.
+name), `NET_ZONE` (zone name, for zone mode), `NET_DNS` (space-separated
+nameserver IPs from the DHCP lease), and `NET_SEARCH` (space-separated
+search domains). These keys persist across reboots so `ensure_runtime`
+can restore the networking.
 
 **Zone interop.** Regular containers using `--network-zone=NAME` and
 pods using `pod net attach ... zone NAME` share the same `vz-NAME`

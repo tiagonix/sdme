@@ -21,6 +21,8 @@ pub struct UnitPaths {
     pub mount: PathBuf,
     /// Path to `umount`.
     pub umount: PathBuf,
+    /// Path to `nsenter` (used when a pod provides the network namespace).
+    pub nsenter: PathBuf,
 }
 
 /// Resolve the external program paths needed for the template unit.
@@ -30,10 +32,12 @@ pub fn resolve_paths() -> Result<UnitPaths> {
         .context("systemd-nspawn not found; install systemd-container")?;
     let mount = find_program("mount").context("mount not found")?;
     let umount = find_program("umount").context("umount not found")?;
+    let nsenter = find_program("nsenter").context("nsenter not found; install util-linux")?;
     Ok(UnitPaths {
         nspawn,
         mount,
         umount,
+        nsenter,
     })
 }
 
@@ -101,6 +105,10 @@ pub struct DropinConfig<'a> {
     pub service_directives: &'a [String],
     /// Per-submount overlay relative paths (e.g. `["home", "data"]`).
     pub submounts: &'a [String],
+    /// Pod network namespace path. When set, nspawn is launched via
+    /// `nsenter --net={path} --` so the userns is created after
+    /// entering the netns (avoids the cross-userns setns restriction).
+    pub pod_netns: Option<&'a str>,
 }
 
 /// Generate the per-container nspawn drop-in content.
@@ -141,7 +149,15 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
         writeln!(out, "    {datadir}/containers/{name}/merged/{rel}").unwrap();
     }
 
-    writeln!(out, "ExecStart={nspawn} \\").unwrap();
+    // When a pod provides the network namespace, launch nspawn via nsenter
+    // so the netns is entered before nspawn creates its userns. This avoids
+    // the kernel's cross-userns setns(CLONE_NEWNET) restriction.
+    if let Some(netns) = cfg.pod_netns {
+        let nsenter = cfg.paths.nsenter.display();
+        writeln!(out, "ExecStart={nsenter} --net={netns} -- {nspawn} \\").unwrap();
+    } else {
+        writeln!(out, "ExecStart={nspawn} \\").unwrap();
+    }
     writeln!(out, "    --directory={datadir}/containers/{name}/merged \\").unwrap();
     writeln!(out, "    --machine={name} \\").unwrap();
     for arg in cfg.nspawn_args {
@@ -232,15 +248,34 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     // Collect all nspawn arguments from state.
     let mut nspawn_args = Vec::new();
 
-    let has_pod = state.get("POD").is_some_and(|s| !s.is_empty());
+    let pod = state.get("POD").filter(|s| !s.is_empty()).map(String::from);
 
     let network = NetworkConfig::from_state(&state);
     let mut net_args = network.to_nspawn_args();
-    // When a pod provides the network namespace, --private-network must be
-    // omitted because nspawn rejects it together with --network-namespace-path.
-    // The pod's netns already provides equivalent isolation (loopback only).
-    if has_pod {
+    // When a pod provides the network namespace:
+    // 1. --private-network must be omitted; it would create a second netns
+    //    inside the pod's, defeating shared networking. The pod's netns
+    //    already provides equivalent isolation (loopback only).
+    // 2. If the pod has DNS from its DHCP lease, write a resolv.conf into the
+    //    container's upper layer and tell nspawn to leave it alone. Without
+    //    this, "auto" would copy the host's stub resolver (127.0.0.53) which
+    //    is unreachable from the pod's netns.
+    if let Some(ref pod_name) = pod {
         net_args.retain(|a| a != "--private-network");
+        let pod_state_path = datadir.join("pods").join(pod_name).join("state");
+        if let Ok(ps) = crate::State::read_from(&pod_state_path) {
+            if let Some(dns) = ps.get("NET_DNS") {
+                let search = ps.get("NET_SEARCH").unwrap_or("");
+                let content = crate::pod::generate_resolv_conf(dns, search);
+                crate::pod::write_container_resolv_conf(datadir, name, "upper", &content, verbose)?;
+                if let Some(arg) = net_args
+                    .iter_mut()
+                    .find(|a| a.starts_with("--resolv-conf="))
+                {
+                    *arg = "--resolv-conf=off".to_string();
+                }
+            }
+        }
     }
     nspawn_args.extend(net_args);
 
@@ -273,15 +308,19 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     nspawn_args.extend(security.to_nspawn_args(sd_version));
 
     // Pod: entire container runs in the pod's network namespace.
-    let pod = state.get("POD").filter(|s| !s.is_empty()).map(String::from);
-    if let Some(ref pod_name) = pod {
+    // The netns is entered via nsenter before nspawn, so nspawn creates its
+    // userns (if any) after the netns is already joined. This avoids the
+    // kernel's cross-userns setns(CLONE_NEWNET) restriction.
+    let pod_netns = if let Some(ref pod_name) = pod {
         crate::pod::ensure_runtime(datadir, pod_name, verbose)?;
         let netns_path = crate::pod::runtime_path(pod_name);
-        nspawn_args.push(format!("--network-namespace-path={netns_path}"));
         if verbose {
             eprintln!("pod '{pod_name}': using netns {netns_path}");
         }
-    }
+        Some(netns_path)
+    } else {
+        None
+    };
 
     // Service-level directives (not nspawn flags).
     let mut service_directives = Vec::new();
@@ -324,6 +363,7 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
         nspawn_args: &nspawn_args,
         service_directives: &service_directives,
         submounts: &submounts,
+        pod_netns: pod_netns.as_deref(),
     });
 
     let dir = dropin_dir(name);

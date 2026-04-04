@@ -29,10 +29,6 @@ pub struct ContainerInfo {
     pub os: String,
     /// Root filesystem name (from ROOTFS state key).
     pub rootfs: String,
-    /// Pod name (nspawn-level), if any.
-    pub pod: String,
-    /// Pod name (OCI app-level), if any.
-    pub oci_pod: String,
     /// Whether user namespace isolation is enabled.
     pub userns: bool,
     /// Whether auto-start on boot is enabled.
@@ -143,44 +139,39 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         let state = State::read_from(&state_path);
 
         // Extract all state-dependent fields at once.
-        let (rootfs_name, pod, oci_pod, userns, enabled, binds, network, limits, kube) =
-            match &state {
-                Ok(s) => {
-                    let kube = if s.is_yes("KUBE") {
-                        Some(KubeInfo {
-                            yaml_hash: s.get("KUBE_YAML_HASH").unwrap_or("").to_string(),
-                            has_probes: s.is_yes("HAS_PROBES"),
-                        })
-                    } else {
-                        None
-                    };
-                    (
-                        s.rootfs().to_string(),
-                        s.get("POD").unwrap_or("").to_string(),
-                        s.get("OCI_POD").unwrap_or("").to_string(),
-                        s.is_yes("USERNS"),
-                        s.is_yes("ENABLED"),
-                        s.get_list("BINDS", '|'),
-                        NetworkConfig::from_state(s),
-                        ResourceLimits::from_state(s),
-                        kube,
-                    )
-                }
-                Err(_) => {
-                    problems.push("unreadable state file");
-                    (
-                        String::new(),
-                        String::new(),
-                        String::new(),
-                        false,
-                        false,
-                        Vec::new(),
-                        NetworkConfig::default(),
-                        ResourceLimits::default(),
-                        None,
-                    )
-                }
-            };
+        let (rootfs_name, userns, enabled, binds, network, limits, kube) = match &state {
+            Ok(s) => {
+                let kube = if s.is_yes("KUBE") {
+                    Some(KubeInfo {
+                        yaml_hash: s.get("KUBE_YAML_HASH").unwrap_or("").to_string(),
+                        has_probes: s.is_yes("HAS_PROBES"),
+                    })
+                } else {
+                    None
+                };
+                (
+                    s.rootfs().to_string(),
+                    s.is_yes("USERNS"),
+                    s.is_yes("ENABLED"),
+                    s.get_list("BINDS", '|'),
+                    NetworkConfig::from_state(s),
+                    ResourceLimits::from_state(s),
+                    kube,
+                )
+            }
+            Err(_) => {
+                problems.push("unreadable state file");
+                (
+                    String::new(),
+                    false,
+                    false,
+                    Vec::new(),
+                    NetworkConfig::default(),
+                    ResourceLimits::default(),
+                    None,
+                )
+            }
+        };
 
         if !rootfs_name.is_empty() && !datadir.join("fs").join(&rootfs_name).exists() {
             problems.push("missing fs");
@@ -251,10 +242,10 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         // For pod containers: if the pod has external networking and the
         // container itself has no addresses, show the pod's addresses.
         if addresses.is_empty() && status == "running" {
-            let pod_name = if !pod.is_empty() {
-                Some(pod.as_str())
-            } else if !oci_pod.is_empty() {
-                Some(oci_pod.as_str())
+            let pod_name = if !network.pod.is_empty() {
+                Some(network.pod.as_str())
+            } else if !network.oci_pod.is_empty() {
+                Some(network.oci_pod.as_str())
             } else {
                 None
             };
@@ -315,8 +306,6 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             health,
             os,
             rootfs: rootfs_name,
-            pod,
-            oci_pod,
             userns,
             enabled,
             binds,

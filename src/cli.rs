@@ -221,6 +221,7 @@ pub(crate) fn parse_network(args: NetworkArgs) -> Result<NetworkConfig> {
         network_bridge: args.network_bridge,
         network_zone: args.network_zone,
         ports: args.ports,
+        ..Default::default()
     };
     network.validate()?;
     Ok(network)
@@ -639,18 +640,10 @@ pub(crate) fn resolve_oci_app_name(
 
 /// Validate `--pod` constraints before creating a container.
 ///
-/// Checks that:
-/// - The pod exists in the catalogue
-/// - `--pod` is not combined with user namespace isolation (`--userns`,
-///   `--hardened`). The kernel blocks `setns(CLONE_NEWNET)` from a child
-///   user namespace into the pod's netns (owned by the init userns).
-///   Use `--oci-pod` instead: its inner systemd drop-in joins the pod
-///   netns from inside the container, avoiding the cross-userns restriction.
-pub(crate) fn validate_pod_args(
-    datadir: &Path,
-    pod_name: Option<&str>,
-    userns: bool,
-) -> Result<()> {
+/// Checks that the pod exists in the catalogue. User namespace isolation
+/// (`--userns`, `--hardened`) is supported: the container is launched via
+/// `nsenter --net=` so the netns is entered before nspawn creates the userns.
+pub(crate) fn validate_pod_args(datadir: &Path, pod_name: Option<&str>) -> Result<()> {
     let pod_name = match pod_name {
         Some(n) => n,
         None => return Ok(()),
@@ -658,14 +651,6 @@ pub(crate) fn validate_pod_args(
 
     if !pod::exists(datadir, pod_name) {
         bail!("pod not found: {pod_name}");
-    }
-
-    if userns {
-        bail!(
-            "--pod is incompatible with user namespace isolation (--userns, --hardened);\n\
-             the kernel blocks setns(CLONE_NEWNET) across user namespace boundaries.\n\
-             Use --oci-pod instead, which joins the pod netns from inside the container."
-        );
     }
 
     Ok(())

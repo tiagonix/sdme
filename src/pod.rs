@@ -11,13 +11,15 @@
 //! [`net_detach`] removes the veth and stops the DHCP service.
 //!
 //! **State (persistent):** `{datadir}/pods/{name}/state` (KEY=VALUE file).
-//! Networking keys: `NET_MODE`, `NET_HOST_IFACE`, `NET_ZONE`.
+//! Networking keys: `NET_MODE`, `NET_HOST_IFACE`, `NET_ZONE`, `NET_DNS`,
+//! `NET_SEARCH`.
 //! **Runtime (volatile):** `/run/sdme/pods/{name}/netns`: bind-mount of the
 //! network namespace fd. Disappears on reboot; lazily recreated by
 //! [`ensure_runtime`] when a container references the pod.
 
 use std::ffi::CString;
 use std::fmt;
+use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -35,16 +37,21 @@ const RUNTIME_DIR: &str = "/run/sdme/pods";
 /// Path for the volatile systemd template unit that runs dhcpcd in a pod's netns.
 const DHCP_TEMPLATE_UNIT_PATH: &str = "/run/systemd/system/sdme-pod-net@.service";
 
-/// Content of the dhcpcd template unit. `%i` is the pod name, resolved by systemd.
-const DHCP_TEMPLATE_UNIT: &str = "\
+/// Generate the dhcpcd template unit content with the resolved dhcpcd path.
+fn dhcp_template_unit(dhcpcd: &Path) -> String {
+    let dhcpcd = dhcpcd.display();
+    format!(
+        "\
 [Unit]
 Description=DHCP client for sdme pod %i
 
 [Service]
 NetworkNamespacePath=/run/sdme/pods/%i/netns
-ExecStart=/usr/bin/dhcpcd -B host0
+ExecStart={dhcpcd} host0
 Type=forking
-";
+"
+    )
+}
 
 /// Linux IFNAMSIZ limit (including null terminator). Interface names are at most 15 bytes.
 const IFNAMSIZ: usize = 15;
@@ -103,9 +110,10 @@ pub fn host_iface_name(pod_name: &str, mode: NetMode) -> String {
 ///
 /// Idempotent: skips the write if the file already has the correct content.
 /// Returns true if the file was written (daemon-reload needed), false if skipped.
-fn write_dhcp_template_unit(verbose: bool) -> Result<bool> {
+fn write_dhcp_template_unit(dhcpcd: &Path, verbose: bool) -> Result<bool> {
+    let content = dhcp_template_unit(dhcpcd);
     if let Ok(existing) = fs::read_to_string(DHCP_TEMPLATE_UNIT_PATH) {
-        if existing == DHCP_TEMPLATE_UNIT {
+        if existing == content {
             if verbose {
                 eprintln!("dhcp template unit already exists, skipping write");
             }
@@ -117,8 +125,7 @@ fn write_dhcp_template_unit(verbose: bool) -> Result<bool> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
-    fs::write(DHCP_TEMPLATE_UNIT_PATH, DHCP_TEMPLATE_UNIT)
-        .context("failed to write dhcp template unit")?;
+    fs::write(DHCP_TEMPLATE_UNIT_PATH, &content).context("failed to write dhcp template unit")?;
     if verbose {
         eprintln!("wrote {DHCP_TEMPLATE_UNIT_PATH}");
     }
@@ -183,6 +190,10 @@ pub struct PodInfo {
     pub net_mode: String,
     /// Zone name (zone mode only), or empty string.
     pub net_zone: String,
+    /// DNS nameservers from the DHCP lease (space-separated).
+    pub dns: String,
+    /// DNS search domains from the DHCP lease (space-separated).
+    pub search: String,
     /// IP addresses assigned to host0 in the pod's netns.
     ///
     /// Empty when the pod is inactive, has no external networking, or
@@ -259,14 +270,22 @@ pub fn list(datadir: &Path) -> Result<Vec<PodInfo>> {
         if !state_path.exists() {
             continue;
         }
-        let (created, net_mode, net_zone) = match State::read_from(&state_path) {
+        let (created, net_mode, net_zone, dns, search) = match State::read_from(&state_path) {
             Ok(s) => {
                 let created = s.get("CREATED").unwrap_or("").to_string();
                 let net_mode = s.get("NET_MODE").unwrap_or("").to_string();
                 let net_zone = s.get("NET_ZONE").unwrap_or("").to_string();
-                (created, net_mode, net_zone)
+                let dns = s.get("NET_DNS").unwrap_or("").to_string();
+                let search = s.get("NET_SEARCH").unwrap_or("").to_string();
+                (created, net_mode, net_zone, dns, search)
             }
-            Err(_) => (String::new(), String::new(), String::new()),
+            Err(_) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
         };
 
         let runtime_path = Path::new(RUNTIME_DIR).join(&name).join("netns");
@@ -287,6 +306,8 @@ pub fn list(datadir: &Path) -> Result<Vec<PodInfo>> {
             active,
             net_mode,
             net_zone,
+            dns,
+            search,
             addresses,
             containers: Vec::new(),
         });
@@ -339,8 +360,9 @@ pub fn list(datadir: &Path) -> Result<Vec<PodInfo>> {
 /// interface has no addresses or the command fails.
 pub fn read_pod_addresses(name: &str) -> Vec<String> {
     let netns_path = runtime_path(name);
+    let net_arg = format!("--net={netns_path}");
     let output = Command::new("nsenter")
-        .args(["--net", &netns_path, "ip", "-o", "addr", "show", "host0"])
+        .args([&net_arg, "ip", "-o", "addr", "show", "host0"])
         .output();
     let mut addrs = Vec::new();
     if let Ok(out) = output {
@@ -367,6 +389,138 @@ pub fn read_pod_addresses(name: &str) -> Vec<String> {
     addrs
 }
 
+/// Generate a resolv.conf from DNS and search domain strings.
+///
+/// `dns` is space-separated nameserver IPs, `search` is space-separated domains.
+pub fn generate_resolv_conf(dns: &str, search: &str) -> String {
+    let mut content = String::from("# Generated by sdme from pod DHCP lease\n");
+    for ns in dns.split_whitespace() {
+        writeln!(content, "nameserver {ns}").unwrap();
+    }
+    let search = search.trim();
+    if !search.is_empty() {
+        writeln!(content, "search {search}").unwrap();
+    }
+    content
+}
+
+/// Find all containers that reference a pod via POD or OCI_POD state keys.
+///
+/// Returns container names. Skips unreadable state files.
+pub fn find_pod_containers(datadir: &Path, pod_name: &str) -> Vec<String> {
+    let state_dir = datadir.join("state");
+    let mut names = Vec::new();
+    if let Ok(entries) = fs::read_dir(&state_dir) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Ok(s) = State::read_from(&entry.path()) {
+                let has_pod = s.get("POD").is_some_and(|v| v == pod_name);
+                let has_oci_pod = s.get("OCI_POD").is_some_and(|v| v == pod_name);
+                if has_pod || has_oci_pod {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Parse DNS servers and search domains from a dhcpcd `--dumplease` output.
+///
+/// Returns `(dns, search)` where dns is space-separated nameserver IPs
+/// and search is space-separated domain names. Either may be empty.
+fn parse_lease_dns(dumplease: &str) -> (String, String) {
+    let mut nameservers = Vec::new();
+    let mut search_domains = Vec::new();
+
+    for line in dumplease.lines() {
+        if let Some(value) = line.strip_prefix("domain_name_servers=") {
+            for ns in value.split_whitespace() {
+                if !nameservers.contains(&ns) {
+                    nameservers.push(ns);
+                }
+            }
+        } else if let Some(value) = line.strip_prefix("domain_search=") {
+            for domain in value.split_whitespace() {
+                if !search_domains.contains(&domain) {
+                    search_domains.push(domain);
+                }
+            }
+        } else if let Some(value) = line.strip_prefix("domain_name=") {
+            let domain = value.trim();
+            if !domain.is_empty() && !search_domains.contains(&domain) {
+                search_domains.push(domain);
+            }
+        }
+    }
+
+    (nameservers.join(" "), search_domains.join(" "))
+}
+
+/// Write a resolv.conf into a container's overlayfs directory.
+///
+/// Uses atomic write (temp file + rename) to avoid partial reads.
+/// `base` should be `merged` for running containers or `upper` for stopped.
+pub fn write_container_resolv_conf(
+    datadir: &Path,
+    container: &str,
+    base: &str,
+    content: &str,
+    verbose: bool,
+) -> Result<()> {
+    let etc_dir = datadir
+        .join("containers")
+        .join(container)
+        .join(base)
+        .join("etc");
+    if !etc_dir.exists() {
+        fs::create_dir_all(&etc_dir)
+            .with_context(|| format!("failed to create {}", etc_dir.display()))?;
+    }
+    let target = etc_dir.join("resolv.conf");
+    let tmp = etc_dir.join(".resolv.conf.sdme-tmp");
+    fs::write(&tmp, content).with_context(|| format!("failed to write {}", tmp.display()))?;
+    fs::rename(&tmp, &target)
+        .with_context(|| format!("failed to rename to {}", target.display()))?;
+    if verbose {
+        eprintln!("wrote {}", target.display());
+    }
+    Ok(())
+}
+
+/// Remove the sdme-generated resolv.conf from a container's overlayfs directory.
+///
+/// Only removes if the file starts with our header comment to avoid
+/// clobbering user edits.
+fn remove_container_resolv_conf(
+    datadir: &Path,
+    container: &str,
+    base: &str,
+    verbose: bool,
+) -> Result<()> {
+    let target = datadir
+        .join("containers")
+        .join(container)
+        .join(base)
+        .join("etc")
+        .join("resolv.conf");
+    if target.exists() {
+        if let Ok(content) = fs::read_to_string(&target) {
+            if content.starts_with("# Generated by sdme") {
+                fs::remove_file(&target)
+                    .with_context(|| format!("failed to remove {}", target.display()))?;
+                if verbose {
+                    eprintln!("removed {}", target.display());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Remove a pod.
 ///
 /// Unmounts the runtime netns, removes the runtime dir, and deletes the
@@ -384,26 +538,22 @@ pub fn remove(datadir: &Path, name: &str, force: bool, verbose: bool) -> Result<
         .with_context(|| format!("cannot lock pod '{name}' for removal"))?;
 
     // Check for containers referencing this pod.
-    if !force {
-        let ct_state_dir = datadir.join("state");
-        if ct_state_dir.is_dir() {
-            for entry in fs::read_dir(&ct_state_dir)? {
-                let entry = entry?;
-                if !entry.file_type()?.is_file() {
-                    continue;
-                }
-                let ct_name = entry.file_name().to_string_lossy().to_string();
-                let ct_state_path = ct_state_dir.join(&ct_name);
-                if let Ok(state) = State::read_from(&ct_state_path) {
-                    let is_referenced =
-                        state.get("POD") == Some(name) || state.get("OCI_POD") == Some(name);
-                    if is_referenced {
-                        bail!(
-                            "pod '{name}' is referenced by container '{ct_name}'; \
-                             remove the container first or use --force"
-                        );
-                    }
-                }
+    let ct_names = find_pod_containers(datadir, name);
+    if !ct_names.is_empty() {
+        if !force {
+            bail!(
+                "pod '{name}' is referenced by container(s): {}; \
+                 remove them first or use --force",
+                ct_names.join(", ")
+            );
+        }
+        // Force: stop and remove all containers referencing this pod.
+        for ct in &ct_names {
+            if verbose {
+                eprintln!("force-removing container '{ct}' from pod '{name}'");
+            }
+            if let Err(e) = crate::containers::remove(datadir, ct, verbose) {
+                eprintln!("warning: failed to remove container '{ct}': {e}");
             }
         }
     }
@@ -576,7 +726,8 @@ pub fn net_attach(
     crate::system_check::find_program("ip").context("ip not found; install iproute2")?;
     crate::system_check::find_program("nsenter")
         .context("nsenter not found; install util-linux")?;
-    crate::system_check::find_program("dhcpcd").context("dhcpcd not found; install dhcpcd")?;
+    let dhcpcd =
+        crate::system_check::find_program("dhcpcd").context("dhcpcd not found; install dhcpcd")?;
 
     let host_iface = host_iface_name(name, mode);
     let netns_path = runtime_path(name);
@@ -636,14 +787,15 @@ pub fn net_attach(
         run_cmd("ip", &["link", "set", &host_iface, "up"], verbose)?;
 
         // Bring up pod end.
+        let net_arg = format!("--net={netns_path}");
         run_cmd(
             "nsenter",
-            &["--net", &netns_path, "ip", "link", "set", "host0", "up"],
+            &[net_arg.as_str(), "ip", "link", "set", "host0", "up"],
             verbose,
         )?;
 
         // Write the dhcpcd template unit (idempotent) and daemon-reload if needed.
-        if write_dhcp_template_unit(verbose)? {
+        if write_dhcp_template_unit(&dhcpcd, verbose)? {
             run_cmd("systemctl", &["daemon-reload"], verbose)?;
         }
 
@@ -667,15 +819,54 @@ pub fn net_attach(
         return Err(e).context("pod net attach failed");
     }
 
+    // Extract DNS servers from the DHCP lease. Without this, containers
+    // in the pod's netns cannot resolve names (the host's stub resolver
+    // 127.0.0.53 is unreachable from the pod's network namespace).
+    let (dns, search) = match Command::new(&dhcpcd)
+        .args(["--dumplease", "host0"])
+        .output()
+    {
+        Ok(out) if out.status.success() => parse_lease_dns(&String::from_utf8_lossy(&out.stdout)),
+        _ => {
+            if verbose {
+                eprintln!("warning: dhcpcd --dumplease failed, no DNS for pod containers");
+            }
+            (String::new(), String::new())
+        }
+    };
+
     // Update persistent state.
     state.set("NET_MODE", mode.to_string());
     state.set("NET_HOST_IFACE", &host_iface);
     if let Some(zone_name) = zone {
         state.set("NET_ZONE", zone_name);
     }
+    if !dns.is_empty() {
+        state.set("NET_DNS", &dns);
+    }
+    if !search.is_empty() {
+        state.set("NET_SEARCH", &search);
+    }
     state
         .write_to(&state_path)
         .context("failed to write pod state after net attach")?;
+
+    // Update resolv.conf on running containers that belong to this pod.
+    if !dns.is_empty() {
+        let content = generate_resolv_conf(&dns, &search);
+        let containers = find_pod_containers(datadir, name);
+        for ct in &containers {
+            let _lock = crate::lock::lock_exclusive(datadir, "containers", ct);
+            let merged = datadir.join("containers").join(ct).join("merged");
+            if merged.exists() {
+                if let Err(e) =
+                    write_container_resolv_conf(datadir, ct, "merged", &content, verbose)
+                {
+                    eprintln!("warning: failed to update resolv.conf for {ct}: {e}");
+                }
+            }
+        }
+    }
 
     if verbose {
         eprintln!("attached {mode} networking to pod '{name}' (iface: {host_iface})");
@@ -722,10 +913,26 @@ pub fn net_detach(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         }
     }
 
+    // Remove resolv.conf from running containers before clearing DNS state.
+    let containers = find_pod_containers(datadir, name);
+    for ct in &containers {
+        let _lock = crate::lock::lock_exclusive(datadir, "containers", ct);
+        let merged = datadir.join("containers").join(ct).join("merged");
+        if merged.exists() {
+            if let Err(e) = remove_container_resolv_conf(datadir, ct, "merged", verbose) {
+                if verbose {
+                    eprintln!("warning: failed to remove resolv.conf for {ct}: {e}");
+                }
+            }
+        }
+    }
+
     // Clear networking state.
     state.remove("NET_MODE");
     state.remove("NET_HOST_IFACE");
     state.remove("NET_ZONE");
+    state.remove("NET_DNS");
+    state.remove("NET_SEARCH");
     state
         .write_to(&state_path)
         .context("failed to write pod state after net detach")?;
@@ -1218,5 +1425,121 @@ mod tests {
         assert_eq!(pods[0].containers[0].pod_mode, "pod");
         assert_eq!(pods[0].containers[1].name, "app2");
         assert_eq!(pods[0].containers[1].pod_mode, "oci-pod");
+    }
+
+    // --- generate_resolv_conf tests ---
+
+    #[test]
+    fn test_generate_resolv_conf_single_ns() {
+        let content = generate_resolv_conf("8.8.8.8", "");
+        assert_eq!(
+            content,
+            "# Generated by sdme from pod DHCP lease\nnameserver 8.8.8.8\n"
+        );
+    }
+
+    #[test]
+    fn test_generate_resolv_conf_multiple_ns_and_search() {
+        let content = generate_resolv_conf("8.8.8.8 8.8.4.4", "example.com local");
+        assert_eq!(
+            content,
+            "# Generated by sdme from pod DHCP lease\n\
+             nameserver 8.8.8.8\n\
+             nameserver 8.8.4.4\n\
+             search example.com local\n"
+        );
+    }
+
+    #[test]
+    fn test_generate_resolv_conf_empty_dns() {
+        let content = generate_resolv_conf("", "example.com");
+        // Empty DNS means no nameserver lines, but search still appears.
+        assert_eq!(
+            content,
+            "# Generated by sdme from pod DHCP lease\nsearch example.com\n"
+        );
+    }
+
+    #[test]
+    fn test_generate_resolv_conf_empty_both() {
+        let content = generate_resolv_conf("", "");
+        assert_eq!(content, "# Generated by sdme from pod DHCP lease\n");
+    }
+
+    // --- parse_lease_dns tests ---
+
+    #[test]
+    fn test_parse_lease_dns_basic() {
+        let lease = "domain_name_servers=8.8.8.8 8.8.4.4\ndomain_name=example.com\n";
+        let (dns, search) = parse_lease_dns(lease);
+        assert_eq!(dns, "8.8.8.8 8.8.4.4");
+        assert_eq!(search, "example.com");
+    }
+
+    #[test]
+    fn test_parse_lease_dns_with_search() {
+        let lease = "domain_name_servers=1.1.1.1\ndomain_search=corp.example.com example.com\n";
+        let (dns, search) = parse_lease_dns(lease);
+        assert_eq!(dns, "1.1.1.1");
+        assert_eq!(search, "corp.example.com example.com");
+    }
+
+    #[test]
+    fn test_parse_lease_dns_domain_name_after_search() {
+        // domain_name should be appended to search domains if not already present.
+        let lease = "domain_search=corp.example.com\ndomain_name=example.com\n";
+        let (dns, search) = parse_lease_dns(lease);
+        assert!(dns.is_empty());
+        assert_eq!(search, "corp.example.com example.com");
+    }
+
+    #[test]
+    fn test_parse_lease_dns_dedup() {
+        // Duplicate nameservers and domains should be deduplicated.
+        let lease = "domain_name_servers=8.8.8.8 8.8.8.8\n\
+                     domain_search=example.com\n\
+                     domain_name=example.com\n";
+        let (dns, search) = parse_lease_dns(lease);
+        assert_eq!(dns, "8.8.8.8");
+        assert_eq!(search, "example.com");
+    }
+
+    #[test]
+    fn test_parse_lease_dns_empty() {
+        let (dns, search) = parse_lease_dns("");
+        assert!(dns.is_empty());
+        assert!(search.is_empty());
+    }
+
+    #[test]
+    fn test_parse_lease_dns_no_dns_keys() {
+        let lease = "ip_address=10.0.0.2\nrouters=10.0.0.1\n";
+        let (dns, search) = parse_lease_dns(lease);
+        assert!(dns.is_empty());
+        assert!(search.is_empty());
+    }
+
+    // --- find_pod_containers tests ---
+
+    #[test]
+    fn test_find_pod_containers_empty() {
+        let tmp = tmp();
+        let names = find_pod_containers(tmp.path(), "mypod");
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn test_find_pod_containers_matches() {
+        let tmp = tmp();
+        let ct_dir = tmp.path().join("state");
+        fs::create_dir_all(&ct_dir).unwrap();
+        fs::write(ct_dir.join("app1"), "NAME=app1\nPOD=mypod\n").unwrap();
+        fs::write(ct_dir.join("app2"), "NAME=app2\nOCI_POD=mypod\n").unwrap();
+        fs::write(ct_dir.join("other"), "NAME=other\nPOD=otherpod\n").unwrap();
+        fs::write(ct_dir.join("plain"), "NAME=plain\n").unwrap();
+
+        let mut names = find_pod_containers(tmp.path(), "mypod");
+        names.sort();
+        assert_eq!(names, vec!["app1", "app2"]);
     }
 }

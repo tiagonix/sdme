@@ -644,9 +644,9 @@ Kubernetes pod.
 Two ways to join a pod:
 
   --pod <name>       The entire nspawn container runs in the pod's network
-                     namespace. Incompatible with --userns and --hardened
-                     because the kernel blocks setns(CLONE_NEWNET) across
-                     user namespace boundaries.
+                     namespace. Works with --userns and --hardened; the
+                     netns is entered via nsenter before nspawn creates the
+                     user namespace.
 
   --oci-pod <name>   Only the OCI app process enters the pod's network
                      namespace (via a systemd NetworkNamespacePath= drop-in).
@@ -668,6 +668,11 @@ EXTERNAL NETWORKING:
 
     Attach and detach are live: running containers immediately see the
     interface appear or disappear. Works with both --pod and --oci-pod.
+
+    DNS: attach extracts DNS servers from the DHCP lease and writes
+    /etc/resolv.conf into all running pod containers. New containers
+    joining the pod get DNS at start time. Detach removes the generated
+    resolv.conf from running containers.
 
     Requires: iproute2 (ip), dhcpcd.
 
@@ -1326,8 +1331,11 @@ enum PodCommand {
     /// Remove one or more pods
     Rm {
         /// Pod names
-        #[arg(required = true)]
+        #[arg(required_unless_present = "all")]
         names: Vec<String>,
+        /// Remove all pods
+        #[arg(short, long, conflicts_with = "names")]
+        all: bool,
         /// Force removal even if containers reference the pod
         #[arg(short, long)]
         force: bool,
@@ -1838,7 +1846,7 @@ fn run() -> Result<()> {
                 network.private_network = true;
             }
             retain_net_raw_for_dhcp(&mut sec, &network);
-            validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
+            validate_pod_args(&cfg.datadir, pod.as_deref())?;
             validate_oci_pod_args(
                 &cfg.datadir,
                 oci_pod.as_deref(),
@@ -2121,7 +2129,7 @@ fn run() -> Result<()> {
                 network.private_network = true;
             }
             retain_net_raw_for_dhcp(&mut sec, &network);
-            validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
+            validate_pod_args(&cfg.datadir, pod.as_deref())?;
             validate_oci_pod_args(
                 &cfg.datadir,
                 oci_pod.as_deref(),
@@ -2403,9 +2411,35 @@ fn run() -> Result<()> {
                     }
                 }
             }
-            PodCommand::Rm { names, force } => {
+            PodCommand::Rm { names, all, force } => {
+                let targets: Vec<String> = if all {
+                    let all_pods = pod::list(&cfg.datadir)?;
+                    if all_pods.is_empty() {
+                        eprintln!("no pods to remove");
+                        return Ok(());
+                    }
+                    if !force {
+                        if !interactive {
+                            bail!("use -f to confirm removal in non-interactive mode");
+                        }
+                        let pod_names: Vec<&str> =
+                            all_pods.iter().map(|p| p.name.as_str()).collect();
+                        eprintln!(
+                            "this will remove {} pod{}: {}",
+                            pod_names.len(),
+                            if pod_names.len() == 1 { "" } else { "s" },
+                            pod_names.join(", "),
+                        );
+                        if !confirm("are you sure? [y/N] ")? {
+                            bail!("aborted");
+                        }
+                    }
+                    all_pods.into_iter().map(|p| p.name).collect()
+                } else {
+                    names
+                };
                 let mut failed = false;
-                for name in &names {
+                for name in &targets {
                     check_interrupted()?;
                     eprintln!("removing pod '{name}'");
                     if let Err(e) = pod::remove(&cfg.datadir, name, force, cli.verbose) {
@@ -2450,7 +2484,7 @@ fn run() -> Result<()> {
             } => {
                 system_check::check_systemd_version(255)?;
                 let (mut sec, hardened) = parse_security(security_args, &cfg)?;
-                validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
+                validate_pod_args(&cfg.datadir, pod.as_deref())?;
                 validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref())?;
                 let yaml_content = std::fs::read_to_string(&file)
                     .with_context(|| format!("failed to read {file}"))?;
@@ -2528,7 +2562,7 @@ fn run() -> Result<()> {
             } => {
                 system_check::check_systemd_version(255)?;
                 let (mut sec, hardened) = parse_security(security_args, &cfg)?;
-                validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
+                validate_pod_args(&cfg.datadir, pod.as_deref())?;
                 validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref())?;
                 let yaml_content = std::fs::read_to_string(&file)
                     .with_context(|| format!("failed to read {file}"))?;

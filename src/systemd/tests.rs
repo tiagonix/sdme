@@ -19,6 +19,7 @@ fn test_paths() -> UnitPaths {
         nspawn: PathBuf::from("/usr/bin/systemd-nspawn"),
         mount: PathBuf::from("/usr/bin/mount"),
         umount: PathBuf::from("/usr/bin/umount"),
+        nsenter: PathBuf::from("/usr/bin/nsenter"),
     }
 }
 
@@ -63,6 +64,7 @@ fn test_nspawn_dropin_host_rootfs() {
         nspawn_args: &args,
         service_directives: &[],
         submounts: &[],
+        pod_netns: None,
     });
     assert!(content.contains("[Service]"));
     assert!(content.contains("ExecStart=\n"));
@@ -93,10 +95,59 @@ fn test_nspawn_dropin_with_userns() {
         nspawn_args: &args,
         service_directives: &[],
         submounts: &[],
+        pod_netns: None,
     });
     assert!(content.contains("--private-users=pick"));
     assert!(content.contains("--private-users-ownership=auto"));
     assert!(content.contains("--boot"));
+}
+
+#[test]
+fn test_nspawn_dropin_with_pod_netns() {
+    let paths = test_paths();
+    let args = vec![
+        "--resolv-conf=auto".to_string(),
+        "--private-users=pick".to_string(),
+        "--private-users-ownership=auto".to_string(),
+    ];
+    let content = nspawn_dropin(&DropinConfig {
+        datadir: "/var/lib/sdme",
+        name: "podbox",
+        lowerdir: "/",
+        paths: &paths,
+        nspawn_args: &args,
+        service_directives: &[],
+        submounts: &[],
+        pod_netns: Some("/run/sdme/pods/mypod/ns/net"),
+    });
+    // nsenter should prefix the nspawn command.
+    assert!(content.contains(
+        "ExecStart=/usr/bin/nsenter --net=/run/sdme/pods/mypod/ns/net -- /usr/bin/systemd-nspawn"
+    ));
+    // userns flags should still be present.
+    assert!(content.contains("--private-users=pick"));
+    assert!(content.contains("--boot"));
+    // --network-namespace-path should NOT appear.
+    assert!(!content.contains("--network-namespace-path"));
+}
+
+#[test]
+fn test_nspawn_dropin_without_pod_netns() {
+    let paths = test_paths();
+    let args = vec!["--resolv-conf=auto".to_string()];
+    let content = nspawn_dropin(&DropinConfig {
+        datadir: "/var/lib/sdme",
+        name: "mybox",
+        lowerdir: "/",
+        paths: &paths,
+        nspawn_args: &args,
+        service_directives: &[],
+        submounts: &[],
+        pod_netns: None,
+    });
+    // Without a pod netns, nspawn is launched directly (no nsenter).
+    assert!(!content.contains("nsenter"));
+    assert!(content.contains("ExecStart=/usr/bin/systemd-nspawn"));
 }
 
 #[test]
@@ -111,6 +162,7 @@ fn test_nspawn_dropin_explicit_rootfs() {
         nspawn_args: &args,
         service_directives: &[],
         submounts: &[],
+        pod_netns: None,
     });
     assert!(content
         .contains("lowerdir=/var/lib/sdme/fs/ubuntu,upperdir=/var/lib/sdme/containers/ubox/upper"));
@@ -133,6 +185,7 @@ fn test_nspawn_dropin_with_binds_and_envs() {
         nspawn_args: &args,
         service_directives: &[],
         submounts: &[],
+        pod_netns: None,
     });
     assert!(content.contains("    --bind=/data:/data \\\n"));
     assert!(content.contains("    --bind-ro=/logs:/logs \\\n"));
@@ -154,6 +207,7 @@ fn test_nspawn_dropin_escapes_spaces() {
         nspawn_args: &args,
         service_directives: &[],
         submounts: &[],
+        pod_netns: None,
     });
     assert!(content.contains("\"--setenv=MSG=hello world\""));
 }
@@ -236,6 +290,7 @@ fn test_nspawn_dropin_with_security() {
         nspawn_args: &args,
         service_directives: &[],
         submounts: &[],
+        pod_netns: None,
     });
     assert!(content.contains("--drop-capability=CAP_SYS_PTRACE"));
     assert!(content.contains("--drop-capability=CAP_NET_RAW"));
@@ -260,6 +315,7 @@ fn test_nspawn_dropin_with_apparmor() {
         nspawn_args: &args,
         service_directives: &service_directives,
         submounts: &[],
+        pod_netns: None,
     });
     // AppArmor directive should appear in the [Service] section.
     assert!(content.contains("AppArmorProfile=sdme-default"));
@@ -289,6 +345,7 @@ fn test_nspawn_dropin_with_submounts() {
         nspawn_args: &args,
         service_directives: &[],
         submounts: &submounts,
+        pod_netns: None,
     });
 
     // Root overlay is still present.

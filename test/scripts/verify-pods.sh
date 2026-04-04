@@ -93,16 +93,16 @@ $SDME create --pod=pnpod --private-network -r ubuntu pod-pn2 $VFLAG
 timeout "$TIMEOUT_BOOT" "$SDME" start pod-pn1 -t "$TIMEOUT_BOOT" $VFLAG 2>&1
 timeout "$TIMEOUT_BOOT" "$SDME" start pod-pn2 -t "$TIMEOUT_BOOT" $VFLAG 2>&1
 
-# Verify --private-network is omitted from the nspawn drop-in.
+# Verify nsenter --net= is used and --private-network is omitted from the drop-in.
 dropin="/etc/systemd/system/sdme@pod-pn1.service.d/nspawn.conf"
-if [[ -f "$dropin" ]] && grep -q -- "--network-namespace-path=" "$dropin"; then
+if [[ -f "$dropin" ]] && grep -q "nsenter --net=" "$dropin"; then
     if ! grep -q -- "--private-network" "$dropin"; then
-        ok "--pod + --private-network: --private-network omitted from drop-in"
+        ok "--pod + --private-network: --private-network omitted, nsenter used"
     else
         fail "--pod + --private-network: --private-network should be omitted"
     fi
 else
-    fail "--pod + --private-network: drop-in missing or no --network-namespace-path"
+    fail "--pod + --private-network: drop-in missing or no nsenter --net="
 fi
 
 # Loopback connectivity.
@@ -130,30 +130,36 @@ cleanup_pod pnpod
 # ---------------------------------------------------------------------------
 echo "=== Test 3: Validation ==="
 
-# 3a: --pod + --hardened → should error (kernel blocks setns(CLONE_NEWNET)
-# across user namespace boundaries; use --oci-pod instead)
+# 3a: --pod + --hardened → should succeed (nsenter enters the netns before
+# nspawn creates the userns, avoiding the cross-userns setns restriction)
 $SDME pod new valpod $VFLAG
-if err=$($SDME create --pod=valpod --hardened -r ubuntu val-err0 2>&1); then
-    fail "--pod + --hardened should error"
-    cleanup_container val-err0
-else
-    if echo "$err" | grep -q "incompatible with user namespace"; then
-        ok "--pod + --hardened rejected (userns incompatible)"
+if $SDME create --pod=valpod --hardened -r ubuntu val-h1 $VFLAG; then
+    dropin="/etc/systemd/system/sdme@val-h1.service.d/nspawn.conf"
+    timeout "$TIMEOUT_BOOT" "$SDME" start val-h1 -t "$TIMEOUT_BOOT" $VFLAG 2>&1
+    if [[ -f "$dropin" ]] && grep -q "nsenter --net=" "$dropin" \
+            && grep -q -- "--private-users=pick" "$dropin"; then
+        ok "--pod + --hardened: nsenter + userns in drop-in"
     else
-        fail "--pod + --hardened: unexpected error: $err"
+        fail "--pod + --hardened: expected nsenter and --private-users=pick in drop-in"
     fi
+    cleanup_container val-h1
+else
+    fail "--pod + --hardened should succeed"
 fi
 
-# 3b: --pod + --userns → should error (same reason)
-if err=$($SDME create --pod=valpod --userns -r ubuntu val-err0b 2>&1); then
-    fail "--pod + --userns should error"
-    cleanup_container val-err0b
-else
-    if echo "$err" | grep -q "incompatible with user namespace"; then
-        ok "--pod + --userns rejected (userns incompatible)"
+# 3b: --pod + --userns → should succeed (same nsenter mechanism)
+if $SDME create --pod=valpod --userns -r ubuntu val-u1 $VFLAG; then
+    dropin="/etc/systemd/system/sdme@val-u1.service.d/nspawn.conf"
+    timeout "$TIMEOUT_BOOT" "$SDME" start val-u1 -t "$TIMEOUT_BOOT" $VFLAG 2>&1
+    if [[ -f "$dropin" ]] && grep -q "nsenter --net=" "$dropin" \
+            && grep -q -- "--private-users=pick" "$dropin"; then
+        ok "--pod + --userns: nsenter + userns in drop-in"
     else
-        fail "--pod + --userns: unexpected error: $err"
+        fail "--pod + --userns: expected nsenter and --private-users=pick in drop-in"
     fi
+    cleanup_container val-u1
+else
+    fail "--pod + --userns should succeed"
 fi
 
 # 3c: --oci-pod without --private-network → should error (nspawn strips

@@ -25,6 +25,10 @@ pub struct NetworkConfig {
     pub network_zone: Option<String>,
     /// Port forwarding rules (`--port=\[proto:\]host\[:container\]`)
     pub ports: Vec<String>,
+    /// Pod name (nspawn-level), if any.
+    pub pod: String,
+    /// Pod name (OCI app-level), if any.
+    pub oci_pod: String,
 }
 
 impl NetworkConfig {
@@ -51,10 +55,17 @@ impl NetworkConfig {
             network_bridge: state.get_nonempty("NETWORK_BRIDGE").map(String::from),
             network_zone: state.get_nonempty("NETWORK_ZONE").map(String::from),
             ports: state.get_list("PORTS", ','),
+            pod: state.get("POD").unwrap_or("").to_string(),
+            oci_pod: state.get("OCI_POD").unwrap_or("").to_string(),
         }
     }
 
     /// Write network config into a state's key-value pairs.
+    ///
+    /// Note: `pod` and `oci_pod` are read-only metadata populated by
+    /// `from_state`. They are written separately during container creation
+    /// (see `containers/create.rs`) and are not part of the network
+    /// config write path.
     pub fn write_to_state(&self, state: &mut State) {
         if self.private_network {
             state.set("PRIVATE_NETWORK", "1");
@@ -485,6 +496,8 @@ mod tests {
             network_bridge: Some("br0".to_string()),
             network_zone: Some("myzone".to_string()),
             ports: vec!["8080:80".to_string(), "tcp:443:443".to_string()],
+            pod: String::new(),
+            oci_pod: String::new(),
         };
         let args = network.to_nspawn_args();
         assert!(args.contains(&"--private-network".to_string()));
@@ -504,6 +517,8 @@ mod tests {
             network_bridge: Some("br0".to_string()),
             network_zone: None,
             ports: vec!["8080:80".to_string(), "443:443".to_string()],
+            pod: String::new(),
+            oci_pod: String::new(),
         };
 
         let mut state = State::new();
