@@ -242,11 +242,31 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         };
 
         // IP addresses (only for running containers with a network interface).
-        let addresses = if status == "running" && network.has_interface() {
+        let mut addresses = if status == "running" && network.has_interface() {
             systemd::get_machine_addresses(name)
         } else {
             Vec::new()
         };
+
+        // For pod containers: if the pod has external networking and the
+        // container itself has no addresses, show the pod's addresses.
+        if addresses.is_empty() && status == "running" {
+            let pod_name = if !pod.is_empty() {
+                Some(pod.as_str())
+            } else if !oci_pod.is_empty() {
+                Some(oci_pod.as_str())
+            } else {
+                None
+            };
+            if let Some(pn) = pod_name {
+                let pod_state_path = datadir.join("pods").join(pn).join("state");
+                if let Ok(ps) = crate::State::read_from(&pod_state_path) {
+                    if ps.get("NET_MODE").is_some() {
+                        addresses = crate::pod::read_pod_addresses(pn);
+                    }
+                }
+            }
+        }
 
         // Detect OCI apps from the container's rootfs overlay.
         // Try merged (running), then upper (stopped, modified), then base rootfs.

@@ -77,12 +77,15 @@ impl fmt::Display for NetMode {
 
 /// Derive the host-side veth interface name for a pod.
 ///
-/// Veth mode: `ve-{pod}`. Zone mode: `vb-{pod}`.
+/// Veth mode: `ve-pod-{pod}`. Zone mode: `vb-pod-{pod}`.
+/// The `pod` infix prevents collisions with nspawn's `ve-{container}` /
+/// `vb-{container}` names. networkd's default configs match `ve-*` and
+/// `vb-*` globs, so the infix does not break auto-configuration.
 /// Truncated to 15 characters (IFNAMSIZ - 1 for the null terminator).
 pub fn host_iface_name(pod_name: &str, mode: NetMode) -> String {
     let prefix = match mode {
-        NetMode::Veth => "ve-",
-        NetMode::Zone => "vb-",
+        NetMode::Veth => "ve-pod-",
+        NetMode::Zone => "vb-pod-",
     };
     let mut name = format!("{prefix}{pod_name}");
     name.truncate(IFNAMSIZ);
@@ -146,16 +149,37 @@ fn run_cmd_ok(program: &str, args: &[&str], verbose: bool) -> bool {
         .unwrap_or(false)
 }
 
-/// Information about a listed pod.
+/// A container that belongs to a pod, as shown by `sdme pod ls --json`.
+#[derive(serde::Serialize)]
+pub struct PodContainer {
+    /// Container name.
+    pub name: String,
+    /// How the container joins the pod: "pod" or "oci-pod".
+    pub pod_mode: String,
+}
+
+/// Information about a listed pod, as shown by `sdme pod ls`.
+#[derive(serde::Serialize)]
 pub struct PodInfo {
     /// Pod name.
     pub name: String,
-    /// Human-readable creation timestamp.
+    /// Unix timestamp (seconds since epoch) of pod creation.
     pub created: String,
+    /// Human-readable creation timestamp (`YYYY-MM-DD HH:MM`).
+    pub created_at: String,
     /// Whether the pod's network namespace is currently active.
     pub active: bool,
-    /// Network attach mode, if external connectivity is configured.
-    pub net_mode: Option<NetMode>,
+    /// Network attach mode: "veth", "zone", or empty string.
+    pub net_mode: String,
+    /// Zone name (zone mode only), or empty string.
+    pub net_zone: String,
+    /// IP addresses assigned to host0 in the pod's netns.
+    ///
+    /// Empty when the pod is inactive, has no external networking, or
+    /// DHCP has not yet assigned an address.
+    pub addresses: Vec<String>,
+    /// Containers that belong to this pod.
+    pub containers: Vec<PodContainer>,
 }
 
 /// Create a new pod: allocate a network namespace with loopback up,
@@ -225,27 +249,112 @@ pub fn list(datadir: &Path) -> Result<Vec<PodInfo>> {
         if !state_path.exists() {
             continue;
         }
-        let (created, net_mode) = match State::read_from(&state_path) {
+        let (created, net_mode, net_zone) = match State::read_from(&state_path) {
             Ok(s) => {
                 let created = s.get("CREATED").unwrap_or("").to_string();
-                let net_mode = s.get("NET_MODE").and_then(NetMode::from_str);
-                (created, net_mode)
+                let net_mode = s.get("NET_MODE").unwrap_or("").to_string();
+                let net_zone = s.get("NET_ZONE").unwrap_or("").to_string();
+                (created, net_mode, net_zone)
             }
-            Err(_) => (String::new(), None),
+            Err(_) => (String::new(), String::new(), String::new()),
         };
 
         let runtime_path = Path::new(RUNTIME_DIR).join(&name).join("netns");
         let active = runtime_path.exists();
 
+        // Read pod addresses if networking is attached and the pod is active.
+        let addresses = if active && !net_mode.is_empty() {
+            read_pod_addresses(&name)
+        } else {
+            Vec::new()
+        };
+
+        let created_at = crate::format_timestamp(&created);
         entries.push(PodInfo {
             name,
             created,
+            created_at,
             active,
             net_mode,
+            net_zone,
+            addresses,
+            containers: Vec::new(),
         });
     }
+
+    // Scan container state files for pod membership.
+    let ct_state_dir = datadir.join("state");
+    if ct_state_dir.is_dir() {
+        if let Ok(ct_entries) = fs::read_dir(&ct_state_dir) {
+            for ce in ct_entries.flatten() {
+                if let Ok(ct_state) = State::read_from(&ce.path()) {
+                    let ct_name = match ct_state.get("NAME") {
+                        Some(n) => n.to_string(),
+                        None => ce.file_name().to_string_lossy().into_owned(),
+                    };
+                    if let Some(pod_name) = ct_state.get("POD").filter(|s| !s.is_empty()) {
+                        if let Some(pod) = entries.iter_mut().find(|p| p.name == pod_name) {
+                            pod.containers.push(PodContainer {
+                                name: ct_name.clone(),
+                                pod_mode: "pod".to_string(),
+                            });
+                        }
+                    }
+                    if let Some(pod_name) = ct_state.get("OCI_POD").filter(|s| !s.is_empty()) {
+                        if let Some(pod) = entries.iter_mut().find(|p| p.name == pod_name) {
+                            pod.containers.push(PodContainer {
+                                name: ct_name,
+                                pod_mode: "oci-pod".to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort containers within each pod for deterministic output.
+    for pod in &mut entries {
+        pod.containers.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(entries)
+}
+
+/// Read IP addresses of `host0` in a pod's network namespace.
+///
+/// Returns addresses (without prefix length), both IPv4 and IPv6,
+/// excluding link-local (fe80::/10). Returns an empty vec if the
+/// interface has no addresses or the command fails.
+pub fn read_pod_addresses(name: &str) -> Vec<String> {
+    let netns_path = runtime_path(name);
+    let output = Command::new("nsenter")
+        .args(["--net", &netns_path, "ip", "-o", "addr", "show", "host0"])
+        .output();
+    let mut addrs = Vec::new();
+    if let Ok(out) = output {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            // Each line: "N: host0    inet 10.0.0.2/28 ..." or
+            //            "N: host0    inet6 fd00::1/64 ..."
+            // We want the token after "inet" or "inet6", stripped of /prefix.
+            for line in text.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                for (i, &p) in parts.iter().enumerate() {
+                    if (p == "inet" || p == "inet6") && i + 1 < parts.len() {
+                        if let Some(ip) = parts[i + 1].split('/').next() {
+                            // Skip link-local IPv6 (fe80::/10).
+                            if !ip.starts_with("fe80:") {
+                                addrs.push(ip.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    addrs
 }
 
 /// Remove a pod.
@@ -958,20 +1067,20 @@ mod tests {
 
     #[test]
     fn test_host_iface_name_veth_short() {
-        assert_eq!(host_iface_name("mypod", NetMode::Veth), "ve-mypod");
+        assert_eq!(host_iface_name("mypod", NetMode::Veth), "ve-pod-mypod");
     }
 
     #[test]
     fn test_host_iface_name_zone_short() {
-        assert_eq!(host_iface_name("mypod", NetMode::Zone), "vb-mypod");
+        assert_eq!(host_iface_name("mypod", NetMode::Zone), "vb-pod-mypod");
     }
 
     #[test]
     fn test_host_iface_name_truncation() {
-        // "ve-" (3) + 12 chars = 15 = IFNAMSIZ
+        // "ve-pod-" (7) + 8 chars = 15 = IFNAMSIZ
         assert_eq!(
             host_iface_name("averylongpodname", NetMode::Veth),
-            "ve-averylongpod"
+            "ve-pod-averylon"
         );
         assert_eq!(
             host_iface_name("averylongpodname", NetMode::Veth).len(),
@@ -981,15 +1090,12 @@ mod tests {
 
     #[test]
     fn test_host_iface_name_exact_limit() {
-        // "ve-" (3) + 12 chars = exactly 15
+        // "ve-pod-" (7) + 8 chars = exactly 15
         assert_eq!(
-            host_iface_name("123456789012", NetMode::Veth),
-            "ve-123456789012"
+            host_iface_name("12345678", NetMode::Veth),
+            "ve-pod-12345678"
         );
-        assert_eq!(
-            host_iface_name("123456789012", NetMode::Veth).len(),
-            IFNAMSIZ
-        );
+        assert_eq!(host_iface_name("12345678", NetMode::Veth).len(), IFNAMSIZ);
     }
 
     // --- net_attach / net_detach error path tests ---
@@ -1011,7 +1117,7 @@ mod tests {
         fs::create_dir_all(&pod_dir).unwrap();
         fs::write(
             pod_dir.join("state"),
-            "CREATED=1234\nNET_MODE=veth\nNET_HOST_IFACE=ve-mypod\n",
+            "CREATED=1234\nNET_MODE=veth\nNET_HOST_IFACE=ve-pod-mypod\n",
         )
         .unwrap();
 
@@ -1047,7 +1153,7 @@ mod tests {
         );
     }
 
-    // --- list with net_mode ---
+    // --- list with net_mode and containers ---
 
     #[test]
     fn test_list_with_net_mode() {
@@ -1058,7 +1164,7 @@ mod tests {
         fs::create_dir_all(&alpha_dir).unwrap();
         fs::write(
             alpha_dir.join("state"),
-            "CREATED=1000\nNET_MODE=veth\nNET_HOST_IFACE=ve-alpha\n",
+            "CREATED=1000\nNET_MODE=veth\nNET_HOST_IFACE=ve-pod-alpha\n",
         )
         .unwrap();
 
@@ -1070,7 +1176,7 @@ mod tests {
         fs::create_dir_all(&gamma_dir).unwrap();
         fs::write(
             gamma_dir.join("state"),
-            "CREATED=3000\nNET_MODE=zone\nNET_ZONE=myzone\nNET_HOST_IFACE=vb-gamma\n",
+            "CREATED=3000\nNET_MODE=zone\nNET_ZONE=myzone\nNET_HOST_IFACE=vb-pod-gamma\n",
         )
         .unwrap();
 
@@ -1078,12 +1184,38 @@ mod tests {
         assert_eq!(pods.len(), 3);
 
         assert_eq!(pods[0].name, "alpha");
-        assert_eq!(pods[0].net_mode, Some(NetMode::Veth));
+        assert_eq!(pods[0].net_mode, "veth");
 
         assert_eq!(pods[1].name, "beta");
-        assert_eq!(pods[1].net_mode, None);
+        assert_eq!(pods[1].net_mode, "");
 
         assert_eq!(pods[2].name, "gamma");
-        assert_eq!(pods[2].net_mode, Some(NetMode::Zone));
+        assert_eq!(pods[2].net_mode, "zone");
+        assert_eq!(pods[2].net_zone, "myzone");
+    }
+
+    #[test]
+    fn test_list_with_containers() {
+        let tmp = tmp();
+        let state_dir = tmp.path().join(STATE_SUBDIR);
+
+        let pod_dir = state_dir.join("mypod");
+        fs::create_dir_all(&pod_dir).unwrap();
+        fs::write(pod_dir.join("state"), "CREATED=1000\n").unwrap();
+
+        // Create container state files referencing the pod.
+        let ct_dir = tmp.path().join("state");
+        fs::create_dir_all(&ct_dir).unwrap();
+        fs::write(ct_dir.join("app1"), "NAME=app1\nPOD=mypod\n").unwrap();
+        fs::write(ct_dir.join("app2"), "NAME=app2\nOCI_POD=mypod\n").unwrap();
+        fs::write(ct_dir.join("other"), "NAME=other\n").unwrap();
+
+        let pods = list(tmp.path()).unwrap();
+        assert_eq!(pods.len(), 1);
+        assert_eq!(pods[0].containers.len(), 2);
+        assert_eq!(pods[0].containers[0].name, "app1");
+        assert_eq!(pods[0].containers[0].pod_mode, "pod");
+        assert_eq!(pods[0].containers[1].name, "app2");
+        assert_eq!(pods[0].containers[1].pod_mode, "oci-pod");
     }
 }

@@ -236,5 +236,32 @@ container referencing the pod starts.
 sudo sdme pod ls
 ```
 
-The NET column shows the networking mode (veth, zone) or is empty
-for loopback-only pods.
+The NET column shows the networking mode and IP addresses, e.g.
+`veth (10.0.0.2)` or `zone (10.0.0.3)`, or is empty for
+loopback-only pods. Use `--json` or `--json-pretty` for structured
+output including container membership.
+
+### Zone interop with regular containers
+
+Pods using zone mode share the same bridge as regular containers
+using `--network-zone`. They can reach each other directly:
+
+```sh
+sudo sdme pod new mypod
+sudo sdme pod net attach mypod zone myzone
+sudo sdme new mybox --pod mypod
+
+sudo sdme new standalone -r ubuntu --network-zone myzone
+```
+
+Both `mybox` (in the pod) and `standalone` (regular container) are
+on the `vz-myzone` bridge and can communicate.
+
+### Creating a pod with networking
+
+Use `--attach` to combine pod creation and network attachment:
+
+```sh
+sudo sdme pod new mypod --attach veth
+sudo sdme pod new mypod --attach zone --zone myzone
+```

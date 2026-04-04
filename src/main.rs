@@ -1244,9 +1244,22 @@ enum PodCommand {
     New {
         /// Pod name
         name: String,
+        /// Attach external networking immediately after creation
+        #[arg(long, value_enum)]
+        attach: Option<PodNetMode>,
+        /// Zone name (required when --attach zone)
+        #[arg(long)]
+        zone: Option<String>,
     },
     /// List pods
-    Ls,
+    Ls {
+        /// Output as compact JSON
+        #[arg(long)]
+        json: bool,
+        /// Output as pretty-printed JSON
+        #[arg(long, conflicts_with = "json")]
+        json_pretty: bool,
+    },
     /// Remove one or more pods
     Rm {
         /// Pod names
@@ -2275,27 +2288,77 @@ fn run() -> Result<()> {
             })?;
         }
         Command::Pod(cmd) => match cmd {
-            PodCommand::New { name } => {
+            PodCommand::New { name, attach, zone } => {
                 pod::create(&cfg.datadir, &name, cli.verbose)?;
                 eprintln!("created pod '{name}'");
+                if let Some(mode) = attach {
+                    let net_mode = match mode {
+                        PodNetMode::Veth => pod::NetMode::Veth,
+                        PodNetMode::Zone => pod::NetMode::Zone,
+                    };
+                    if net_mode == pod::NetMode::Zone && zone.is_none() {
+                        bail!(
+                            "--attach zone requires --zone <name>: \
+                             sdme pod new <pod> --attach zone --zone <name>"
+                        );
+                    }
+                    pod::net_attach(&cfg.datadir, &name, net_mode, zone.as_deref(), cli.verbose)?;
+                    let mode_str = match net_mode {
+                        pod::NetMode::Veth => "veth".to_string(),
+                        pod::NetMode::Zone => format!("zone {}", zone.as_deref().unwrap_or("")),
+                    };
+                    eprintln!("attached {mode_str} networking");
+                }
                 println!("{name}");
             }
-            PodCommand::Ls => {
+            PodCommand::Ls { json, json_pretty } => {
+                let json = json || (!json_pretty && cfg.default_output_format == "json");
+                let json_pretty =
+                    json_pretty || (!json && cfg.default_output_format == "json-pretty");
                 let pods = pod::list(&cfg.datadir)?;
-                if pods.is_empty() {
+                if json || json_pretty {
+                    let output = if json_pretty {
+                        serde_json::to_string_pretty(&pods)?
+                    } else {
+                        serde_json::to_string(&pods)?
+                    };
+                    println!("{output}");
+                } else if pods.is_empty() {
                     println!("no pods found");
                 } else {
                     let name_w = pods.iter().map(|p| p.name.len()).max().unwrap().max(4);
-                    println!("{:<name_w$}  ACTIVE  NET   CREATED", "NAME");
-                    for p in &pods {
+                    let net_w = pods.iter().map(|p| p.net_mode.len()).max().unwrap().max(3);
+                    let zone_w = pods.iter().map(|p| p.net_zone.len()).max().unwrap().max(4);
+                    let addr_display: Vec<String> = pods
+                        .iter()
+                        .map(|p| {
+                            if p.addresses.is_empty() {
+                                "-".to_string()
+                            } else {
+                                p.addresses.join(",")
+                            }
+                        })
+                        .collect();
+                    let addr_w = addr_display.iter().map(|a| a.len()).max().unwrap().max(9);
+                    println!(
+                        "{:<name_w$}  ACTIVE  {:<net_w$}  {:<zone_w$}  {:<addr_w$}  CREATED",
+                        "NAME", "NET", "ZONE", "ADDRESSES"
+                    );
+                    for (i, p) in pods.iter().enumerate() {
                         let active = if p.active { "yes" } else { "no" };
-                        let net = match &p.net_mode {
-                            Some(m) => m.to_string(),
-                            None => String::new(),
+                        let net = if p.net_mode.is_empty() {
+                            "-"
+                        } else {
+                            &p.net_mode
+                        };
+                        let zone = if p.net_zone.is_empty() {
+                            "-"
+                        } else {
+                            &p.net_zone
                         };
                         println!(
-                            "{:<name_w$}  {:<6}  {:<4}  {}",
-                            p.name, active, net, p.created
+                            "{:<name_w$}  {:<6}  {:<net_w$}  {:<zone_w$}  {:<addr_w$}  {}",
+                            p.name, active, net, zone, addr_display[i], p.created_at
                         );
                     }
                 }

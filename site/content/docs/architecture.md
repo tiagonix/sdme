@@ -820,10 +820,10 @@ Two modes are available:
   veth mode:                         zone mode:
 
   +-- host --------------------+     +-- host ----------------+
-  | ve-{pod}                   |     | vz-{zone} (bridge)     |
+  | ve-pod-{pod}               |     | vz-{zone} (bridge)     |
   |   IPMasquerade (networkd)  |     |   IPMasquerade (networkd)
-  +----+-----------------------+     |   +-- vb-pod1          |
-       | (veth pair)                 |   +-- vb-pod2          |
+  +----+-----------------------+     |   +-- vb-pod-pod1      |
+       | (veth pair)                 |   +-- vb-pod-pod2      |
   +----+-----------------------+     +---+--+--+--------------+
   | host0                      |         |     |
   | pod netns (lo + host0)     |     +---+--+  +---+--+
@@ -833,16 +833,17 @@ Two modes are available:
 
 **How it works.** sdme creates the veth pair and moves the pod end
 into the netns using `ip link set host0 netns /run/sdme/pods/{name}/netns`.
-Interface names follow systemd-nspawn conventions so that
-systemd-networkd on the host auto-configures via its default
-`.network` files:
+Interface names use a `pod` infix to avoid collisions with nspawn's
+per-container interfaces (`ve-{container}`, `vb-{container}`). The
+`ve-*` and `vb-*` prefixes are preserved so systemd-networkd's default
+`.network` files match automatically:
 
 ```
-Mode   Host-side iface   networkd config
------  ----------------  -------------------------
-veth   ve-{pod}          80-container-ve.network
-zone   vb-{pod}          80-container-vb.network
-zone   vz-{zone} bridge  80-container-vz.network
+Mode   Host-side iface      networkd config
+-----  -------------------  -------------------------
+veth   ve-pod-{pod}         80-container-ve.network
+zone   vb-pod-{pod}         80-container-vb.network
+zone   vz-{zone} (bridge)   80-container-vz.network
 ```
 
 The host's networkd handles DHCP serving, NAT (`IPMasquerade=both`),
@@ -865,6 +866,12 @@ the netns network config with default route and nspawn's masquerade.
 name), and `NET_ZONE` (zone name, for zone mode). These keys persist
 across reboots so `ensure_runtime` can restore the networking.
 
+**Zone interop.** Regular containers using `--network-zone=NAME` and
+pods using `pod net attach ... zone NAME` share the same `vz-NAME`
+bridge and can reach each other. Pod interfaces use `vb-pod-{pod}` on
+the host while container interfaces use `vb-{container}` (assigned by
+nspawn), so there are no naming collisions.
+
 **Interrupt safety.** The attach sequence (create veth, move into
 netns, bring up interfaces, start DHCP service) completes in under a
 second. It runs as an atomic block without interrupt checks between
@@ -884,6 +891,19 @@ gone. When the first container referencing the pod starts,
 `ensure_runtime` recreates the netns and, if `NET_MODE` is set in the
 persistent state, also recreates the veth pair and restarts the DHCP
 service. The pod resumes with the same networking mode.
+
+**systemd-networkd dependency.** Pod external connectivity relies on
+the host's systemd-networkd for DHCP serving and NAT. These are the
+same risks as any container using `--network-zone`:
+
+- networkd restart: brief disruption, auto-recovers. Existing kernel
+  routes survive. IPMasquerade nftables rules are re-applied on
+  restart. Pod-side DHCP is managed by dhcpcd independently.
+- networkd stopped: existing connections continue (kernel routing
+  intact). New DHCP requests from dhcpcd may fail (no server).
+  Masquerade rules may be cleaned up.
+- Admin changes to networkd `.network` files that override the default
+  `vz-*` or `ve-*` configs could change behavior.
 
 ## 11. Bind Mounts and Environment Variables
 
