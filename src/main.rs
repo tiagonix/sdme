@@ -1971,14 +1971,14 @@ fn run() -> Result<()> {
             if started {
                 let boot_timeout =
                     std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-                create_and_start(
-                    &cfg.datadir,
-                    &name,
-                    cfg.tasks_max,
+                create_and_start(&BootConfig {
+                    datadir: &cfg.datadir,
+                    name: &name,
+                    tasks_max: cfg.tasks_max,
                     boot_timeout,
-                    cfg.stop_timeout_terminate,
-                    cli.verbose,
-                )?;
+                    stop_timeout: cfg.stop_timeout_terminate,
+                    verbose: cli.verbose,
+                })?;
             }
             println!("{name}");
         }
@@ -2032,14 +2032,14 @@ fn run() -> Result<()> {
             let verbose = cli.verbose;
             for_each_container(datadir, &targets, "starting", "started", |name| {
                 containers::ensure_exists(datadir, name)?;
-                start_and_await_boot(
+                start_and_await_boot(&BootConfig {
                     datadir,
                     name,
-                    cfg.tasks_max,
+                    tasks_max: cfg.tasks_max,
                     boot_timeout,
-                    cfg.stop_timeout_terminate,
+                    stop_timeout: cfg.stop_timeout_terminate,
                     verbose,
-                )
+                })
             })?;
         }
         Command::Enable { names } => {
@@ -2092,14 +2092,14 @@ fn run() -> Result<()> {
                 eprintln!("starting '{name}'");
                 let boot_timeout =
                     std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-                start_and_await_boot(
-                    &cfg.datadir,
-                    &name,
-                    cfg.tasks_max,
+                start_and_await_boot(&BootConfig {
+                    datadir: &cfg.datadir,
+                    name: &name,
+                    tasks_max: cfg.tasks_max,
                     boot_timeout,
-                    cfg.stop_timeout_terminate,
-                    cli.verbose,
-                )?;
+                    stop_timeout: cfg.stop_timeout_terminate,
+                    verbose: cli.verbose,
+                })?;
             }
 
             if let Some(ref oci_app) = oci {
@@ -2273,14 +2273,14 @@ fn run() -> Result<()> {
             }
 
             let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-            create_and_start(
-                &cfg.datadir,
-                &name,
-                cfg.tasks_max,
+            create_and_start(&BootConfig {
+                datadir: &cfg.datadir,
+                name: &name,
+                tasks_max: cfg.tasks_max,
                 boot_timeout,
-                cfg.stop_timeout_terminate,
-                cli.verbose,
-            )?;
+                stop_timeout: cfg.stop_timeout_terminate,
+                verbose: cli.verbose,
+            })?;
 
             eprintln!("joining '{name}'");
             let shell_opts = containers::ShellOptions {
@@ -2465,14 +2465,14 @@ fn run() -> Result<()> {
                     failed = true;
                     continue;
                 }
-                if let Err(e) = start_and_await_boot(
+                if let Err(e) = start_and_await_boot(&BootConfig {
                     datadir,
-                    &name,
-                    cfg.tasks_max,
+                    name: &name,
+                    tasks_max: cfg.tasks_max,
                     boot_timeout,
-                    cfg.stop_timeout_terminate,
+                    stop_timeout: cfg.stop_timeout_terminate,
                     verbose,
-                ) {
+                }) {
                     eprintln!("error: {name}: start failed: {e}");
                     failed = true;
                 } else {
@@ -2668,14 +2668,14 @@ fn run() -> Result<()> {
                 eprintln!("starting '{name}'");
                 let boot_timeout =
                     std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-                start_and_await_boot(
-                    &cfg.datadir,
-                    &name,
-                    cfg.tasks_max,
+                start_and_await_boot(&BootConfig {
+                    datadir: &cfg.datadir,
+                    name: &name,
+                    tasks_max: cfg.tasks_max,
                     boot_timeout,
-                    cfg.stop_timeout_terminate,
-                    cli.verbose,
-                )?;
+                    stop_timeout: cfg.stop_timeout_terminate,
+                    verbose: cli.verbose,
+                })?;
                 eprintln!("joining '{name}'");
                 let shell_opts = containers::ShellOptions {
                     datadir: &cfg.datadir,

@@ -134,20 +134,37 @@ pub(crate) fn for_each_container(
     Ok(())
 }
 
-/// Start a container and wait for it to boot.
+/// Configuration for starting a container and awaiting boot readiness.
+pub(crate) struct BootConfig<'a> {
+    /// Data directory containing container state.
+    pub datadir: &'a Path,
+    /// Container name.
+    pub name: &'a str,
+    /// Maximum number of tasks (PIDs) for the container unit.
+    pub tasks_max: u32,
+    /// Boot timeout.
+    pub boot_timeout: std::time::Duration,
+    /// Stop timeout in seconds (used on boot failure).
+    pub stop_timeout: u64,
+    /// Enable verbose output.
+    pub verbose: bool,
+}
+
+/// Start a container and wait for it to finish booting.
 ///
-/// On boot failure (or Ctrl+C), resets the interrupt flag and stops the
-/// container so it doesn't linger in a half-booted state. If the container
+/// If boot fails and the container has already stopped, it is cleaned up so it
+/// doesn't linger in a half-booted state. If the container
 /// is still running at timeout (e.g. slow first-boot userns chown), it is
 /// left running and the user is told how to check or increase the timeout.
-pub(crate) fn start_and_await_boot(
-    datadir: &Path,
-    name: &str,
-    tasks_max: u32,
-    boot_timeout: std::time::Duration,
-    stop_timeout: u64,
-    verbose: bool,
-) -> Result<()> {
+pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
+    let BootConfig {
+        datadir,
+        name,
+        tasks_max,
+        boot_timeout,
+        stop_timeout,
+        verbose,
+    } = *cfg;
     // Hold shared lock to prevent `sdme rm` during start+boot window.
     let _lock = lock::lock_shared(datadir, "containers", name)
         .with_context(|| format!("cannot lock container '{name}' for starting"))?;
@@ -191,23 +208,15 @@ pub(crate) fn start_and_await_boot(
 ///
 /// Called by `create --started` and `new`. On boot failure the container
 /// is removed because the caller asked for a running container.
-pub(crate) fn create_and_start(
-    datadir: &Path,
-    name: &str,
-    tasks_max: u32,
-    boot_timeout: std::time::Duration,
-    stop_timeout: u64,
-    verbose: bool,
-) -> Result<()> {
-    eprintln!("starting '{name}'");
-    if let Err(e) = start_and_await_boot(
+pub(crate) fn create_and_start(cfg: &BootConfig) -> Result<()> {
+    let BootConfig {
         datadir,
         name,
-        tasks_max,
-        boot_timeout,
-        stop_timeout,
         verbose,
-    ) {
+        ..
+    } = *cfg;
+    eprintln!("starting '{name}'");
+    if let Err(e) = start_and_await_boot(cfg) {
         eprintln!("start failed, removing '{name}'");
         let _ = containers::remove(datadir, name, verbose);
         return Err(e);

@@ -500,19 +500,31 @@ fn remove_resolv_conf_from(dir: &Path, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+/// Target location for writing or removing pod DNS resolv.conf.
+pub struct ResolvConfTarget<'a> {
+    /// Data directory containing container state.
+    pub datadir: &'a Path,
+    /// Container name.
+    pub container: &'a str,
+    /// Base layer name ("upper" or "merged").
+    pub base: &'a str,
+    /// Enable verbose output.
+    pub verbose: bool,
+}
+
 /// Write pod DNS resolv.conf into a container's overlayfs.
 ///
 /// For `--pod` containers, writes to `{base}/etc/resolv.conf`.
 /// For `--oci-pod` containers, writes to each OCI app's chroot:
 /// `{base}/oci/apps/{app}/root/etc/resolv.conf`.
 /// Skips kube containers (they manage their own DNS).
-pub fn write_container_resolv_conf(
-    datadir: &Path,
-    container: &str,
-    base: &str,
-    content: &str,
-    verbose: bool,
-) -> Result<()> {
+pub fn write_container_resolv_conf(target: &ResolvConfTarget, content: &str) -> Result<()> {
+    let ResolvConfTarget {
+        datadir,
+        container,
+        base,
+        verbose,
+    } = *target;
     let state_path = datadir.join("state").join(container);
     let state = State::read_from(&state_path)?;
 
@@ -546,12 +558,13 @@ pub fn write_container_resolv_conf(
 ///
 /// Mirrors `write_container_resolv_conf`: removes from container root
 /// for `--pod`, from each OCI app chroot for `--oci-pod`. Skips kube.
-fn remove_container_resolv_conf(
-    datadir: &Path,
-    container: &str,
-    base: &str,
-    verbose: bool,
-) -> Result<()> {
+fn remove_container_resolv_conf(target: &ResolvConfTarget) -> Result<()> {
+    let ResolvConfTarget {
+        datadir,
+        container,
+        base,
+        verbose,
+    } = *target;
     let state_path = datadir.join("state").join(container);
     let state = match State::read_from(&state_path) {
         Ok(s) => s,
@@ -919,9 +932,13 @@ pub fn net_attach(
             let _lock = crate::lock::lock_exclusive(datadir, "containers", ct);
             let merged = datadir.join("containers").join(ct).join("merged");
             if merged.exists() {
-                if let Err(e) =
-                    write_container_resolv_conf(datadir, ct, "merged", &content, verbose)
-                {
+                let target = ResolvConfTarget {
+                    datadir,
+                    container: ct,
+                    base: "merged",
+                    verbose,
+                };
+                if let Err(e) = write_container_resolv_conf(&target, &content) {
                     eprintln!("warning: failed to update resolv.conf for {ct}: {e}");
                 }
             }
@@ -979,7 +996,13 @@ pub fn net_detach(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         let _lock = crate::lock::lock_exclusive(datadir, "containers", ct);
         let merged = datadir.join("containers").join(ct).join("merged");
         if merged.exists() {
-            if let Err(e) = remove_container_resolv_conf(datadir, ct, "merged", verbose) {
+            let target = ResolvConfTarget {
+                datadir,
+                container: ct,
+                base: "merged",
+                verbose,
+            };
+            if let Err(e) = remove_container_resolv_conf(&target) {
                 if verbose {
                     eprintln!("warning: failed to remove resolv.conf for {ct}: {e}");
                 }

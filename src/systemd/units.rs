@@ -267,7 +267,15 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
             if let Some(dns) = ps.get("NET_DNS") {
                 let search = ps.get("NET_SEARCH").unwrap_or("");
                 let content = crate::pod::generate_resolv_conf(dns, search);
-                crate::pod::write_container_resolv_conf(datadir, name, "upper", &content, verbose)?;
+                crate::pod::write_container_resolv_conf(
+                    &crate::pod::ResolvConfTarget {
+                        datadir,
+                        container: name,
+                        base: "upper",
+                        verbose,
+                    },
+                    &content,
+                )?;
                 if let Some(arg) = net_args
                     .iter_mut()
                     .find(|a| a.starts_with("--resolv-conf="))
@@ -309,7 +317,13 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
                     let search = ps.get("NET_SEARCH").unwrap_or("");
                     let content = crate::pod::generate_resolv_conf(dns, search);
                     crate::pod::write_container_resolv_conf(
-                        datadir, name, "upper", &content, verbose,
+                        &crate::pod::ResolvConfTarget {
+                            datadir,
+                            container: name,
+                            base: "upper",
+                            verbose,
+                        },
+                        &content,
                     )?;
                 }
             }
